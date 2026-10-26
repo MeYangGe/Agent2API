@@ -462,12 +462,31 @@ impl BillingService {
     /// 用户没配时是空数组 —— 缺省链在插件里（「上游此刻有哪些免费模型」是
     /// 上游知识，不该在网关留一份会过时的名单）。
     pub async fn workbuddy_daily_activity(&self, session: &Value, mode: WorkbuddyActivity) -> Value {
+        let mut blocked = None;
+        let mode = if mode != WorkbuddyActivity::Claim {
+            match keepalive::authorized_models() {
+                Ok(_) => mode,
+                Err(error) if mode == WorkbuddyActivity::Keepalive => return activity_failure(&error.message),
+                Err(error) => {
+                    blocked = Some(error.message);
+                    WorkbuddyActivity::Claim
+                }
+            }
+        } else { mode };
         let payload = json!({
             "mode": mode.as_str(),
             "models": keepalive::models(),
         });
         match self.admin(session, "activity.run", &payload).await {
-            Ok(result) => result,
+            Ok(mut result) => {
+                if let Some(reason) = blocked {
+                    if let Some(activity) = result.get_mut("activity").and_then(Value::as_object_mut) {
+                        activity.insert("error".to_string(), json!(reason));
+                        activity.insert("modelCallsSkipped".to_string(), Value::Bool(true));
+                    }
+                }
+                result
+            }
             Err(error) => activity_failure(&error.message),
         }
     }

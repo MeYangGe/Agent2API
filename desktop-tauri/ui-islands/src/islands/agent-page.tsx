@@ -7,6 +7,9 @@ import { ProfileEditor } from './agent-editor'
 import { PathDialog } from './agent-path-dialog'
 import { ApplyDialog } from './agent-preview'
 import type { AgentClient, AgentOperation } from './agent-types'
+import { AgentResourcesPanel } from '../../../ui-shared/agent-resources-panel'
+import type { ResourceKind } from '../../../ui-shared/agent-resources'
+import { callJson, toast } from './assistant-state'
 
 function ClientAvatar({client,size = 'md'}:{client:AgentClient;size?:'md'|'lg'}) {
   const [broken,setBroken] = React.useState(false)
@@ -57,13 +60,19 @@ function ClientDetail({client}:{client:AgentClient}) {
   const store = React.useSyncExternalStore(subscribeAgentStore,getAgentStore,getAgentStore)
   const [pathOpen,setPathOpen] = React.useState(false)
   const [restore,setRestore] = React.useState<AgentOperation|null>(null)
+  const [tab, setTab] = React.useState<string>('config')
   const busy = Boolean(store.busy)||store.loading
   return <>
     <div className='agent-dhead'><ClientAvatar client={client} size='lg'/><div className='agent-dtitle'><h3>{client.name}<Badge variant={client.writable?'success':'outline'}>{detectionLabel(client)}</Badge></h3>
       <div className='agent-meta'><span>{client.vendor}</span>{client.version&&<span>{client.version}</span>}</div></div>
       <div className='agent-dhead-actions'><Button variant='outline' size='sm' disabled={busy} onClick={()=>void loadPanel()}>{store.loading?t('检测中…'):t('重新检测')}</Button>
         <Button variant='ghost' size='sm' disabled={busy} onClick={()=>setPathOpen(true)}>{t('指定配置路径')}</Button></div></div>
+    <SegmentedControl className='mt-3' value={tab} onValueChange={setTab} aria-label={t('客户端管理分类')} options={[
+      { value: 'config', label: t('模型配置') }, { value: 'prompt', label: t('提示词') }, { value: 'skills', label: 'Skill' }, { value: 'mcp', label: 'MCP' },
+    ]} />
     <p className='agent-machine-note'>{t('操作目标：网关所在机器')}{store.hostName?` · ${store.hostName}`:''}</p>
+    {tab !== 'config' ? <AgentResourcesPanel key={tab} clientId={client.id} kind={tab as ResourceKind} capabilities={client.resources}
+      request={callJson} t={t} notify={(text, bad) => toast(text, bad ? 'err' : 'ok')} /> : <>
     <code className='agent-resolved-path'>{client.resolvedPath}</code>
     {client.evidence.length>0&&<ul className='agent-evidence'>{client.evidence.map((evidence,index)=><li key={index}>{evidence}</li>)}</ul>}
     {!client.detected&&<Empty className='agent-empty'><b>{t('未找到客户端程序或配置文件')}</b><p>{t('安装或初始化后可重新检测；自定义安装位置可指定配置路径。')}</p>
@@ -77,6 +86,7 @@ function ClientDetail({client}:{client:AgentClient}) {
       {client.applied.modifiedExternally&&<p className='text-xs text-warning'>{t('客户端文件已有外部修改，自动恢复会拒绝覆盖。')}</p>}
       {client.applied.pendingRecovery&&<p className='text-xs text-warning'>{t('上次应用未完整结束，请先查看恢复预览。')}</p>}
     </div>}
+    </>}
     {pathOpen&&<PathDialog client={client} onClose={()=>setPathOpen(false)}/>}
     {restore&&<ApplyDialog client={client} operation={restore} onClose={()=>setRestore(null)}/>}
   </>

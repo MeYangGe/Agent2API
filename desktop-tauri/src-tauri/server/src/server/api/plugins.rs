@@ -70,7 +70,7 @@ async fn reload_result(enabled: bool) -> Value {
         plugin_host::reload_host(store).await;
     }
     let reloaded = plugin_host::list_packs().iter().filter(|pack| pack.enabled)
-        .all(|pack| plugin_host::host_for_pack(&pack.id).is_some_and(|host| host.status().running));
+        .all(|pack| plugin_host::host_for_pack(&pack.id).is_some_and(|host| host.ready()));
     let mut result = plugin_host::management_snapshot();
     result["ok"] = json!(true);
     result["hostError"] = if enabled && !reloaded {

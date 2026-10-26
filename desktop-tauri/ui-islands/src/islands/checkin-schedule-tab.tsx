@@ -11,6 +11,9 @@ import {
 import { t } from '../i18n'
 import { confirmDialog } from '@ui'
 import { Empty } from '@ui'
+import { callJson } from './assistant-state'
+import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
+import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 
 /**
  * 「定时签到」标签页：总开关 + 条目列表 + 保活模型链 + 猫猫旅行。
@@ -329,6 +332,7 @@ function GripIcon(): React.ReactElement {
 }
 
 function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactElement {
+  const keyState = useModelApiKeys(() => callJson('GET', '/api/model-access/keys'))
   const current = center.keepalive
   const models = store.keepaliveDraft ?? current.models
   const defaults = current.defaultModels ?? []
@@ -363,6 +367,10 @@ function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactEleme
         </Button>
       </CardHeader>
       <div className="ck-panel-pad">
+        <ModelApiKeyField {...keyState} value={current.apiKeyId ?? null} disabled={store.saving}
+          onChange={apiKeyId => { void saveKeepaliveModels(models, apiKeyId) }}
+          onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} id='keepalive-api-key' />
+        {current.authError ? <p role='status' className='text-xs text-destructive'>{current.authError}</p> : null}
         <div className="ck-set-line ck-set-line-top">
           <span className="ck-set-k">模型清单</span>
           <span className="ck-set-v">

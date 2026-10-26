@@ -590,9 +590,9 @@ impl AccountStore {
         // 排在 Cline 之后只是让「拆家类迁移」聚在一起。
         let workbuddy_moved = Self::migrate_workbuddy_intl_accounts(&mut state);
 
-        // ⑥ Qoder 国际版拆家（见 `migrate_qoder_intl_accounts`）：与 ⑤ 同款，
-        // 只改 `provider`、不改 id（Qoder 的 id 本来就带地区段）。
-        let qoder_moved = Self::migrate_qoder_intl_accounts(&mut state);
+        // ⑥ Qoder 地区归位：兼容旧记录，并恢复有明确国内版证据的错分账号。
+        // 只改 provider，不改作为请求历史引用键的账号 id。
+        let qoder_moved = super::qoder_accounts::migrate_accounts(&mut state.accounts);
 
         // ⑦ OfficeAce 账号名自愈（存量记录的 name 曾是十六进制 id，显示名躺在
         // refreshToken 的 claims 里）已随实现搬到插件：插件在登录时就把名字取全，
@@ -663,7 +663,7 @@ impl AccountStore {
             logging::log(
                 "[Accounts]",
                 &format!(
-                    "🔀 Qoder 已拆为中国版 / 国际版两家，{qoder_moved} 个国际版账号已归位\
+                    "🔀 Qoder 已按地区归位 {qoder_moved} 个账号\
                      （凭证、优先级、限流记录与账号 id 均未改动）"
                 ),
             );
@@ -826,7 +826,7 @@ impl AccountStore {
         const LEGACY_WORKBUDDY_ID: &str = "workbuddy";
         let mut moved = 0usize;
         for record in state.accounts.iter_mut() {
-            if record.provider() != LEGACY_WORKBUDDY_ID {
+            if record.provider() != LEGACY_WORKBUDDY_ID || record.has_plugin_secret() {
                 continue;
             }
             let region = crate::server::core::providers::workbuddy::Region::from_edition_id(
@@ -837,46 +837,6 @@ impl AccountStore {
                 continue;
             }
             record.set_provider(provider);
-            moved += 1;
-        }
-        moved
-    }
-
-    /// Qoder 国际版拆家：把 `provider == "qoder"` 且地区为国际版的记录归到
-    /// `qoder-intl`（2026-10，见 `providers::qoder::endpoints` 的模块头）。
-    ///
-    /// ── 判据：记录里的地区，而不是 id 前缀 ─────────────────────
-    /// 拆家前「这个账号属于哪个地区」由记录的 `mode`（兜底 `edition`）字段
-    /// 表达（`Region::from_payload` 的读取口径）。id 虽然也带地区段
-    /// （`qoder-global-…` / `qoder-cn-…`），但那是生成时的快照，记录的权威
-    /// 表达一直是凭证字段 —— 与 WorkBuddy 拆家「判据是 edition」同一取舍。
-    ///
-    /// ── 为什么不改 id（与 `migrate_cline_accounts` 的差别）────────
-    /// Qoder 的 id 生成时已含地区段，两地区的 id 空间天然不相交（同 WorkBuddy
-    /// 拆家的论证）；而 id 是 `requests.account_id` 与请求报表的引用键，改名
-    /// 会让历史记录对不上账号。
-    ///
-    /// ── 幂等 ────────────────────────────────────────────────────
-    /// 判据是数据本身（`provider == qoder && 地区 == 国际`）：迁完就没有
-    /// 这样的记录，再跑一遍返回 0、不写库。
-    fn migrate_qoder_intl_accounts(state: &mut AccountState) -> usize {
-        /// 拆家前的唯一 Qoder provider id（只出现在这里）
-        const LEGACY_QODER_ID: &str = "qoder";
-        let mut moved = 0usize;
-        for record in state.accounts.iter_mut() {
-            if record.provider() != LEGACY_QODER_ID {
-                continue;
-            }
-            let Some(region) =
-                crate::server::core::providers::qoder::endpoints::Region::from_payload(
-                    &record.to_value(),
-                )
-                .ok()
-                .filter(|region| *region == crate::server::core::providers::qoder::endpoints::Region::Global)
-            else {
-                continue;
-            };
-            record.set_provider(region.provider_id());
             moved += 1;
         }
         moved

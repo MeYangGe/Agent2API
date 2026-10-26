@@ -42,6 +42,10 @@ pub struct RequestSource {
 }
 
 impl RequestSource {
+    pub fn is_internal(&self) -> bool {
+        matches!(self.client.as_str(), "model_test" | "assistant" | "assistant_images" | "assistant_title" | "checkin_keepalive")
+    }
+
     pub(super) fn normalized(mut self) -> Self {
         self.client = self.client.trim().to_string();
         self.api_key.id = self.api_key.id.trim().to_string();

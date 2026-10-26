@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Badge, Button, HtmlContent, StatusDot } from '@ui'
 import { t } from '../../i18n'
-import { apiKeyRequestLabel } from './source-filters'
+import { apiKeyRequestLabel, clientRequestLabel } from './source-filters'
 
 export type RequestEntry = {
   id?: string; ts?: number; status?: number; error?: string | null
@@ -240,7 +240,7 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       if (entry.isTest) {
         tags.push(
           <Badge key='test' variant='brand' shape='tag'
-            title={t('这条明细是一次模型测试（人工发起）：走的是真实转发链路，但不计入报表统计')}>{t('测试')}</Badge>,
+            title={t('面板内发起的模型调用，消耗额度并记录 Key，不计入生产报表')}>{clientRequestLabel(entry)}</Badge>,
         )
       }
       // 判据交给悬停面板模块（它要读明细内部字段）；兜底成 attempts > 1：模块没就绪时至少换过
@@ -341,13 +341,13 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       // 空串 = 没有记录（旧行、模型测试、请求未带 UA）。产品名是标识符不翻译，
       // 只有兜底类 `other` 翻成「其它」；空值给占位符而不是空格子。
       const value = String(entry.client ?? '').trim()
-      if (!value) {
+      if (!value && !entry.isTest) {
         return (
           <span key={key} className={`${className} is-empty`}
             title={t('这条明细没有记录来源客户端（旧数据、模型测试，或请求未带 User-Agent）')}>—</span>
         )
       }
-      const label = value === 'other' ? t('其它') : value
+      const label = clientRequestLabel(entry)
       return (
         <span key={key} className={className}
           title={value === 'other'

@@ -45,12 +45,14 @@ import {
 } from './accounts-store'
 import { proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
 import { installListRefresh, refreshList } from './accounts-refresh'
+import { adoptAccountSorting, refreshAccountSorting, syncAccountSorting } from './accounts-sort'
 import { confirmBatchResult, refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
 
 export { refreshList } from './accounts-refresh'
 
 // 状态层原样再导出：视图侧（accounts-page / panels / dialogs）只认本文件这一条路径
 export * from './accounts-store'
+export { saveGroupSortRules as setGroupSortRules } from './accounts-sort'
 
 /**
  * 「未配置查询凭证」的标记（与后端 `providers::adapter::USAGE_NOT_CONFIGURED_CODE` 逐字
@@ -524,7 +526,8 @@ export async function syncBalancesSnapshot(): Promise<boolean> {
     // （`at` 不动说明没有新结论），而 Token 周期消耗随每条请求变化 —— 先判
     // 余额的 `at` 就返回会让 Token 读数停在最后一次余额查询那会儿。
     const limiterApplied = adoptLimiterSnapshot(data)
-    const tokenApplied = applyTokenUsage(data) || limiterApplied
+    const sortingApplied = !getStore().sortBusy && adoptAccountSorting(data?.sorting)
+    const tokenApplied = applyTokenUsage(data) || limiterApplied || sortingApplied
     if (tokenApplied) {
       bump()
       // Token 结论会翻转「已限流」归类（isLimitedNow 的口径），顶栏那枚计数
@@ -556,6 +559,7 @@ export async function syncBalancesSnapshot(): Promise<boolean> {
  */
 export async function queryUsageFor(id?: string | null): Promise<{ results?: Array<Record<string, unknown>> } | null | undefined> {
   const data = await shared().workbuddyDesktop?.getAllBalances?.(id || undefined)
+  await refreshAccountSorting()
   const rows = Array.isArray(data?.results) ? data.results : []
   // 手动查询的结论就是当刻的（后端这一轮可能顺手刷过 token，那也是「现在」）
   const at = Date.now()
@@ -1016,7 +1020,7 @@ const ACCOUNTS_MODEL_API: AccountsModelApi = {
 export function installAccountsApi(): void {
   installListRefresh()
   window.wbAccountsView = {
-    render: () => bump(),
+    render: () => { syncAccountSorting(); bump() },
     refreshList,
     refreshCaches,
     syncConnections,

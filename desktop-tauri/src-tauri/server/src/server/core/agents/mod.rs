@@ -9,6 +9,7 @@ mod json_edit;
 pub mod paths;
 pub mod preview;
 pub mod registry;
+pub mod resources;
 pub mod store;
 mod toml_editing;
 pub mod types;
@@ -25,9 +26,9 @@ pub fn snapshot(port: u16) -> Value {
         "clients": CLIENTS.iter().map(|def| client_view(def, &gateway)).collect::<Vec<_>>(),
         "gateway": {
             "baseUrl": gateway,
-            "requiresKey": !crate::server::config::current().active_api_keys().is_empty(),
+            "requiresKey": true,
             "keys": crate::server::core::api_keys::entries_from(&crate::server::config::current().raw())
-                .into_iter().filter(|key| key.enabled).map(|key| json!({ "id": key.id, "name": key.name, "allowedModels": key.allowed_models })).collect::<Vec<_>>(),
+                .into_iter().filter(crate::server::core::api_keys::ApiKeyEntry::is_usable).map(|key| json!({ "id": key.id, "name": key.name, "allowedModels": key.allowed_models })).collect::<Vec<_>>(),
         },
         "detectedAt": crate::server::logging::now_ms(),
         "host": { "name": std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default() },
@@ -91,6 +92,7 @@ fn client_view(def: &ClientDef, gateway: &str) -> Value {
         "supportsGateway": def.gateway, "supportsEnvKey": def.env_key,
         "supportNote": detection.note.as_deref().unwrap_or(def.note),
         "docsUrl": def.docs, "needsRestart": def.needs_restart,
+        "resources": resources::capabilities(def),
         "profiles": views, "live": live.iter().map(Profile::view).collect::<Vec<_>>(),
         "profilesAreLive": false, "readError": read_error,
         "storeError": saved.err(), "revision": revision,

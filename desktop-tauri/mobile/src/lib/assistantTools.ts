@@ -374,6 +374,7 @@ const testModel: AssistantTool = {
   },
   run: async (args, context) => {
     checkToolSignal(context)
+    if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
     const testId = crypto.randomUUID()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
@@ -382,7 +383,7 @@ const testModel: AssistantTool = {
     context?.signal?.addEventListener('abort', cancel, { once: true })
     let result: Record<string, unknown> | undefined
     try {
-      result = await apiCall('/api/models/test', { method: 'POST', body: payload }) as Record<string, unknown> | undefined
+      result = await apiCall('/api/models/test', { method: 'POST', body: payload, apiKey: context.apiKey }) as Record<string, unknown> | undefined
     } finally {
       context?.signal?.removeEventListener('abort', cancel)
     }

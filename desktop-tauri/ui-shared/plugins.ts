@@ -12,6 +12,9 @@ export type PackSummary = {
   name: string
   description?: string | null
   version: string
+  requiredVersion?: string | null
+  updateRequired?: boolean
+  compatibilityError?: string | null
   enabled: boolean
   signed: boolean
   installedAt: number
@@ -73,6 +76,10 @@ export type PluginUpdate = {
   checked: boolean
   checkedAt?: number
   current: string
+  required?: boolean
+  requiredVersion?: string | null
+  repairing?: boolean
+  retryAt?: number
   latest: string | null
   notes?: string | null
   page?: string | null
@@ -93,6 +100,8 @@ export type PluginOperation = {
   total: number
   percent: number | null
   version: string
+  required?: boolean
+  requiredVersion?: string | null
   error?: string | null
   hostError?: string | null
   updatedAt: number

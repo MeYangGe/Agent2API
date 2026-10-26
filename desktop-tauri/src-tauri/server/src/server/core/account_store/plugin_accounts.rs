@@ -55,6 +55,7 @@ const SKELETON_KEYS: &[&str] = &[
     "needsRelogin",
     "needsReloginReason",
     "nameCustom",
+    "pluginIdentity",
     "usageQuery",
 ];
 
@@ -360,9 +361,8 @@ impl AccountStore {
 
     /// 建一条插件账号（登录流程成功后由 `login` 那条路调）。
     ///
-    /// ── 为什么 id 由调用方给 ────────────────────────────────────
-    /// 插件在登录完成时已经算出了稳定身份（邮箱 / uid / 设备码），用那个
-    /// 做 id 才能让「同一个账号登录两次」被识别成更新而不是新增。
+    /// 插件提供稳定身份提示；同 provider 的业务身份匹配优先，旧主键保持不变。
+    /// 新主键由网关隔离提供商作用域，不能直接把插件 identity 当作全局主键。
     pub fn plugin_upsert_account(
         &self,
         id: &str,
@@ -370,12 +370,22 @@ impl AccountStore {
         name: &str,
         secret: &Value,
         public: &Value,
+        desktop: bool,
     ) -> Result<Value, String> {
+        if provider.trim().is_empty() {
+            return Err("插件账号缺少提供商".to_string());
+        }
+        let account = super::plugin_identity::incoming(provider, id, secret, public, desktop);
+        let identity = id;
         let guard = self.guard();
-        if let Some(mut record) = self.record_by_id(&guard, id) {
+        let (id, existing) = self.plugin_account_for_upsert(&guard, provider, identity, &account)?;
+        if let Some(mut record) = existing {
             let zcode_plan = super::is_zcode_family(&record.provider()).then(|| record.zcode_plan());
+            record.set_provider(provider);
+            record.set("desktop", Value::Bool(desktop));
             record.set(SECRET_KEY, secret.clone());
             record.set(PUBLIC_KEY, public.clone());
+            super::plugin_identity::remember_identity(&mut record, provider, identity);
             if let Some(plan) = zcode_plan.filter(|plan| !plan.trim().is_empty()) { record.set_zcode_plan(&plan); }
             // 重新登录成功 = 拿到了一份新的凭证，「需要重新登录」标记必须跟着
             // 消失 —— 否则用户明明刚登录过，账号页还红着写「需要重新登录」。
@@ -391,21 +401,25 @@ impl AccountStore {
             .map_err(|error| format!("更新账号失败: {}", error.message))?;
             return Ok(self.public_account(&record));
         }
-        let mut fields = Map::new();
-        fields.insert("id".into(), Value::String(id.to_string()));
-        fields.insert("provider".into(), Value::String(provider.to_string()));
-        fields.insert("name".into(), Value::String(name.to_string()));
-        fields.insert(SECRET_KEY.into(), secret.clone());
-        fields.insert(PUBLIC_KEY.into(), public.clone());
-        fields.insert("source".into(), Value::String("plugin".into()));
-        fields.insert("addedAt".into(), Value::from(logging::now_ms()));
-        fields.insert("updatedAt".into(), Value::from(logging::now_ms()));
-        let record = StoredAccount::from_map(fields);
-        self.with_conn(&guard, |conn| {
-            crate::server::core::account_store::sql::update_in_place(conn, &record)
-        })
-        .map_err(|error| format!("新建账号失败: {}", error.message))?;
-        Ok(self.public_account(&record))
+        let mut record = account;
+        super::plugin_identity::remember_identity(&mut record, provider, identity);
+        record.set("id", Value::String(id.clone()));
+        record.set("name", Value::String(name.to_string()));
+        record.set("source", Value::String("plugin".into()));
+        record.set("addedAt", Value::from(logging::now_ms()));
+        record.set("updatedAt", Value::from(logging::now_ms()));
+        let saved = self.with_conn_mut(&guard, |conn| {
+            let tx = conn.transaction()?;
+            let used = crate::server::core::account_store::sql::priorities_all(&tx)?;
+            let priority = super::priority::next_free_priority(&used);
+            if used.contains(&priority) { return Err(rusqlite::Error::InvalidQuery); }
+            record.set_priority(priority);
+            crate::server::core::account_store::sql::put(&tx, &record)?;
+            let saved = crate::server::core::account_store::sql::load_by_id(&tx, &id)?;
+            tx.commit()?;
+            Ok(saved.unwrap_or_else(|| record.clone()))
+        }).map_err(|error| format!("新建账号失败（请确认优先级号段未满且账号库可用）: {}", error.message))?;
+        Ok(self.public_account(&saved))
     }
 
     /// 插件家的公开形态。
@@ -432,6 +446,10 @@ impl AccountStore {
         // 身份、启用状态与队列元数据归网关，不能被插件展示字段覆盖。
         public.insert("id".to_string(), Value::String(record.id().to_string()));
         public.insert("provider".to_string(), Value::String(record.provider()));
+        if let Some(region) = crate::server::core::providers::qoder::endpoints::Region::from_provider_id(&record.provider()) {
+            public.insert("edition".to_string(), Value::String(region.edition().to_string()));
+            public.insert("editionLabel".to_string(), Value::String(region.label().to_string()));
+        }
         public.insert("source".to_string(), record.get("source").cloned().unwrap_or(Value::Null));
         public.insert("nameCustom".to_string(), Value::Bool(record.get("nameCustom").map(js_truthy).unwrap_or(false)));
         public.insert("enabled".to_string(), Value::Bool(record.enabled()));

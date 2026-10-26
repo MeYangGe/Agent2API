@@ -39,8 +39,7 @@ import { Toggle as UiToggle } from '@ui'
  * 余额、代理；提供商信息上移到分组头，行里不再重复。
  *
  * ── 分组口径 ──────────────────────────────────────────────────
- * 与后端一致：同一提供商的账号是一组，组内按 priority 升序（= 转发尝试顺序）。
- * 组本身的先后也按最小 priority 排 —— 这就是全局队列在手机上的投影。
+ * 组内使用网关的全局消耗顺序，组顺位仍由账号库的手动优先级决定。
  */
 
 type Filter = 'all' | 'enabled' | 'limited' | 'disabled'
@@ -55,6 +54,8 @@ export function AccountsPage() {
   const [busy, setBusy] = useState(false)
   const [usage, setUsage] = useState<UsageSnapshot | null>(null)
   const accounts = state.session?.accounts?.accounts || []
+  const sessionSorting = state.session?.accounts?.sorting
+  const sorting = (usage?.sorting?.updatedAt || 0) > (sessionSorting?.updatedAt || 0) ? usage?.sorting : sessionSorting
 
   const load = async () => {
     // 余额快照与账号刷新并行：快照失败不影响账号列表（余额查不到是常态，
@@ -207,12 +208,20 @@ export function AccountsPage() {
       map.set(provider, list)
     })
     return [...map.entries()]
-      .map(([provider, list]) => ({
-        provider,
-        list: [...list].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999)),
-      }))
-      .sort((a, b) => (a.list[0]?.priority ?? 999) - (b.list[0]?.priority ?? 999))
-  }, [filtered])
+      .map(([provider, list]) => {
+        const positions = new Map((sorting?.accountOrder[provider] || []).map((id, index) => [id, index]))
+        return {
+          provider,
+          list: [...list].sort((a, b) => positions.size
+            ? (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity)
+            : (a.priority ?? 999) - (b.priority ?? 999)),
+        }
+      })
+      .sort((a, b) => sorting
+        ? (sorting.providerOrder.indexOf(a.provider) < 0 ? Infinity : sorting.providerOrder.indexOf(a.provider))
+          - (sorting.providerOrder.indexOf(b.provider) < 0 ? Infinity : sorting.providerOrder.indexOf(b.provider))
+        : Math.min(...a.list.map(account => account.priority ?? 999)) - Math.min(...b.list.map(account => account.priority ?? 999)))
+  }, [filtered, sorting])
 
   const enabledCount = accounts.filter(item => item.enabled).length
   const limitedCount = accounts.filter(item => item.enabled && isRateLimited(item)).length

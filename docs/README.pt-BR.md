@@ -24,7 +24,7 @@ Este repositório contém apenas a infraestrutura do gateway e do gerenciamento 
 
 ## ✨ Principais recursos
 
-- 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy e Antigravity geram imagens, e Loomy e Antigravity também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
+- 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy, Antigravity e ModelScope geram imagens, e Loomy, Antigravity e ModelScope também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
 - 🧭 **Roteamento de IA** — modelos, prioridade de contas, balanceamento, afinidade de sessão e failover
 - 🤖 **Gerenciamento de clientes Agent** — vários perfis, importação de configurações, prévia de gravação e alternância de serviços
 - 🧩 **Extensões por plugins** — provedores instalados e atualizados separadamente; o gateway funciona sem eles

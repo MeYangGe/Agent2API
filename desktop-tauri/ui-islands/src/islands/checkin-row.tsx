@@ -72,7 +72,7 @@ export function CheckinRow({
         </CollapsibleTrigger>
         {actions ? <div className='ck-row-actions'>{actions}</div> : null}
       </div>
-      {note ? <div className='ck-fold-note'>{note}</div> : null}
+      {note ? <div className='ck-fold-note empty:hidden'>{note}</div> : null}
       <CollapsibleContent className='ck-row-detail'>{children}</CollapsibleContent>
     </Collapsible>
   )

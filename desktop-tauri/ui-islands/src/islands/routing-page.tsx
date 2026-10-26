@@ -4,6 +4,7 @@ import { Badge, Button, Empty, FieldGroup, Label, SegmentedControl, Spinner, cn,
 import { t } from '../i18n'
 import { AccountSettingsDialog } from './accounts-settings-dialog'
 import { providerOf } from './accounts-domain'
+import { GroupSettingsDialog } from './accounts-group-settings'
 import { RoutingCanvas } from './routing-canvas'
 import { ModelGatewayLink } from './routing-links'
 import {
@@ -12,14 +13,14 @@ import {
 import { RoutingTracePage } from './routing-trace-page'
 import { RoutingStickyDialog } from './routing-sticky'
 import {
-  accountOrder, addModel, cloneProfile, loadWorkspace, moveAccount, patch, saveProfile,
+  accountOrder, accountOrderLocked, addModel, cloneProfile, loadWorkspace, moveAccount, patch, saveProfile,
   selectModel, snapshot, subscribe,
 } from './routing-state'
 import { IconButton, RouteIcon } from './routing-ui'
 import { host, type ReplayRow } from './routing-types'
 
 type Modal = { kind: 'settings' | 'sticky' | 'add-model' | 'add-provider' }
-  | { kind: 'provider'; id: string }
+  | { kind: 'provider' | 'sort'; id: string }
   | { kind: 'account'; id: string }
 let requestTrace: ((row?: ReplayRow | null) => void) | undefined
 
@@ -30,11 +31,12 @@ function AccountRoutePosition({ id }: { id: string }) {
   const provider = providerOf(account)
   const ids = accountOrder(provider)
   const index = ids.indexOf(id)
+  const locked = accountOrderLocked(provider)
   return <FieldGroup orientation='horizontal' className='field-row'>
     <Label>{t('当前路由位置')}</Label><span className='text-xs'>{state.model || t('全局配置')} · {t('第 {n} 位', { n: index + 1 })}</span>
-    <IconButton name='arrowUp' title={t('提高优先级')} disabled={state.busy || index <= 0} onClick={() => void moveAccount(provider, id, -1)} />
-    <IconButton name='arrowDown' title={t('降低优先级')} disabled={state.busy || index >= ids.length - 1} onClick={() => void moveAccount(provider, id, 1)} />
-    <span className='detail'>{t('顺序修改即时保存，仅作用于当前视图。')}</span>
+    <IconButton name='arrowUp' title={t('提高优先级')} disabled={state.busy || index <= 0 || locked} onClick={() => void moveAccount(provider, id, -1)} />
+    <IconButton name='arrowDown' title={t('降低优先级')} disabled={state.busy || index >= ids.length - 1 || locked} onClick={() => void moveAccount(provider, id, 1)} />
+    <span className='detail'>{locked ? t('自动消耗排序已启用，请先关闭规则再手动调整') : state.model ? t('顺序修改即时保存，仅作用于当前视图。') : t('全局顺序与账号页联动，修改即时保存。')}</span>
   </FieldGroup>
 }
 
@@ -54,13 +56,13 @@ export function RoutingPage() {
     }, 3000)
     return () => window.clearInterval(timer)
   }, [modal, state.busy, mode])
-  const closeModal = () => setModal(null)
+  const closeModal = () => { setModal(null); void loadWorkspace(true) }
   const configured = workspace?.configuredModels || []
   const models = state.model && !configured.some(model => model.toLowerCase() === state.model.toLowerCase()) ? [...configured, state.model] : configured
   const reset = async () => {
     const model = state.model
     if (!await confirmDialog(model ? t('移除此模型的独立路由配置，之后重新继承全局路由。不会删除模型、账号或请求记录。')
-      : t('恢复按账号页面的全局优先级选路，解除全局视图的提供商和账号范围限制。模型独立配置不会改变。'), {
+      : t('解除全局路由的参与范围限制，继续使用与账号页共用的手动顺序和自动消耗规则；模型独立配置保持不变。'), {
       title: model ? t('恢复全局继承') : t('恢复默认路由'), confirmText: t('恢复'), destructive: false,
     })) return
     if (await saveProfile(null, model) && model && snapshot().model === model) await selectModel('')
@@ -116,13 +118,14 @@ export function RoutingPage() {
           onSettings={() => setModal({ kind: 'settings' })} onAddProvider={() => setModal({ kind: 'add-provider' })}
           onSticky={() => setModal({ kind: 'sticky' })} onReplay={openReplay} />
           : <div className='routing-loading'><Empty>{state.loading ? <><Spinner />{t('正在读取路由…')}</> : t('路由工作台不可用')}</Empty></div>}
-        <div className='routing-map-foot'><span><RouteIcon name='gripVertical' size={13} />{t('拖动提供商与账号调整顺序，修改即时保存。')}</span><span>{t('队列为无会话预演；实际粘性命中和重试顺延以回放为准。')}</span><div><Button variant='ghost' size='sm' aria-label={t('缩小画布')} disabled={state.zoom <= 0.7} onClick={() => patch({ zoom: Math.max(0.7, state.zoom - 0.1) })}>−</Button><Button variant='ghost' size='sm' onClick={() => patch({ zoom: 1 })}>{Math.round(state.zoom * 100)}%</Button><Button variant='ghost' size='sm' aria-label={t('放大画布')} disabled={state.zoom >= 1.4} onClick={() => patch({ zoom: Math.min(1.4, state.zoom + 0.1) })}>＋</Button></div></div>
+        <div className='routing-map-foot'><span>{state.model ? t('拖动提供商与账号调整顺序，修改即时保存。') : t('全局顺序与账号页联动，修改即时保存。')}</span><span>{t('队列为无会话预演；实际粘性命中和重试顺延以回放为准。')}</span><div><Button variant='ghost' size='sm' aria-label={t('缩小画布')} disabled={state.zoom <= 0.7} onClick={() => patch({ zoom: Math.max(0.7, state.zoom - 0.1) })}>−</Button><Button variant='ghost' size='sm' onClick={() => patch({ zoom: 1 })}>{Math.round(state.zoom * 100)}%</Button><Button variant='ghost' size='sm' aria-label={t('放大画布')} disabled={state.zoom >= 1.4} onClick={() => patch({ zoom: Math.min(1.4, state.zoom + 0.1) })}>＋</Button></div></div>
       </div>
     </div>
     </div>
     <div className='routing-trace-view' hidden={mode !== 'trace'}><RoutingTracePage active={mode === 'trace'} initialRow={initialTrace} onConfig={model => { void selectModel(model); setMode('config') }} /></div>
     {workspace && modal?.kind === 'settings' ? <RoutingSettingsDialog workspace={workspace} onClose={closeModal} /> : null}
-    {workspace && modal?.kind === 'provider' ? <ProviderRoutingDialog key={`${state.model}:${modal.id}`} provider={modal.id} workspace={workspace} onClose={closeModal} /> : null}
+    {workspace && modal?.kind === 'provider' ? <ProviderRoutingDialog key={`${state.model}:${modal.id}`} provider={modal.id} workspace={workspace} onSort={() => setModal({ kind: 'sort', id: modal.id })} onClose={closeModal} /> : null}
+    {workspace && modal?.kind === 'sort' ? <GroupSettingsDialog provider={modal.id} onClose={closeModal} /> : null}
     {workspace && modal?.kind === 'add-provider' ? <AddRouteProviderDialog workspace={workspace} onClose={closeModal} /> : null}
     {workspace && modal?.kind === 'add-model' ? <AddRouteModelDialog workspace={workspace} onAdd={addModel} onClose={closeModal} /> : null}
     {modal?.kind === 'sticky' ? <RoutingStickyDialog model={state.model} onClose={closeModal} /> : null}

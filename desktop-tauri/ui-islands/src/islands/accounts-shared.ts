@@ -2,6 +2,8 @@ import { t } from '../i18n'
 import { hasProxyUsage, type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { BalanceQueryPublic } from './balance-query'
 import type { LimiterGroup, LimiterSnapshot } from './accounts-limiter-types'
+import type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
+export type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
 export type { LimiterGroup } from './accounts-limiter-types'
 
 /**
@@ -267,6 +269,7 @@ export type HiddenAccountsSummary = {
 export type AccountsSnapshot = {
   accounts?: AccountRecord[]
   providers?: Array<{ id?: string; label?: string; count?: number }>
+  sorting?: AccountSorting
   /** 插件未就绪而隐藏的账号，只含数量与提供商元数据，不含账号记录。 */
   hiddenAccounts?: {
     total?: number
@@ -318,6 +321,8 @@ export type AccountsBridge = {
   updateAccount(id: string, patch: Record<string, unknown>): Promise<AccountUpdateResult | null | undefined>
   /** 整队重排（分组模式）：把新队列整条交上去（从队首到队尾的 id 数组） */
   reorderAccounts(queue: string[]): Promise<unknown>
+  getAccountSorting(): Promise<AccountSorting>
+  saveAccountSorting(payload: { provider: string; rules: GroupSortRule[] | null; onlyIfUnset?: boolean }): Promise<AccountSorting>
   moveAccount(id: string, direction: 'up' | 'down'): Promise<unknown>
   clearRateLimits(id: string, model?: string | null): Promise<unknown>
   /**
@@ -351,6 +356,7 @@ export type AccountsBridge = {
     results?: Array<Record<string, unknown>>
     tokenAt?: number
     tokenUsage?: Record<string, unknown>
+    sorting?: AccountSorting
   } | null | undefined>
   getProxies(): Promise<{ clash?: ClashSnapshot } | null | undefined>
   /** 代理池列表（「网络代理」页维护的命名代理）：账号代理表单的
@@ -375,19 +381,16 @@ export type AccountsBridge = {
   switchAccount(id: string): Promise<{ changed?: boolean } | null | undefined>
   refreshAccountToken(id: string): Promise<unknown>
   removeAccount(id: string): Promise<unknown>
-  /**
-   * ZCode 活动套餐通道的**验证码令牌池**概况（见后端 `providers/zcode/captcha.rs`）。
-   *
-   * 活动套餐的推理端点每条请求都要一个当次铸的阿里云验证码令牌，令牌由界面后台
-   * 静默铸造（`ui/zcode-captcha-pool.js`）。这里读的是「当前库存 / 目标 / 是否
-   * 正在缺货」—— 账号设置里选活动套餐时用它给用户一个可查的状态，
-   * 否则「转发失败但不知道为什么」只能靠日志。
-   */
+  /** 套餐池模型请求的验证状态与库存；读取不发起验证码。 */
   zcodeCaptchaStats?(): Promise<{
     ready?: number
     target?: number
     required?: boolean
     needsTokens?: boolean
+    demandActive?: boolean
+    lastSyncAt?: number
+    configError?: string
+    captchaAccountId?: string
     error?: string
     startPlanAccounts?: number
     rejected?: number
@@ -617,12 +620,14 @@ export type SharedWindow = {
    */
   wbZcodeClaim?: {
     preview?: (accountId: string) => Promise<unknown>
-    claim?: (accountId: string, planId: string) => Promise<unknown>
+    claim?: (accountId: string, planId: string, signal?: AbortSignal, onPhase?: (phase: string) => void) => Promise<unknown>
   }
   /** ZCode 套餐明细弹窗（zcode-plans-modal.tsx）：可领取 + 名下已有的套餐，逐份领取 */
   wbZcodePlans?: { open?: (options: { id: string; name?: string }) => void }
   wbZcodeCaptchaPool?: {
-    status?(): { state: 'idle' | 'checking' | 'minting' | 'waiting' | 'error' | 'disabled'; error: string }
+    status?(): { state: 'idle' | 'verifying' | 'paused' | 'error' | 'disabled' | 'needs_verification'; error: string }
+    refresh?(): ReturnType<NonNullable<AccountsBridge['zcodeCaptchaStats']>>
+    verify?(accountId: string, signal?: AbortSignal, onPhase?: (phase: string) => void): Promise<boolean>
   }
   /** CodeArts「领福利」流程（ui/codearts-welfare.js：只读探测 → 确认 → 领取 → 回读） */
   wbCodeArtsWelfare?: { start?: (account: AccountRecord | undefined) => Promise<unknown> }

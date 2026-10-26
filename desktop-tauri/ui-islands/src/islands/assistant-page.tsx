@@ -30,7 +30,6 @@
 
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Alert, Button, Empty, NavList, NavItem, PageHeader, ResponsiveSheet, cn } from '@ui'
 import { t } from '../i18n'
 import {
   AssistantRequestError,
@@ -62,8 +61,15 @@ import { AssistantComposer } from './assistant-composer'
 import { useAssistantAttachments } from './assistant-attachments'
 import { MessageList, type UiMessage } from './assistant-messages'
 import { AssistantSettingsDrawer } from './assistant-settings-drawer'
-import { PlusIcon } from './assistant-icons'
+import { AssistantEmpty, AssistantSidebar, AssistantTopbar } from './assistant-shell'
+import { useAssistantMessageOperations } from './assistant-message-operations'
+import { AssistantTitleSettings } from '../../../ui-shared/assistant-title-settings'
+import { replayMessages } from './assistant-replay'
 import { imageContext, type ImageAsset } from '../../../ui-shared/assistant-image-tools'
+import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
+import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
+import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
+import { callJson } from './assistant-state'
 
 /** 一轮对话里最多允许的「上游调用 → 工具 → 上游调用」循环次数 */
 const MAX_ROUNDS = 12
@@ -80,7 +86,10 @@ type Suspended = {
 
 function AssistantPage() {
   const { config, configRef, status, failed: loadingFailed, load: loadConfig, save: saveConfig } = useAssistantConfig()
-  const { models, ready: modelsReady, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useAssistantModels()
+  const keyState = useModelApiKeys(() => callJson('GET', '/api/model-access/keys'))
+  const selectedKey = keyState.keys.find(key => key.id === config?.apiKeyId)
+  const requestKeyRef = React.useRef<ModelApiKey | undefined>(undefined)
+  const { models, ready: modelsReady, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useAssistantModels(selectedKey?.key)
   const [ui, setUi] = React.useState<UiMessage[]>([])
   const [busy, setBusy] = React.useState(false)
   const [awaiting, setAwaiting] = React.useState(false)
@@ -91,6 +100,7 @@ function AssistantPage() {
   const [sidebarOpen, setSidebarOpen] = React.useState(false)
   /** 右上角「助手设置」抽屉 */
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [titleSettingsOpen, setTitleSettingsOpen] = React.useState(false)
 
   const uiRef = React.useRef<UiMessage[]>([])
   const wireRef = React.useRef<ChatMessage[]>([])
@@ -103,8 +113,8 @@ function AssistantPage() {
   const { images, setImages, addFiles, reading: readingImages } = useAssistantAttachments(activeIdRef)
   /** 会话标题（用户没改过就一直取第一条用户消息，见 `titleFrom`） */
   const titleRef = React.useRef<string>('')
-  const { sessions, setSessions, persist, remove: removeSavedSession, clear: clearSavedSessions } = useAssistantSessions({
-    config: configRef, messages: wireRef, activeId: activeIdRef, title: titleRef,
+  const { sessions, setSessions, persist, summarize, remove: removeSavedSession, clear: clearSavedSessions } = useAssistantSessions({
+    config: configRef, messages: wireRef, ui: uiRef, activeId: activeIdRef, title: titleRef, apiKey: requestKeyRef,
   })
   const stoppedRef = React.useRef(false)
   const historyBusyRef = React.useRef(false)
@@ -133,6 +143,8 @@ function AssistantPage() {
   /** `persist` 的稳定引用（`loop` 的 deps 里放它会陷入循环，见 loopRef 的说明） */
   const persistRef = React.useRef(persist)
   persistRef.current = persist
+  const summarizeRef = React.useRef(summarize)
+  summarizeRef.current = summarize
 
   /* 贴底：新消息进来时滚到底（用户往上翻时不打扰 —— 只在接近底部时贴） */
   React.useEffect(() => {
@@ -201,7 +213,8 @@ function AssistantPage() {
       if (tool.id === 'generate_images' || tool.id === 'edit_images') await persistRef.current(true, collected)
       if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const references = imageContext([...wireRef.current, ...collected.map(item => ({ role: 'tool', images: item.images }))])
-      const result = await tool.run(args, { session, images: references, confirmed: true, signal: controller.signal })
+      const key = requestKeyRef.current
+      const result = await tool.run(args, { session, images: references, confirmed: true, signal: controller.signal, apiKey: key?.key, apiKeyName: key?.name })
       if (activeIdRef.current !== session) throw new DOMException('Aborted', 'AbortError')
       return result
     } finally {
@@ -338,13 +351,16 @@ function AssistantPage() {
     setBusy(true)
     const controller = new AbortController()
     controllerRef.current = controller
-    const botIndex = uiRef.current.push({ kind: 'bot', text: '', streaming: true }) - 1
+    const messageId = newSessionId()
+    const botIndex = uiRef.current.push({ kind: 'bot', id: messageId, model: requestModelRef.current, text: '', streaming: true }) - 1
     syncUI()
     let calls: ToolCall[] = []
     let failed = false
     try {
+      if (!requestKeyRef.current) throw new Error(t('请先选择一把 API Key'))
       await streamChat({
         model: requestModelRef.current,
+        apiKey: requestKeyRef.current.key,
         messages: wireRef.current,
         tools: enabledTools,
         reasoning: configRef.current?.reasoning ?? null,
@@ -372,8 +388,8 @@ function AssistantPage() {
       const partial = current && current.kind === 'bot' ? current.text : ''
       if (!partial) uiRef.current.splice(botIndex, 1)
       else {
-        uiRef.current[botIndex] = { kind: 'bot', text: partial }
-        wireRef.current.push({ role: 'assistant', content: partial })
+        uiRef.current[botIndex] = { kind: 'bot', id: messageId, model: requestModelRef.current, text: partial }
+        wireRef.current.push({ role: 'assistant', id: messageId, model: requestModelRef.current, content: partial })
       }
       void persistRef.current()
       const aborted = controller.signal.aborted
@@ -394,20 +410,16 @@ function AssistantPage() {
     const current = uiRef.current[botIndex]
     const text = current && current.kind === 'bot' ? current.text : ''
     if (current && current.kind === 'bot') {
-      // 模型没说话、直接调工具（很常见）：这条消息没有可显示的内容，**整条删掉**，
-      // 不留一条空消息在流里。否则它会以「三个点的思考动画」的形态永久挂在
-      // 工具卡上方（早先只把 streaming 置 false，而 BotMessage 当时只看 text，
-      // 于是动画永远转下去 —— 看起来像加载卡死）。
-      // 从数组里删而不是只改渲染：这条消息还会进 wireRef 与历史库，留着是脏数据。
-      if (!text) uiRef.current.splice(botIndex, 1)
+      if (!text && !calls.length) uiRef.current.splice(botIndex, 1)
       else uiRef.current[botIndex] = { ...current, streaming: false }
     }
-    wireRef.current.push({ role: 'assistant', content: text, toolCalls: calls.length ? calls : undefined })
+    wireRef.current.push({ role: 'assistant', id: messageId, model: requestModelRef.current, content: text, toolCalls: calls.length ? calls : undefined })
     syncUI()
     // 每轮落一次库（串行，见 persist 的说明）：工具链中途也存，崩了不丢已答的部分
-    void persistRef.current()
+    await persistRef.current()
     if (!calls.length) {
       setBusy(false)
+      if (!stoppedRef.current) void summarizeRef.current(session)
       return
     }
     await pump(calls, 0, [])
@@ -477,8 +489,17 @@ function AssistantPage() {
     const model = current.model
     const session = activeIdRef.current
     try {
-      const latest = await refreshModels()
+      const [latest, keys] = await Promise.all([refreshModels(), keyState.refresh()])
       if (attempt !== preflightRef.current || activeIdRef.current !== session || configRef.current?.model !== model) return
+      const key = keys.find(key => key.id === current.apiKeyId)
+      if (!key) {
+        toast(t('请先选择一把 API Key'), 'err')
+        return
+      }
+      if (!modelApiKeyAllows(key, model)) {
+        toast(t('所选 API Key 无权调用此模型或提供商'), 'err')
+        return
+      }
       const option = selectedModel(latest, model)
       if (!option) {
         toast(unavailableModelMessage(model), 'err')
@@ -486,6 +507,7 @@ function AssistantPage() {
       }
       checkingModelRef.current = false
       requestModelRef.current = option.name
+      requestKeyRef.current = key
       if (!activeIdRef.current) {
         const id = newSessionId()
         activeIdRef.current = id
@@ -493,13 +515,14 @@ function AssistantPage() {
       }
       roundRef.current = 0
       stoppedRef.current = false
-      uiRef.current.push({ kind: 'user', text: value, ...(attached.length ? { images: attached } : {}) })
-      wireRef.current.push({ role: 'user', content: value, ...(attached.length ? { images: attached } : {}) })
+      const messageId = newSessionId()
+      uiRef.current.push({ kind: 'user', id: messageId, text: value, ...(attached.length ? { images: attached } : {}) })
+      wireRef.current.push({ role: 'user', id: messageId, content: value, ...(attached.length ? { images: attached } : {}) })
       setDraft('')
       setImages([])
       syncUI()
       await loop()
-      void persistRef.current()
+      await persistRef.current()
     } catch (error) {
       if (attempt === preflightRef.current) {
         toast(checkingModelRef.current
@@ -513,7 +536,7 @@ function AssistantPage() {
         setBusy(false)
       }
     }
-  }, [awaiting, busy, readingImages, loop, syncUI, refreshModels, configRef])
+  }, [awaiting, busy, readingImages, loop, syncUI, refreshModels, configRef, keyState.refresh])
 
   const stop = React.useCallback(() => {
     if (checkingModelRef.current) {
@@ -568,14 +591,7 @@ function AssistantPage() {
     try {
       await persistRef.current(false)
       const detail = await loadSession(id)
-      // 回放：只画有正文的消息。工具调用卡（`role:"tool"`）与「只带 tool_calls、
-      // 正文为空」的 assistant 消息**不重建卡片** —— 那张卡的可执行状态在当时的
-      // 会话里才有意义，历史里重建出来会让人以为还能再点一次。
-      uiRef.current = detail.messages.flatMap((message): UiMessage[] => {
-        if (message.role === 'user') return [{ kind: 'user', text: message.content, images: message.images }]
-        if (message.role === 'tool') return message.images?.length ? [{ kind: 'images', images: message.images }] : []
-        return message.content.trim() ? [{ kind: 'bot', text: message.content }] : []
-      })
+      uiRef.current = replayMessages(detail.messages, detail.model)
       wireRef.current = detail.messages
       activeIdRef.current = detail.id
       titleRef.current = detail.title
@@ -658,6 +674,25 @@ function AssistantPage() {
     )
   }, [config, saveConfig])
 
+  const messageActions = useAssistantMessageOperations({
+    messages: wireRef, ui: uiRef, activeId: activeIdRef,
+    busy: () => busy || awaiting || sendingRef.current || historyBusyRef.current,
+    setBusy: value => { historyBusyRef.current = value; setHistoryBusy(value) },
+    model: () => configRef.current?.model ?? null, sync: syncUI, persist: () => persistRef.current(),
+    open: detail => {
+      wireRef.current = detail.messages
+      uiRef.current = replayMessages(detail.messages, detail.model)
+      activeIdRef.current = detail.id
+      titleRef.current = detail.title
+      setActiveId(detail.id)
+      setSessions(previous => [detail, ...previous])
+      setImages([])
+      setDraft('')
+      syncUI()
+      setSidebarOpen(false)
+    },
+  })
+
   /* ─── 渲染 ─── */
 
   const activeTitle = titleRef.current || titleFrom(wireRef.current) || t('新对话')
@@ -665,88 +700,22 @@ function AssistantPage() {
 
   return (
     <div className='asst-layout'>
-      <ResponsiveSheet open={sidebarOpen} onOpenChange={setSidebarOpen} title={t('历史对话')}
-        breakpoint={900} side='left' inlineAs='aside' inlineClassName='asst-side'
-        contentClassName='w-[min(280px,86vw)]' bodyClassName='gap-0'>
-        <div className='asst-side-head'>
-          <Button variant='default' size='sm' className='asst-new' onClick={newChat} disabled={busy || awaiting || historyBusy}>
-            <PlusIcon size={14} /> {t('新对话')}
-          </Button>
-        </div>
-        <NavList className='asst-side-list'>
-          {sessions.length === 0 && <Empty className='asst-side-empty'>{t('还没有历史对话')}</Empty>}
-          {sessions.map(item => (
-            <div key={item.id} className='asst-side-item relative pr-7'>
-              <NavItem active={item.id === activeId} className='h-auto px-2 py-1.5' onClick={() => void openSession(item.id)}>
-                <span className='title'>{item.title || t('未命名对话')}</span>
-              </NavItem>
-              <Button size='icon-2xs' variant='ghost' type='button' className='del absolute right-1 top-1.5' title={t('删除这条对话')}
-                aria-label={t('删除这条对话')} disabled={busy || awaiting || historyBusy} onClick={() => void removeSession(item.id)}>✕</Button>
-            </div>
-          ))}
-        </NavList>
-        {sessions.length > 0 && (
-          <div className='asst-side-foot'>
-            <Button size='default' variant='ghost' type='button' className='link' disabled={busy || awaiting || historyBusy} onClick={() => void clearHistory()}>{t('清空全部')}</Button>
-          </div>
-        )}
-      </ResponsiveSheet>
+      <AssistantSidebar open={sidebarOpen} onOpenChange={setSidebarOpen} sessions={sessions} activeId={activeId}
+        disabled={busy || awaiting || historyBusy} settingsDisabled={!config} onNew={newChat}
+        onOpen={id => { void openSession(id) }} onRemove={id => { void removeSession(id) }} onClear={() => { void clearHistory() }}
+        onSettings={() => { setTitleSettingsOpen(true); refreshModelOptions() }} />
 
       <div className='asst-main'>
-        {/* 顶栏：会话标题 + 助手设置 */}
-        <PageHeader className='asst-top'>
-          <Button size='default' variant='ghost' type='button' className='asst-menu' title={t('历史对话')} aria-label={t('历史对话')}
-            onClick={() => setSidebarOpen(open => !open)}>☰</Button>
-          <span className='asst-title' title={activeTitle}>{activeTitle}</span>
-          <span className='spacer' />
-          <span className='asst-top-hint'>{t('走本地网关 · 消耗所选账号额度')}</span>
-          <Button variant='ghost' size='sm' className='asst-settings-btn' onClick={() => setSettingsOpen(true)}>
-            <svg viewBox='0 0 24 24' width='14' height='14' aria-hidden='true'>
-              <g fill='none' stroke='currentColor' strokeWidth='1.6' strokeLinecap='round' strokeLinejoin='round'>
-                <circle cx='12' cy='12' r='3.1' />
-                <path d='M19.3 13.8l1.5 1.1-1.8 3-1.8-.6c-.5.4-1 .7-1.6.9l-.3 1.9h-3.5l-.3-1.9c-.6-.2-1.1-.5-1.6-.9l-1.8.6-1.8-3 1.5-1.1a7 7 0 0 1 0-1.9l-1.5-1.1 1.8-3 1.8.6c.5-.4 1-.7 1.6-.9l.3-1.9h3.5l.3 1.9c.6.2 1.1.5 1.6.9l1.8-.6 1.8 3-1.5 1.1c.05.32.07.63.07.95 0 .31-.02.62-.05.9z' />
-              </g>
-            </svg>
-            {t('助手设置')}
-          </Button>
-        </PageHeader>
+        <AssistantTopbar title={activeTitle} keyLabel={selectedKey ? modelApiKeyLabel(selectedKey) : t('请先选择一把 API Key')}
+          onHistory={() => setSidebarOpen(open => !open)} onSettings={() => setSettingsOpen(true)} />
 
         <div className='asst-scroll' ref={scrollRef}>
           {empty ? (
-            <Empty className='asst-empty'>
-              <div className='asst-empty-logo'>
-                <svg viewBox='0 0 24 24' width='26' height='26' aria-hidden='true'>
-                  <path fill='currentColor' d='M12 2.7l1.85 5.45 5.45 1.85-5.45 1.85L12 17.3l-1.85-5.45L4.7 10l5.45-1.85L12 2.7z' />
-                  <path fill='currentColor' d='M18.8 15l.85 2.35L22 18.2l-2.35.85L18.8 21.4l-.85-2.35L15.6 18.2l2.35-.85L18.8 15z' />
-                </svg>
-              </div>
-              <h3>{t('AI 助手')}</h3>
-              <p>
-                {t('用一句话让我查或改本机的模型转发配置。')}<br />
-                {t('我会在动手前把改动列给你确认。')}
-              </p>
-              <div className='asst-suggests'>
-                {[
-                  t('看看哪些模型在多家重复了'),
-                  t('测一下当前最快的模型通不通'),
-                  t('CodeArts 的账号余额还剩多少？'),
-                  t('把重复的模型加上家名前缀区分开'),
-                ].map(text => (
-                  <Button size='default' variant='ghost' key={text} type='button' onClick={() => void send(text, [])}>“{text}”</Button>
-                ))}
-              </div>
-              {config !== null && enabledCount === 0 && (
-                <Alert variant='warning' className='asst-empty-warn'>
-                  {t('当前一个工具都没勾选，助手只能纯聊天。点右上角「助手设置」勾上需要的工具。')}
-                </Alert>
-              )}
-              {loadingFailed && (
-                <Alert variant='destructive' className='asst-empty-warn'>{status || t('助手设置读取失败，工具可能已过时。')}</Alert>
-              )}
-            </Empty>
+            <AssistantEmpty noTools={config !== null && enabledCount === 0} failed={loadingFailed} status={status}
+              onSend={text => { void send(text, []) }} />
           ) : (
             <div className='asst-flow'>
-              <MessageList messages={ui} onConfirm={run => void resolveConfirm(run)} />
+              <MessageList messages={ui} model={currentModel || ''} actions={{ ...messageActions, disabled: busy || awaiting || historyBusy }} onConfirm={run => void resolveConfirm(run)} />
             </div>
           )}
         </div>
@@ -759,7 +728,7 @@ function AssistantPage() {
           onRemoveImage={index => setImages(prev => prev.filter((_, i) => i !== index))}
           modelSupportsImages={modelSupportsImages}
           imageToolsEnabled={toolEnabled.edit_images === true}
-          modelAvailable={modelsReady && Boolean(currentOption)}
+          modelAvailable={modelsReady && Boolean(currentOption) && keyState.ready && Boolean(selectedKey)}
           modelsReady={modelsReady}
           modelsLoading={modelsLoading}
           modelWarning={modelWarning}
@@ -778,6 +747,9 @@ function AssistantPage() {
         />
       </div>
 
+      <AssistantTitleSettings open={titleSettingsOpen} onOpenChange={setTitleSettingsOpen}
+        model={config?.titleModel ?? null} prompt={config?.titlePrompt ?? ''} models={models.map(item => item.name)} t={t} disabled={!config}
+        onSave={(titleModel, titlePrompt) => { if (config) saveConfig({ ...config, titleModel, titlePrompt }, t('标题总结设置已保存')) }} />
       <AssistantSettingsDrawer
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
@@ -791,6 +763,9 @@ function AssistantPage() {
         failed={loadingFailed}
         status={status}
         onSave={saveConfig}
+        apiKeyField={<ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || awaiting}
+          onChange={apiKeyId => { if (config) saveConfig({ ...config, apiKeyId }) }}
+          onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} />}
       />
     </div>
   )

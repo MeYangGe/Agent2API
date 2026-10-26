@@ -1,3 +1,5 @@
+import type { ResourceCapabilities } from '../../../ui-shared/agent-resources'
+
 export type AgentModel = {
   id: string
   name: string
@@ -37,6 +39,7 @@ export type AgentProfile = {
 }
 
 export type AgentClient = {
+  resources?: ResourceCapabilities
   id: string
   name: string
   vendor: string

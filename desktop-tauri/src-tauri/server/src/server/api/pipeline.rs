@@ -152,21 +152,14 @@ pub mod terminal {
 /// 而客户端原始 body 的去重键在调用方算（见各 handler）。
 ///
 /// ── `scope`：网关 Key 的可用模型白名单（R9）────────────────────
-/// `None` = 不限制（免鉴权模式 / 环境变量 Key / 未知 Key，见 `core::key_scope`）。
+/// `None` 只表示不限制白名单；调用方必须先完成 Key 鉴权。
 /// 有 scope 时在**这里**判，而不是留到转发层：模型白名单的语义是
 /// 「这个模型对你这把 Key 不存在」，所以拒绝形态与「模型不在目录里」逐字相同
 /// （404 + `model_not_found`，照抄 OmniProxy 的
 /// `if (!keyAllowsModel(...)) return fail(res, \`模型 '${publicModel}' 不可用\`, 404, 'model_not_found')`）——
 /// 连「存在性」都不该向下游暴露：能列出却打不通，是比 404 更难解释的一种。
 ///
-/// 两条例外（与下面 ③ 的两条例外同源，各有各的理由）：
-///   - 客户端**没点名**（走默认模型回落）：回落链的候选也要按白名单收窄
-///     （见下方 `allowed` 过滤），否则会给一把只授权了 A 的 Key 注入一个它
-///     没被授权的 B —— 那不是限制，那是「用网关的默认值绕过限制」。
-///     收窄后一个都没有时给一条**可操作的**错误，而不是把无 model 的请求
-///     转给上游（那样由上游挑模型，白名单等于不存在）。
-///   - **一家可用提供商都没有**（没加账号，`active` 为空）：与 ③ 同一条例外 ——
-///     广告视图必然为空，此时报「没有可用账号」比报「模型不存在」有用。
+/// 默认模型回落也必须收窄到 Key 的模型白名单；权限检查不因缺少账号而跳过。
 pub fn resolve_model(
     state: &ServerState,
     payload: &mut Value,
@@ -234,7 +227,7 @@ fn resolve_model_for(
             if let Some(object) = payload.as_object_mut() {
                 object.insert("model".to_string(), Value::String(fallback));
             }
-        } else if scope.is_some_and(KeyScope::restricts_models) && !models.is_empty() {
+        } else if scope.is_some_and(KeyScope::restricts_models) {
             // 这条 Key 限制了模型、而目录里**没有一个是它被授权的**：
             // 继续往下走只会让上游拿它自己的默认模型去回答（白名单形同虚设），
             // 所以在这里就明确拒绝。文案指向该去改什么（管理页那两处）。
@@ -280,25 +273,11 @@ fn resolve_model_for(
             );
             return Err(GatewayError::with_status(404, message).with_code("model_not_found"));
         }
-        // R9 模型白名单：**排在广告视图校验之后**。顺序上先是「这个模型对谁都
-        // 不存在」（目录口径），再是「对你这把 Key 不存在」—— 两者的响应形状
-        // 逐字相同（同一个 code、同一个状态码），所以顺序只影响排查时的先后，
-        // 但把「目录里根本没有」排在前面能让用户先看到更容易理解的那条。
-        //
-        // 与 ③ 的两条例外一致：客户端没点名（走默认模型）与「一家可用提供商都
-        // 没有」都不在这里判（前者已在回落链里按白名单收窄过，后者交给转发层
-        // 给「没有可用账号」那条更准的提示）。第二条例外在这个分支里不能省：
-        // 白名单本身与「有没有账号」无关，但**没有账号时这把 Key 的路由照样
-        // 不通**，报「不在白名单里」会把用户指向网关 Key 页，而真正要做的是
-        // 先加账号。
-        if has_available_providers(state.store())
-            && !key_scope::allows_model(scope, &requested_model)
-        {
-            return Err(GatewayError::with_status(404, format!(
-                "模型 '{requested_model}' 不可用：不在这把网关 Key 的可用模型列表里"
-            ))
-            .with_code("model_not_found"));
-        }
+    }
+    if !requested_model.is_empty() && !key_scope::allows_model(scope, &requested_model) {
+        return Err(GatewayError::with_status(404, format!(
+            "模型 '{requested_model}' 不可用：不在这把网关 Key 的可用模型列表里"
+        )).with_code("model_not_found"));
     }
     if !image_generation && !requested_model.is_empty() {
         let providers = crate::server::core::providers::catalog::forwarding_providers(&requested_model);
@@ -463,8 +442,7 @@ pub fn record_early_failure(
         // 请求侧的正文可能解析都没解析成功，存半截没有意义
         raw_request: None,
         raw_response: None,
-        // 早失败路径只有真实流量会走（模型测试自己那条失败在 handler 里收尾）
-        is_test: false,
+        is_test: source.is_internal(),
         source: source.clone(),
     };
     record_entry(&context, Some(error.message.clone()));

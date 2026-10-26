@@ -26,7 +26,6 @@
 //!   models          ← 模型目录（切片 4 起为真实清单，含远程刷新结果）
 //!   sanitizeBlacklistFingerprints ← 出站指纹脱敏开关（与 GET /api/sanitize 同源）
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -37,8 +36,6 @@ use serde_json::{json, Value};
 use crate::server::api::health::UNCONFIGURED_REASON;
 use crate::server::config;
 use crate::server::core::login::LOGIN_TIMEOUT_MS;
-use crate::server::core::providers::router;
-use crate::server::core::routing;
 use crate::server::errors::management_error;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
@@ -47,21 +44,13 @@ use crate::server::ServerState;
 /// GET /api/session —— 免鉴权（前端首屏在配置 API Key 之前也要能读）
 pub async fn get_session(State(state): State<ServerState>) -> Response {
     let snapshot = config::current();
-    // 账号快照取一次：`accounts` 字段与下面的 routedAccountId 读的是同一份数据，
-    // 分两次取会各读一遍盘，还可能出现「两次读之间账号被改」的撕裂。
-    // 用**界面视图**：插件不在的家不出现（账号仍在库里，装上插件原样回来）。
+    // 可见账号与路由页预演共用同一份快照，插件未就绪的账号不参与。
     let accounts = state.store().list_visible_accounts();
-    // 在途请求计数：★ 的推算口径要与真实选路一致 —— 转发选路会跳过已达并发
-    // 上限的账号（`routing::pick_account_by_priority` 的并发过滤），★ 也要剔除
-    // 它们，否则界面上标的「下一个请求会先用谁」在实际都忙时是错的。取快照的
-    // 方式与选路层同源（`UpstreamService::connections()`）。
-    let counts: HashMap<String, usize> = state
-        .upstream()
-        .connections()
-        .snapshot()
-        .into_iter()
-        .collect();
-    let routed = routed_account_id(&accounts, snapshot.last_request_model(), &counts);
+    let routed = super::routing_api::queue_for_accounts(
+        &state, snapshot.last_request_model().map(str::to_string), &crate::server::core::routing::accounts_of(&accounts),
+    )
+        .get("pickedId").and_then(Value::as_str).filter(|id| !id.is_empty())
+        .map(|id| Value::String(id.to_string())).unwrap_or(Value::Null);
     let summary = state.auth().get_config_summary();
     let configured = summary
         .get("configured")
@@ -90,10 +79,7 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
         "accounts": accounts,
         // 最近一次实际请求用的模型：账号页的「模型」筛选默认选它
         "lastRequestModel": snapshot.last_request_model(),
-        // 按 lastRequestModel 派生的「下一个请求会先用谁」（账号页 ★ / 「首选」）。
-        // 判据与转发层同一套（候选 = 提供该模型的那些家的账号，再按全局优先级取
-        // 第一个「启用 + 有凭证 + 对该模型未限流」的）；模型未知或该模型下没有
-        // 可用账号时为 null，界面回落到上面的 currentAccountId。
+        // 与路由页共用的无会话预演队首，包含自动消耗规则与运行期保护。
         "routedAccountId": routed,
         "defaultModel": snapshot.default_model(),
         "proxies": proxies_summary(),
@@ -116,60 +102,6 @@ pub async fn get_session(State(state): State<ServerState>) -> Response {
         // 没申报的家不在表里 —— 界面走自己的兜底表，旧插件照常工作。
         "accountFeatures": crate::server::core::plugin_host::account_features(),
     }))
-}
-
-/// 按「最近一次请求的模型」派生**下一个请求实际会先用谁**的账号 id
-/// （账号页的 ★ / 「首选」读它）。
-///
-/// ── 为什么由后端派生，而不是界面拿 currentAccountId 自己推 ────────
-/// 1. `accounts.currentAccountId` 是**不限模型**的队首（只判「启用 + 有凭证」），
-///    不看按模型记的限额。队首正被限流时，界面标 ★ 的是那个必被跳过的账号，
-///    请求却落到下一个 —— 两边说的不是一件事。
-/// 2. 候选集合还要先收窄到「清单里有这个模型的家」（`route_for_forward`），
-///    而 `/api/session` 的 `models` 是跨家**去重后**的聚合视图（同名模型只留
-///    认领的那一家，见 `catalog::merged_items`），界面据此还原会漏掉并发提供
-///    该模型的其它家。
-///
-/// 直接复用转发层的 `routing::pick_for_model`，界面标 ★ 的账号便与转发会先试的
-/// 那个同判据；不做「取不到会话就继续往后找」那层运行时探测（要读客户端登录态
-/// 文件，属转发编排的职责），改用 `hasCredentials` 这个静态事实近似。
-///
-/// 模型未知 / 该模型下确实没有可用账号时给 null —— 界面回落到
-/// `currentAccountId`，宁可让它标一个「队列第一位」，也不要整列 ★ 凭空消失。
-fn routed_account_id(accounts: &Value, model: Option<&str>, counts: &HashMap<String, usize>) -> Value {
-    let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Value::Null;
-    };
-    // 候选链是 id 空间（内置家 + 自定义家同列，见 `router` 的模块头）；
-    // 自定义家的账号同样在全局队列里，`pick_for_model` 按 provider 字符串
-    // 过滤候选，两种 id 天然可比。
-    let provider_chain = router::route_for_forward(model);
-    let providers: Vec<&str> = provider_chain.iter().map(String::as_str).collect();
-    // 被限制器软跳过的账号先剔除（余额不足 / Token 限额，与转发选路同一判据，
-    // 见 `upstream::rotate::filter_limiter_blocked`）：★ 标的是「下一个请求会先用
-    // 谁」，被拦的账号不该标 ★ —— 否则两边说的又不是一件事了。
-    let facts = crate::server::core::limiter::sources::facts();
-    let limiter_counts = crate::server::core::limiter::counter::facts();
-    let keys = routing::CooldownKeys::new(model);
-    let now = crate::server::logging::now_ms();
-    let candidate_accounts: Vec<Value> = routing::accounts_of(accounts)
-        .into_iter()
-        .filter(|account| !crate::server::core::limiter::evaluate::blocked(
-            account, &keys.for_account(account), &facts, &limiter_counts, now,
-        ))
-        .collect();
-    let candidate_accounts = crate::server::core::routing_scope::apply_accounts(&candidate_accounts, model);
-    if provider_chain.is_empty() { return Value::Null; }
-    routing::pick_for_model(
-        &candidate_accounts,
-        model,
-        &providers,
-        counts,
-        logging::now_ms(),
-    )
-    .and_then(|account| routing::account_id(&account).map(str::to_string))
-    .map(Value::String)
-    .unwrap_or(Value::Null)
 }
 
 /// Clash 摘要（Node 版这里只带三项，完整形态在 /api/proxies）。

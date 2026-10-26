@@ -72,7 +72,7 @@ type Bridge = {
   addModelMapping?: (alias: string, target: string, provider: string, reasoning?: string, enabled?: boolean) => Promise<unknown>
   removeModelMapping?: (alias: string, target: string, provider: string) => Promise<unknown>
   setModelCapabilities?: (provider: string, id: string, capabilities: Record<string, unknown>) => Promise<unknown>
-  testModel?: (payload: Record<string, unknown>) => Promise<unknown>
+  testModel?: (payload: Record<string, unknown>, apiKey: string) => Promise<unknown>
   terminateStatsRequest?: (id: string) => Promise<unknown>
   getAllBalances?: (id?: string) => Promise<unknown>
   getAccounts?: () => Promise<unknown>
@@ -693,6 +693,7 @@ const testModel: AssistantTool = {
     checkToolSignal(context)
     const api = bridge()
     if (!api.testModel) throw new Error(t('当前客户端缺少读取接口：{name}', { name: 'testModel' }))
+    if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
     const testId = crypto.randomUUID()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
@@ -701,7 +702,7 @@ const testModel: AssistantTool = {
     context?.signal?.addEventListener('abort', cancel, { once: true })
     let result: Record<string, unknown> | undefined
     try {
-      result = await api.testModel(payload) as Record<string, unknown> | undefined
+      result = await api.testModel(payload, context.apiKey) as Record<string, unknown> | undefined
     } finally {
       context?.signal?.removeEventListener('abort', cancel)
     }

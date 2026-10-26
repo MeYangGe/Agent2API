@@ -65,6 +65,7 @@ function swBuildStamp(): Plugin {
         const file = path.resolve(__dirname, '../ui/m', name)
         if (fs.existsSync(file)) hash.update(normalizeEol(fs.readFileSync(file)))
       }
+      hash.update(normalizeEol(fs.readFileSync(path.resolve(__dirname, '../ui/aliyun-captcha.js'))))
       // 12 位十六进制足够区分版本，也不会把缓存名拉得太长
       const stamp = hash.digest('hex').slice(0, 12)
 

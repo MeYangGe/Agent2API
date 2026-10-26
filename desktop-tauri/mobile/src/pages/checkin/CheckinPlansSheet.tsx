@@ -2,13 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle } from '@ui'
 import { Badge } from '../../components/ui'
 import { fetchAccountUsage, fetchUsageSnapshot, type UsageRow } from '../../api/gateway'
-import { claimPlan, previewPlans, type Entitlement, type OwnedPlan, type PreviewResult } from '../../api/zcode'
+import { claimPlan, previewPlans, type CaptchaPhase, type Entitlement, type OwnedPlan, type PreviewResult } from '../../api/zcode'
 import type { PlanEntry } from '../../api/checkin'
 import { claimedPlansToday } from '../../lib/checkin'
 import { formatCompact, formatStamp } from '../../lib/format'
 import { serverIdentity } from '../../lib/servers'
 import { useStore, store } from '../../state/store'
 import { t } from '../../i18n'
+import { ZcodeCaptchaPanel } from './ZcodeCaptchaPanel'
 
 function stamp(seconds?: number | null): string {
   return seconds ? formatStamp(seconds * 1000) : ''
@@ -34,6 +35,8 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
   const [loading, setLoading] = useState(true)
   const [querying, setQuerying] = useState(false)
   const [claiming, setClaiming] = useState('')
+  const [claimPhase, setClaimPhase] = useState<CaptchaPhase | ''>('')
+  const [verifyingChannel, setVerifyingChannel] = useState(false)
   const [claimedNow, setClaimedNow] = useState<string[]>([])
   const mounted = useRef(true)
   const claimController = useRef<AbortController | null>(null)
@@ -89,12 +92,13 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
   }, [entry.id, identity, loadPreview, queryUsage])
 
   const claim = async (id: string) => {
-    if (claimController.current || !mounted.current || serverIdentity() !== identity) return
+    if (claimController.current || verifyingChannel || !mounted.current || serverIdentity() !== identity) return
     const controller = new AbortController()
     claimController.current = controller
     setClaiming(id)
+    setClaimPhase('preparing')
     try {
-      const result = await claimPlan(entry.id, id, controller.signal)
+      const result = await claimPlan(entry.id, id, controller.signal, phase => { if (mounted.current) setClaimPhase(phase) })
       if (controller.signal.aborted || !mounted.current || serverIdentity() !== identity) return
       if (result.ok || result.failure === 'already_claimed') {
         const settled = result.planId || id
@@ -107,28 +111,38 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
         store.toast([result.failureLabel || t('未领取成功'), result.message].filter(Boolean).join('：'), 'err')
       }
     } catch (cause) {
-      if (!controller.signal.aborted && mounted.current && serverIdentity() === identity) {
+      if (!controller.signal.aborted && mounted.current && serverIdentity() === identity && (cause as Error)?.name !== 'CaptchaCancelledError') {
         store.toast(cause instanceof Error ? cause.message : String(cause), 'err')
       }
     } finally {
       if (claimController.current === controller) claimController.current = null
-      if (mounted.current && serverIdentity() === identity) setClaiming('')
+      if (mounted.current && serverIdentity() === identity) { setClaiming(''); setClaimPhase('') }
     }
   }
 
   const cancelClaim = () => {
-    claimController.current?.abort()
+    if (claimPhase !== 'submitting') claimController.current?.abort()
+  }
+
+  const close = () => {
+    if (claimPhase === 'submitting') return
+    cancelClaim()
+    onClose()
   }
 
   return (
-    <Sheet open modal={!claiming} onOpenChange={(open, details) => {
+    <Sheet open modal={!claiming && !verifyingChannel} onOpenChange={(open, details) => {
       if (open) return
-      if (claiming) { details.cancel(); return }
-      onClose()
+      if (claimPhase === 'submitting' || ((claiming || verifyingChannel) && ['outside-press', 'focus-out'].includes(details.reason))) {
+        details.cancel()
+        return
+      }
+      close()
     }}>
-      <SheetContent showCloseButton={!claiming}>
+      <SheetContent showCloseButton={claimPhase !== 'submitting'}>
         <SheetHeader><SheetTitle>{t('套餐明细 — {name}', { name: entry.name || entry.id })}</SheetTitle></SheetHeader>
         <SheetBody>
+          <ZcodeCaptchaPanel accountId={entry.id} disabled={Boolean(claiming)} onBusy={setVerifyingChannel} />
           <div className='m-ck-toolbar'>
             <div className='m-ck-title m-ck-grow'>{t('可领取的套餐')}</div>
             <Button variant='outline' size='sm' disabled={loading || Boolean(claiming)} onClick={() => void loadPreview()}>{t('刷新')}</Button>
@@ -146,8 +160,8 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
               {plan.endsAt ? <p className='m-ck-note'>{t('到期 {time}', { time: stamp(plan.endsAt) })}</p> : null}
               {plan.entitlements?.map((item, index) => <p key={index} className='m-ck-note'>{entitlementText(item)}</p>)}
               {plan.description ? <p className='m-ck-note'>{plan.description}</p> : null}
-              <div className='m-ck-actions'><Button size='sm' disabled={Boolean(claiming) || !id} onClick={() => void claim(id)}>
-                {claiming === id ? t('领取中…') : claimed.includes(id) ? t('再领一次') : t('领取')}
+              <div className='m-ck-actions'><Button size='sm' disabled={Boolean(claiming) || verifyingChannel || claimed.includes(id) || !id} onClick={() => void claim(id)}>
+                {claiming === id ? t('领取中…') : claimed.includes(id) ? t('今日已领') : t('领取')}
               </Button></div>
             </div>
           })}
@@ -173,8 +187,8 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
           {unconfirmed.length ? <p className='m-ck-note'>{t('今天已领取但读数尚未同步：{plans}', { plans: unconfirmed.join('、') })}</p> : null}
         </SheetBody>
         <SheetFooter>
-          {claiming ? <Button variant='outline' onClick={cancelClaim}>{t('取消验证')}</Button> : null}
-          <Button variant='outline' disabled={Boolean(claiming)} onClick={onClose}>{t('关闭')}</Button>
+          {claiming ? <Button variant='outline' disabled={claimPhase === 'submitting'} onClick={cancelClaim}>{t('取消验证')}</Button> : null}
+          <Button variant='outline' disabled={claimPhase === 'submitting'} onClick={close}>{t('关闭')}</Button>
         </SheetFooter>
       </SheetContent>
     </Sheet>

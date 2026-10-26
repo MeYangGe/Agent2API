@@ -37,7 +37,12 @@ use crate::server::core::account_store::AccountStore;
 use crate::server::errors::GatewayError;
 
 /// 未安装插件时的通用提示（`label` 由调用方拼进来）。
-fn missing_plugin_message(label: &str, action: &str) -> String {
+fn missing_plugin_message(kind: ProviderKind, action: &str) -> String {
+    let provider = super::kind_id(kind);
+    if let Some(reason) = crate::server::core::plugin_host::provider_compatibility_error(provider) {
+        return reason;
+    }
+    let label = super::label_of(provider);
     format!(
         "{label}的{action}需要安装提供商插件：本版本不再内置反向代理实现，\
          请在「提供商插件」里安装对应插件后重试"
@@ -72,8 +77,7 @@ impl ProviderAdapter for MissingPluginAdapter {
             .and_then(Value::as_str)
             .or_else(|| error_body.get("message").and_then(Value::as_str))
             .unwrap_or("");
-        let label = super::label_of(super::kind_id(self.0));
-        let message = missing_plugin_message(&label, "转发");
+        let message = missing_plugin_message(self.0, "转发");
         UpstreamErrorClass::Fatal {
             status,
             message: if detail.is_empty() {
@@ -114,8 +118,7 @@ impl ProviderAdapter for MissingPluginAdapter {
         _account_id: &'a str,
         _force: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ModelRefreshOutcome> + Send + 'a>> {
-        let label = super::label_of(super::kind_id(self.0));
-        Box::pin(async move { ModelRefreshOutcome::failed(missing_plugin_message(&label, "模型目录刷新")) })
+        Box::pin(async move { ModelRefreshOutcome::failed(missing_plugin_message(self.0, "模型目录刷新")) })
     }
 }
 
@@ -123,8 +126,7 @@ impl ProviderAdapter for MissingPluginAdapter {
 ///
 /// 那些路径不走「上游错误分类」，要的是一句直接可展示的原因。
 pub fn missing_plugin_error(kind: ProviderKind, action: &str) -> GatewayError {
-    let label = super::label_of(super::kind_id(kind));
-    GatewayError::with_status(503, missing_plugin_message(&label, action))
+    GatewayError::with_status(503, missing_plugin_message(kind, action))
 }
 
 /// 取某 kind 的占位实例（`&'static`，一个 kind 一个，首次访问时创建）。

@@ -421,12 +421,7 @@ impl LoginService {
                 error
             })?;
         let store = self.store.clone();
-        // 账号 id：插件给的稳定身份（同一账号登录两次会被识别成更新）
-        let account_id_hint = if normalized.identity.trim().is_empty() {
-            format!("{provider}-{}", logging::now_ms())
-        } else {
-            normalized.identity.clone()
-        };
+        let account_id_hint = normalized.identity.clone();
         let account_name = normalized
             .public
             .get("name")
@@ -441,6 +436,7 @@ impl LoginService {
                 &account_name,
                 &normalized.secret,
                 &normalized.public,
+                normalized.desktop,
             )
             .map_err(|message| GatewayError::with_status(500, message))?;
         let account_id = account

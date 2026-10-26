@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use super::{update, CONFIG, KEY_UPDATE_BETA};
 
 pub const KEY_UPDATE_STABLE: &str = "updateStable";
+pub(crate) const KEY_INSTALLED_UPDATE_VERSION: &str = "installedUpdateVersion";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -74,6 +75,47 @@ pub fn update_channels() -> UpdateChannels {
 
 pub fn update_beta() -> bool {
     update_channels().beta
+}
+
+pub(crate) fn sync_installed_update_channel(version: &str) -> bool {
+    use crate::server::core::update::{compare_versions, is_prerelease_version};
+
+    if compare_versions(version, version).is_none() {
+        return false;
+    }
+    let previous = super::with_raw(|raw| {
+        raw.get(KEY_INSTALLED_UPDATE_VERSION)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+    .flatten();
+    if previous.as_deref() == Some(version) {
+        return false;
+    }
+    // 连续升级 beta 保留用户手动关闭通道的选择。
+    let entering_beta = is_prerelease_version(version)
+        && !previous.as_deref().is_some_and(is_prerelease_version);
+    let changed = entering_beta && !update_channels().beta;
+    let saved = update(|config| {
+        if changed {
+            config.raw.insert(KEY_UPDATE_BETA.to_string(), Value::Bool(true));
+            config.update_channels.beta = true;
+        }
+        config.raw.insert(
+            KEY_INSTALLED_UPDATE_VERSION.to_string(),
+            Value::String(version.to_string()),
+        );
+    });
+    if changed {
+        crate::server::logging::log(
+            "[Update]",
+            &format!("检测到已安装 beta 版 v{version}，已开启 beta 更新关注；之后手动关闭会保留"),
+        );
+    }
+    if !saved {
+        crate::server::logging::log("[Update]", "安装版本与更新通道未能保存，本次设置仅内存生效");
+    }
+    changed
 }
 
 pub fn set_update_channels(

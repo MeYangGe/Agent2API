@@ -1,5 +1,7 @@
 import { t } from '../i18n'
-import type { AccountRecord } from './accounts-shared'
+import type { AccountRecord, AccountSorting } from './accounts-shared'
+
+export type RouteOrderChange = { kind: 'provider' } | { kind: 'account'; provider: string }
 
 export type RouteProfile = {
   providers: string[]
@@ -48,6 +50,7 @@ export type RoutingWorkspace = {
   profile: RouteProfile
   providers: Array<{ id: string; label: string; accountCount: number; custom: boolean; available: boolean }>
   accounts: AccountRecord[]
+  sorting: AccountSorting
   queue: { strategy: string; sticky: string; pickedId: string; ordered: RouteEntry[]; blocked: RouteEntry[] }
   settings: RouteSettings
   metrics: {
@@ -132,7 +135,7 @@ export type StickyEntry = {
 }
 export type RoutingBridge = {
   getRoutingWorkspace(model?: string): Promise<RoutingWorkspace>
-  saveRoutingProfile(payload: { model: string | null; profile: RouteProfile | null }): Promise<RoutingWorkspace>
+  saveRoutingProfile(payload: { model: string | null; profile: RouteProfile | null; orderChange?: RouteOrderChange }): Promise<RoutingWorkspace>
   setRoutingConfig(patch: Partial<RouteSettings>): Promise<RouteSettings>
   getRoutingReplays(query: { model?: string; offset: number; limit: number; status?: string }): Promise<{ entries: ReplayRow[]; matched: number; available?: boolean }>
   getRoutingTrace(query: { model?: string; offset: number; limit: number; status?: string; search?: string; startDate?: string; endDate?: string }): Promise<{ entries: ReplayRow[]; matched: number; available?: boolean }>

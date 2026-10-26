@@ -73,6 +73,9 @@ pub fn prepare(
         install::extract_zip(bytes, &staging)?;
         let manifest = install::read_manifest(&staging)?;
         install::validate_manifest(&manifest, proto::PROTOCOL_VERSION)?;
+        if let Some(reason) = super::compatibility::version_error(&manifest.id, &manifest.version) {
+            return Err(reason);
+        }
         if manifest.id.is_empty()
             || !manifest
                 .id

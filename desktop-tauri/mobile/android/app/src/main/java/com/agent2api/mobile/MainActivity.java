@@ -10,6 +10,7 @@ public class MainActivity extends BridgeActivity {
         // 自定义插件必须在 super.onCreate 之前注册：BridgeActivity 在那里
         // 就把插件表建好了（见 BridgeActivity.load()）。
         registerPlugin(ApkUpdaterPlugin.class);
+        registerPlugin(ImageSaverPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

@@ -69,13 +69,24 @@ fn snapshot_for(channels: crate::server::config::UpdateChannels) -> Value {
         result["plugins"] = json!([]);
     }
     result["channels"] = json!(channels);
+    if let Some(items) = result["plugins"].as_array_mut() {
+        for item in items {
+            if item["error"] == true {
+                if let Some(reason) = item["reason"].as_str() {
+                    item["reason"] = json!(update::describe_error(reason, 0));
+                }
+            }
+        }
+    }
     let stale = state.last_error.is_some() || invalidated;
     result["checked"] = json!(state.last_success_at > 0 && !invalidated);
     result["checkedAt"] = json!(state.last_success_at);
     result["checking"] = json!(state.running());
     result["stale"] = json!(stale);
     result["current"] = json!(super::host_target());
-    result["reason"] = json!(state.last_error.clone());
+    result["reason"] = json!(state.last_error.as_deref().map(|error| {
+        update::describe_error(error, state.retry_at)
+    }));
     result["error"] = json!(state.last_error.is_some());
     result["available"] = json!(result["plugins"]
         .as_array()
@@ -113,7 +124,7 @@ pub async fn refresh(manual: bool) -> Result<Value, String> {
             if state.last_success_at > 0 {
                 return Ok(snapshot());
             }
-            return Err(state.waiting_message());
+            return Err(update::waiting_message(&state));
         }
     };
     let outcome = fetch_catalog(channels).await;
@@ -184,6 +195,11 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
         .await
         {
             Ok(Some(release)) => {
+                let compatibility_error = if installed.is_none() {
+                    super::compatibility::version_error(&entry.id, &release.version)
+                } else {
+                    None
+                };
                 let require_signed = value["requireSigned"] == true || release.require_signed;
                 value["requireSigned"] = json!(require_signed);
                 value["version"] = json!(release.version);
@@ -194,6 +210,10 @@ async fn fetch_catalog(channels: crate::server::config::UpdateChannels) -> Resul
                 value["platforms"] = json!(release.platforms.into_iter().map(|(target, url, size)| {
                     json!({ "current": target == current, "target": target, "url": url, "size": size, "requireSigned": require_signed })
                 }).collect::<Vec<_>>());
+                if let Some(reason) = compatibility_error {
+                    value["error"] = json!(true);
+                    value["reason"] = json!(reason);
+                }
             }
             Ok(None) => value["reason"] = json!("当前通道暂无可安装的版本"),
             Err(error) => {
@@ -231,6 +251,9 @@ pub fn updates() -> Value {
     let catalog = snapshot();
     let items = catalog["plugins"].as_array();
     let updates: Vec<Value> = super::list_packs().into_iter().map(|pack| {
+        if let Some(required) = super::compatibility::update_for(&pack) {
+            return required;
+        }
         let entry = items.and_then(|items| items.iter().find(|entry| entry["id"] == pack.id));
         let target = super::host_target();
         let platform = entry.and_then(|entry| entry["platforms"].as_array())
@@ -300,6 +323,7 @@ async fn apply_automatic() {
         let should_install = match installed {
             Some(pack) => {
                 settings.auto_update
+                    && !pack.update_required
                     && pack.enabled
                     && pack.signed
                     && entry["version"].as_str().is_some_and(|version| {
@@ -341,6 +365,7 @@ pub fn spawn() {
     crate::spawn_task(async move {
         reschedule(settings::current().interval * 60_000);
         loop {
+            super::compatibility::apply().await;
             let settings = settings::current();
             let state = task_state::read(&key()).unwrap_or_default();
             let network_enabled = settings.auto_check;

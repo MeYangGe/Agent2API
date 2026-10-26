@@ -329,7 +329,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
 /// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
 /// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1045,6 +1045,7 @@ fn apply_version(
         18 => conn.execute_batch(include_str!("schema_source_stats.sql")),
         19 => conn.execute_batch(include_str!("schema_assistant_images.sql")),
         20 => conn.execute_batch(include_str!("schema_debug_raw.sql")),
+        21 => conn.execute_batch(include_str!("schema_assistant_title.sql")),
         _ => Ok(()),
     }
 }

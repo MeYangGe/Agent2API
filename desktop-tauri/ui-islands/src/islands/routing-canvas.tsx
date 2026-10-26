@@ -4,8 +4,9 @@ import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import { inactiveProvider, orderedProviders } from './routing-display'
 import { PROVIDER_ICONS } from './add-provider-pick'
+import { groupSortSummary } from './accounts-group-settings'
 import {
-  accountOrder, cloneProfile, moveAccount, moveProvider, patch, saveProfile,
+  accountOrder, accountOrderLocked, cloneProfile, moveAccount, moveProvider, patch, saveProfile,
   setAllProvidersExpanded, setProviderExpanded, snapshot,
 } from './routing-state'
 import { formatDuration, IconButton, ProviderRouteBadge, RouteIcon, RouteStateBadge, stickyLabel, strategyLabel } from './routing-ui'
@@ -110,7 +111,8 @@ function useRoutingDrag() {
       const target = ids.indexOf(drag.target)
       if (target < 0) return
       ids.splice(target + (drag.after ? 1 : 0), 0, drag.id)
-      void saveProfile(profile)
+      void saveProfile(profile, snapshot().model, drag.kind === 'account'
+        ? { kind: 'account', provider: drag.provider } : { kind: 'provider' })
     }
     window.addEventListener('pointermove', move, { passive: false })
     window.addEventListener('pointerup', end)
@@ -118,7 +120,8 @@ function useRoutingDrag() {
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end) }
   }, [])
   const start = (event: React.PointerEvent, kind: Drag['kind'], provider: string, id: string) => {
-    if (event.button !== 0 || snapshot().busy || snapshot().search.trim()) return
+    if (event.button !== 0 || snapshot().busy || snapshot().search.trim()
+      || kind === 'account' && accountOrderLocked(provider)) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
     const workspace = snapshot().workspace
@@ -210,7 +213,10 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
           const displayGroup = inactive ? visibleInactive : visibleActive
           const providerIndex = displayGroup.indexOf(provider)
           const ids = accountOrder(provider).filter(id => accounts.has(id))
-          const rank = providerRanks.get(provider)
+          const orderLocked = accountOrderLocked(provider)
+          const rank = workspace.model && workspace.customized ? profile.providers.indexOf(provider) + 1
+            : workspace.sorting.providerOrder.indexOf(provider) + 1
+          const effectiveRank = providerRanks.get(provider)
           const accountStates = ids.map(id => {
             const account = accounts.get(id)!
             return queue.get(id)?.state || (account.enabled === false ? 'disabled' : account.hasCredentials === false ? 'no-credentials' : 'unready')
@@ -238,7 +244,8 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
                 onPointerDown={event => drag.start(event, 'provider', provider, provider)}><RouteIcon name='gripVertical' size={14} /></Button>
               <CollapsibleTrigger className='routing-provider-toggle' title={expanded ? t('折叠这一组') : t('展开这一组')}>
                 <ProviderMark id={provider} label={label} /><span className='routing-provider-name'><b>{label}</b><span>{t('{n} 个账号', { n: ids.length })} · {t('{n} 个请求', { n: running })}</span></span>
-                <ProviderRouteBadge rank={rank} unavailable={unavailable} disabled={disabled} states={accountStates} />
+                <ProviderRouteBadge rank={rank > 0 ? rank : undefined} effectiveRank={effectiveRank} unavailable={unavailable} disabled={disabled} states={accountStates} />
+                {orderLocked ? <Badge shape='tag' variant='secondary' title={t('与账号页共用全局消耗规则')}>{groupSortSummary(workspace.sorting.rules[provider] || [])}</Badge> : null}
                 <RouteIcon name='chevronDown' size={14} />
               </CollapsibleTrigger>
               <IconButton name='arrowUp' title={t('提高优先级')} disabled={busy || providerIndex === 0 || !!query} onClick={() => void moveProvider(provider, -1)} />
@@ -260,14 +267,14 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
                 const name = displayNameOf(account)
                 return <React.Fragment key={id}>{account.enabled === false && id === disabledIds[0] ? disabledToggle : null}<div className={cn('routing-account-row', picked && 'is-picked', disabled && 'is-muted', drag.dragging === id && 'is-dragging', drag.drop?.id === id && (drag.drop.after ? 'drop-after' : 'drop-before'))}
                   data-routing-account={id} data-provider={provider} data-account-disabled={account.enabled === false} title={entry?.reason}>
-                  <Button variant='ghost' size='icon' className='routing-grip' disabled={busy || !!query} aria-label={t('拖动调整账号顺序')} title={t('拖动调整账号顺序')}
+                  <Button variant='ghost' size='icon' className='routing-grip' disabled={busy || !!query || orderLocked} aria-label={t('拖动调整账号顺序')} title={orderLocked ? t('自动消耗排序已启用，请先关闭规则再手动调整') : t('拖动调整账号顺序')}
                     onPointerDown={event => drag.start(event, 'account', provider, id)}><RouteIcon name='gripVertical' size={14} /></Button>
                   <span className='routing-account-rank'>{(profile.accountOrder[provider] || []).indexOf(id) + 1}</span><span className='routing-account-avatar'>{name.slice(0, 1).toUpperCase()}</span>
                   <div className='routing-account-name'><b>{name}</b><span>{description}</span></div>
                   {picked ? <Badge variant='brand' shape='tag'>{t('队首')}</Badge> : <RouteStateBadge state={state} />}
                   <span className='routing-account-concurrency' title={t('在途请求 / 并发上限')}>{metrics.accountConnections?.[id] || 0}<em>/ {Number(account.maxConcurrent) || '∞'}</em></span>
-                  <IconButton name='arrowUp' title={t('提高优先级')} disabled={busy || index === 0 || !!query} onClick={() => void moveAccount(provider, id, -1)} />
-                  <IconButton name='arrowDown' title={t('降低优先级')} disabled={busy || index >= peerIds.length - 1 || !!query} onClick={() => void moveAccount(provider, id, 1)} />
+                  <IconButton name='arrowUp' title={t('提高优先级')} disabled={busy || index === 0 || !!query || orderLocked} onClick={() => void moveAccount(provider, id, -1)} />
+                  <IconButton name='arrowDown' title={t('降低优先级')} disabled={busy || index >= peerIds.length - 1 || !!query || orderLocked} onClick={() => void moveAccount(provider, id, 1)} />
                   <IconButton name='settings' title={t('账号设置')} onClick={() => onAccount(id)} />
                 </div></React.Fragment>
               })}

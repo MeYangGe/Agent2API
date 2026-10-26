@@ -217,6 +217,7 @@ type RequestInitLite = {
   /** 不触发 401 接管（探活类请求用） */
   quiet?: boolean
   signal?: AbortSignal
+  apiKey?: string
 }
 
 /**
@@ -235,6 +236,10 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
   requireCurrentServer(identity)
   const method = init.method || 'GET'
   const headers = buildHeaders()
+  if (init.apiKey !== undefined) {
+    headers['x-api-key'] = init.apiKey
+    headers.Authorization = `Bearer ${init.apiKey}`
+  }
   const requestInit: RequestInit = { method, headers, signal: init.signal }
   if (init.body !== undefined || method !== 'GET') {
     headers['Content-Type'] = 'application/json'
@@ -267,7 +272,7 @@ async function requestApi<T>(path: string, init: RequestInitLite, identity: stri
       if (refreshed) return requestApi<T>(path, init, identity, false)
       clearPanelAuth()
       onAuthLost?.('login')
-    } else {
+    } else if (init.apiKey === undefined) {
       onAuthLost?.('key')
     }
   }

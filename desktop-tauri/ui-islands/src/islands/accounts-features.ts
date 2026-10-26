@@ -299,9 +299,9 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // ModelScope（魔搭）的两个站点（`modelscope` / `modelscope-intl`）：两条同一份
   //   —— 账号字段、余额形态、签到链路两地完全一致，差别只在域名（那是转发与
   //   凭证层的事，这里不体现）。
-  // `usage: true` —— 额度是魔粒钱包（`available_balance`），外加「今日已用调用数」
-  //   一行，见后端 providers::modelscope::balance；`creditDetail: true` 让余额格
-  //   挂出「积分明细」（可用 / 冻结 / 今日已用三行）。
+  // `usage: true` —— 额度是魔粒钱包（`available_balance`），外加「今日已用调用数」。
+  //   `creditDetail: true` 挂出余额详情：可用 / 冻结 / 今日已用都是 snapshot 读数，
+  //   不作为积分包计算耗尽、到期或剩余比例。
   // `edition: false` —— 地区由 provider id 直接表达（两家 provider、两个分组），
   //   不需要再渲染一个地区列。
   // `identifier: ['userId']` —— 身份键存的是上游的 HavanaId

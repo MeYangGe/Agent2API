@@ -79,6 +79,12 @@ async fn dispatch(
     query: &str,
     body: &Bytes,
 ) -> Response {
+    if method == Method::GET && full_path == "/api/update/policy" {
+        let current = query.split('&').filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| *key == "current").map(|(_, value)| percent_decode(value)).unwrap_or_default();
+        let current = if current.is_empty() { crate::server::core::update::CURRENT_VERSION } else { &current };
+        return ok_json(state.update().refresh_policy(current).await);
+    }
     if method == Method::GET && full_path == "/api/update/check" {
         // `url.searchParams.get('current') || ''`：缺省是空串（不是 null）
         let current = query
@@ -124,6 +130,7 @@ async fn dispatch(
             Ok((settings, saved, changed)) => {
                 if changed {
                     state.update().reset_source_preference();
+                    crate::server::core::plugin_host::update::clear_cooldown();
                     crate::server::core::plugin_host::catalog::schedule_now();
                 }
                 let mut value = json!(settings);

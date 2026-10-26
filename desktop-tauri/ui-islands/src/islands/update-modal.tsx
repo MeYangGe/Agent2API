@@ -69,6 +69,7 @@ export function showUpdateModal(
   info: UpdateInfo | null | undefined,
   onGoUpdate: (info: UpdateInfo) => Promise<void>,
 ): void {
+  if (info?.forceUpdate?.required) return
   if (info?.channelChanged) { unmountUpdateModal(); return }
   if (!info || info.hasUpdate !== true) return
   // 更新已应用到容器里、只差重启（容器内更新）：此刻弹「去更新」是条死路 ——

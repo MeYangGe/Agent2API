@@ -247,6 +247,11 @@ pub fn write_result(account_id: &str, outcome: &UsageOutcome) {
         }
     })
     .flatten();
+    if matches!(written, Some((true, _))) {
+        if let Some(usage) = &outcome.usage {
+            crate::server::core::account_order::note_usage(account_id, usage);
+        }
+    }
     match written {
         // 成功且判出了数字 → 刷新事实
         Some((true, Some(remaining))) => {
@@ -534,7 +539,10 @@ fn migrate_legacy_snapshot() {
 ///
 /// 云同步下载后会重装一次（表被整体替换，事实表必须跟着换）—— 因此本函数
 /// 是 `pub(crate)` 而不是私有：`cloud_sync::download_locked` 是唯一的外部调用点。
-pub(crate) fn reload_facts() {    let facts: HashMap<String, BalanceFact> = load_all()
+pub(crate) fn reload_facts() {
+    let records = load_all();
+    crate::server::core::account_order::reload_usage(&records);
+    let facts: HashMap<String, BalanceFact> = records
         .into_iter()
         .filter(|(_, record)| record.usage.is_some())
         .filter_map(|(id, record)| {

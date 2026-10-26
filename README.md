@@ -24,7 +24,7 @@ This repository contains only the gateway and client configuration infrastructur
 
 ## ✨ Key Features
 
-- 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy and Antigravity supply image generation, while Loomy and Antigravity also support reference-image editing. Both are available as AI assistant tools
+- 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy, Antigravity and ModelScope supply image generation, while Loomy, Antigravity and ModelScope also support reference-image editing. Both are available as AI assistant tools
 - 🧭 **AI routing** — model mapping, account priority, load balancing, session affinity and failover in one place
 - 🤖 **Agent client takeover** — manage multiple connection profiles for local clients, import existing settings, preview writes and switch between the gateway and custom services
 - 🧩 **Plugin extensions** — provider implementations are installed and updated separately, not bundled with the application; the routing gateway works without them

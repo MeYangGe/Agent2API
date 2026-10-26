@@ -24,6 +24,7 @@ import { PluginsPage } from './pages/PluginsPage'
 import type { ScreenId } from './lib/routes'
 import { NavBar } from './components/NavBar'
 import { t } from './i18n'
+import { RequiredUpdateGate } from './components/RequiredUpdateGate'
 
 /**
  * 路由表。
@@ -166,6 +167,7 @@ export function App() {
       </div>
       <TabBar />
       <Toast />
+      <RequiredUpdateGate />
       <AuthGate key={state.serverRevision} />
     </AppFrame>
   )

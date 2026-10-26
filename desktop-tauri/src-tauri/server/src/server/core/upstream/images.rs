@@ -18,7 +18,7 @@ pub(super) struct ImageFailure {
 }
 
 impl ImageFailure {
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(super) fn invalid(message: impl Into<String>) -> Self {
         Self {
             status: 502,
             body: json!({ "message": message.into() }),
@@ -43,10 +43,11 @@ impl ImageResponse {
 pub(super) async fn collect(
     response: reqwest::Response,
     kind: ImageResponseKind,
+    transport: &super::request::TransportRequest,
     telemetry: &Arc<RequestTelemetry>,
 ) -> Result<Value, ImageFailure> {
     let budget = Duration::from_millis(crate::server::config::timeout_settings().body_ms());
-    let reading = collect_body(response, kind, telemetry);
+    let reading = collect_body(response, kind, transport, telemetry);
     let timed = async {
         tokio::time::timeout(budget, reading)
             .await
@@ -73,6 +74,7 @@ pub(super) async fn collect(
 async fn collect_body(
     response: reqwest::Response,
     kind: ImageResponseKind,
+    transport: &super::request::TransportRequest,
     telemetry: &Arc<RequestTelemetry>,
 ) -> Result<Value, ImageFailure> {
     const MAX_RESPONSE_BYTES: usize = 96 * 1024 * 1024;
@@ -139,6 +141,9 @@ async fn collect_body(
     } else {
         let payload: Value = serde_json::from_slice(&bytes)
             .map_err(|_| ImageFailure::invalid("上游生图响应不是有效 JSON"))?;
+        if matches!(kind, ImageResponseKind::ModelscopeAsync) {
+            return super::image_tasks::collect(&payload, transport, telemetry).await;
+        }
         if matches!(kind, ImageResponseKind::Openai) {
             if payload.get("error").is_some_and(|error| !error.is_null()) {
                 return Err(failure_from(&payload, status));

@@ -49,6 +49,7 @@ pub mod aggregate;
 pub mod cancellation;
 pub mod connections;
 pub mod continuation;
+mod image_tasks;
 mod images;
 pub mod refusal;
 pub mod request;
@@ -201,8 +202,8 @@ pub struct ForwardRequest {
     pub telemetry: Arc<usage::RequestTelemetry>,
     /// 本次请求命中的网关 Key 所带来的**可用提供商**限制（R9）。
     ///
-    /// `None` = 不限制（免鉴权模式 / 环境变量 Key / 未知 Key，见
-    /// `core::key_scope` 的模块头）。为什么**放在入参里**而不是让转发层自己去
+    /// `None` = 已鉴权且没有白名单限制（环境变量 Key，见 `core::key_scope`）。
+    /// 为什么**放在入参里**而不是让转发层自己去
     /// 请求头里再解析一次：转发层不该认识「网关 Key」这个概念（它只认识上游与
     /// 账号），而且 handler 手里已经有 `KeyScope`（中间件放进请求扩展的那份），
     /// 再解析一次就是两处实现同一件事。传值（`Option<KeyScope>`）而不是引用：
@@ -360,6 +361,9 @@ impl UpstreamService {
     }
 
     async fn forward_request(&self, request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool) -> Result<ForwardOutcome, GatewayError> {
+        if let Some(rule) = super::update::required_update() {
+            return Err(GatewayError::with_status(426, rule["message"].as_str().unwrap_or("当前版本需要强制更新")).with_code("update_required"));
+        }
         // ── 调试模式：为本次请求装一个原始报文采集器 ─────────────────
         // 装在这里（转发入口）而不是各家适配器里：四条路径（流式 / 非流式 ×
         // 无状态 / 有状态）都要采，装一次全都覆盖到。开关关着时**不创建**

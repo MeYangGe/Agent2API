@@ -32,6 +32,7 @@
 
 mod bootstrap;
 pub mod catalog;
+mod compatibility;
 mod errors;
 mod gemini_signatures;
 mod install;
@@ -68,6 +69,7 @@ pub use rpc::{HostOptions, RpcAdapter};
 pub(crate) use rpc_cache::meta as model_catalog_meta;
 pub use management::snapshot as management_snapshot;
 pub(crate) use packages::prepare as prepare_pack;
+pub(crate) use compatibility::provider_error as provider_compatibility_error;
 
 /// 当前平台的目标三元组（界面提示「下载哪个平台的包」用）。
 pub fn host_target() -> String {
@@ -479,6 +481,10 @@ impl Host {
             providers: StdMutex::new(Vec::new()),
             callbacks,
         }
+    }
+
+    pub(crate) fn ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire) && self.running.load(Ordering::Acquire)
     }
 
     /// 当前状态（给界面）。

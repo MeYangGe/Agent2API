@@ -318,6 +318,10 @@ async fn start_pack(
     // 入口路径与清单都在版本目录里。清单读不出来不致命 —— 入口路径注册表里
     // 也有一份（`InstalledPack::entry`），但**必须**复核协议版本，否则一个
     // 旧版插件会在握手时被当成新版用。
+    if let Some(reason) = super::compatibility::version_error(&pack.id, &pack.version) {
+        logging::log("[Plugin]", &reason);
+        return None;
+    }
     let dir = install::plugins_dir().join(&pack.id).join(&pack.version);
     let manifest = match install::read_manifest(&dir) {
         Ok(manifest) => {

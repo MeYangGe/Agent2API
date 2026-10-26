@@ -70,9 +70,9 @@ const DOMAIN_ORDER = [
 const DOMAIN_RULES = [
   { domain: 'common', files: ['index.html', 'm.html', 'desktop-shell.tsx', 'desktop-titlebar.tsx', 'desktop-tooltip.tsx', 'island-registry.ts', 'clipboard.js', 'filter-memory.js', 'app.js', 'confirm-dialog.tsx', 'input.tsx', 'input-control.tsx', 'segmented.tsx', 'index.tsx', 'markdown.js', 'icons.js', 'App.tsx', 'main.tsx', 'Shell.tsx', 'NavBar.tsx', 'Icon.tsx', 'ProviderLogo.tsx', 'ui.tsx', 'PullToRefresh.tsx', 'AppUpdatePanel.tsx', 'CommunitySheet.tsx', 'i18n.ts', 'client.ts', 'gateway.ts', 'format.ts', 'providers.ts', 'providerFacts.ts', 'usePolling.ts', 'pwa.ts', 'usePwa.ts', 'appUpdate.ts', 'community.ts', 'servers.ts', 'auth.ts', 'store.ts', 'routes.ts'] },
   { domain: 'login', files: ['login.html', 'login-page.tsx', 'panel-captcha.js'] },
-  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-settings-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-limiter-', 'accounts-export'] },
+  { domain: 'accounts', files: ['accounts-page.tsx', 'accounts-hidden-notice.tsx', 'HiddenAccountsNotice.tsx', 'accounts-refresh.ts', 'accounts-update.ts', 'AccountsPage.tsx', 'AccountSheet.tsx', 'AccountsFilterSheet.tsx', 'accounts-shared.ts', 'accounts-columns.ts', 'accounts-store.ts', 'accounts-panels.tsx', 'accounts-queue-drag.ts', 'accounts-dialogs.tsx', 'accounts-batch-dialog.tsx', 'accounts-settings-dialog.tsx', 'accounts-zcode-plan.tsx', 'accounts-proxy-form.tsx', 'accounts-dialog-limiter.tsx', 'accounts-dialog-usage.tsx', 'accounts-credit-detail.tsx', 'usage-readings.ts', 'accounts-limit-detail.tsx', 'accounts-data.ts', 'accounts-domain.ts', 'accounts-group-settings.tsx', 'usage.ts', 'zcode-plans-modal.tsx', 'balance-query.tsx'], prefixes: ['accounts-limiter-', 'accounts-export'] },
   { domain: 'add-account', files: ['add-custom-provider.tsx', 'custom-provider-ui.js', 'providers.js', 'preset-providers.js', 'web-login.js', 'sms-login.js', 'autoclaw-oauth.js', 'aliyun-captcha.js', 'zcode-claim.js', 'zcode-captcha-pool.js', 'codearts-welfare.js'], prefixes: ['add-account-', 'add-provider-'] },
-  { domain: 'models', files: ['ModelsPage.tsx', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx'], prefixes: ['models-'] },
+  { domain: 'models', files: ['ModelsPage.tsx', 'model-capability.ts', 'model-capability-dialog.tsx', 'model-test-dialog.tsx', 'model-test-result.tsx'], prefixes: ['models-'] },
   { domain: 'routing', prefixes: ['routing-'] },
   // 「Agent」页：本机 AI 客户端的配置接管（客户端清单 / 配置编辑 / 写入预览）
   { domain: 'agent', files: ['AgentPage.tsx'], prefixes: ['agent-'] },
@@ -82,13 +82,13 @@ const DOMAIN_RULES = [
   { domain: 'settings', files: ['units.js', 'SettingsPage.tsx', 'MorePage.tsx', 'PwaNotice.tsx', 'ServersPage.tsx', 'LoginPage.tsx', 'system-info-pane.tsx', 'SystemInfoSheet.tsx', 'sidebar-layout.js'], prefixes: ['settings-', 'sidebar-'] },
   // AI 助手（侧边栏「智能」组的一级页 + 设置页「AI 助手」分类）：
   // 对话页、工具集、设置面板三块
-  { domain: 'assistant', files: ['AssistantPage.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
-  { domain: 'update', files: ['upgrade-panel.js', 'GithubAccessSettings.tsx'], prefixes: ['update-'] },
-  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx'] },
+  { domain: 'assistant', files: ['AssistantPage.tsx', 'AssistantHistory.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
+  { domain: 'update', files: ['upgrade-panel.js', 'GithubAccessSettings.tsx', 'RequiredUpdateGate.tsx', 'updates.ts'], prefixes: ['update-'] },
+  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'use-model-api-keys.ts'] },
   { domain: 'proxies', files: ['ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'proxies-kernel-dialog.tsx', 'sponsor.ts'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
-  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'CheckinPage.tsx'], prefixes: ['checkin-', 'Checkin'] },
+  { domain: 'checkin', files: ['checkin.ts', 'zcode.ts', 'CheckinPage.tsx', 'ZcodeCaptchaPanel.tsx'], prefixes: ['checkin-', 'Checkin'] },
   { domain: 'tasks', files: ['tasks-panel.tsx', 'TasksPage.tsx'] },
   { domain: 'logs', files: ['logs.ts', 'LogsPage.tsx'], prefixes: ['logs-'] },
   { domain: 'requests', files: ['RequestsPage.tsx', 'requests-page.tsx', 'request-detail.tsx', 'request-raw-panes.tsx', 'request-hover.tsx', 'request-clear-modal.tsx', 'conversation-preview.js', 'source-filters.tsx', 'request-cells.tsx', 'request-phase.ts'] },
@@ -134,7 +134,7 @@ function islandSources() {
   walk(ISLANDS_SRC)
   if (fs.existsSync(SHARED_SRC)) {
     for (const entry of fs.readdirSync(SHARED_SRC, { withFileTypes: true })) {
-      if (entry.isFile() && (entry.name === 'logs.ts' || /^(assistant-|docs-api-).*\.tsx?$/.test(entry.name))) {
+      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'usage-readings.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || /^(assistant-|agent-|docs-api-|model-api-key).*\.tsx?$/.test(entry.name))) {
         out.push(path.join(SHARED_SRC, entry.name))
       }
     }

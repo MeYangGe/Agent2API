@@ -68,6 +68,7 @@ const EXCLUDED_CONFIG_KEYS: &[&str] = &[
     "githubToken",
     // 代理内核的下载出网线路：绑本机网络环境
     "kernelProxy",
+    crate::server::config::KEY_INSTALLED_UPDATE_VERSION,
 ];
 
 /// 保留键里**进快照**的项（其余保留键一律不进）。

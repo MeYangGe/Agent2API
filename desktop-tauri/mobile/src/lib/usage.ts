@@ -13,6 +13,7 @@
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
 import { t } from '../i18n'
+import { snapshotReadingsOf, usageUnitLabel } from '../../../ui-shared/usage-readings'
 
 export type UsageView = {
   kind: 'ok' | 'warn' | 'bad' | 'muted'
@@ -44,7 +45,7 @@ function compact(value: unknown): string {
 /** usage 里可读的「单位」：缺失时按积分兜底 */
 function unitOf(usage: Record<string, unknown>): string {
   const unit = usage.unit
-  return typeof unit === 'string' && unit.trim() ? unit : t('积分')
+  return typeof unit === 'string' && unit.trim() ? usageUnitLabel(unit.trim(), t) : t('积分')
 }
 
 /** 把「部分失败」的两条错误拼成 detail 尾巴（CodeArts 这类两份账的家） */
@@ -81,15 +82,13 @@ export function usageText(row?: UsageRow): UsageView {
 
   const data = usage as Record<string, unknown>
   const errors = partialErrors(data)
+  const readings = snapshotReadingsOf(data, t, compact).map(reading => `${reading.name} ${reading.view}`)
   const baseKind: UsageView['kind'] = errors.length ? 'warn' : 'ok'
-  const withErrors = (view: UsageView): UsageView => {
-    if (!errors.length) return view
-    return {
-      kind: 'warn',
-      text: view.text,
-      detail: [view.detail, ...errors].filter(Boolean).join(' · '),
-    }
-  }
+  const withErrors = (view: UsageView): UsageView => ({
+    kind: errors.length ? 'warn' : view.kind,
+    text: view.text,
+    detail: [view.detail, ...readings, ...errors].filter(Boolean).join(' · '),
+  })
 
   // ④ workbuddy 既有形状：totalLeft / planLeft / bonusLeft
   if (Object.prototype.hasOwnProperty.call(data, 'totalLeft')) {
@@ -130,7 +129,7 @@ export function usageText(row?: UsageRow): UsageView {
     )
     const lead = wallets.find(item => item.balance !== undefined && item.balance !== null)
     if (lead) {
-      const walletUnit = typeof lead.unit === 'string' && lead.unit.trim() ? lead.unit : unitOf(data)
+      const walletUnit = typeof lead.unit === 'string' && lead.unit.trim() ? usageUnitLabel(lead.unit.trim(), t) : unitOf(data)
       const detail = wallets
         .map(item => {
           const name =

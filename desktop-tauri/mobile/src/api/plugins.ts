@@ -1,4 +1,6 @@
 import { apiCall } from './client'
+import { githubErrorMessage } from '../../../ui-shared/updates'
+import { t } from '../i18n'
 import type {
   PluginMutation, PluginOperation, PluginSettings, PluginsPayload, PluginUpdate, ReleaseState,
 } from '../../../ui-shared/plugins'
@@ -7,6 +9,10 @@ export type {
   PackProvider, PackSummary, PluginMutation, PluginOperation, PluginSettings,
   PluginsPayload, PluginUpdate, StorePlugin,
 } from '../../../ui-shared/plugins'
+
+export function pluginErrorMessage(error: unknown): string {
+  return githubErrorMessage(error, t, 'plugin')
+}
 
 export function getPlugins(signal?: AbortSignal): Promise<PluginsPayload> {
   return apiCall('/api/plugins', { signal })

@@ -35,9 +35,11 @@
 
 // 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
 pub mod agents;
+pub mod agent_resources;
 pub mod accounts;
 pub mod accounts_batch;
 mod accounts_export;
+mod accounts_sort;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
 pub mod accounts_usage;
@@ -45,6 +47,7 @@ pub mod accounts_usage;
 // 设置读写与流式对话转发。工具定义与执行都在前端，后端不认识任何工具，
 // 见该文件模块头
 pub mod assistant;
+pub mod assistant_history;
 pub mod assistant_images;
 mod image_input;
 // 整库备份 / 恢复（设置页「整库备份 / 恢复」，SQL 文本形态；核心在
@@ -103,6 +106,7 @@ pub mod keys_api;
 pub mod keepalive;
 pub mod logs_api;
 pub mod model_manage;
+pub(crate) mod model_access;
 // models.dev 模型元数据（开关 / 状态 / 立即刷新）：与「逐家上游目录」的
 // /api/models/refresh 分开，理由见该文件模块头
 pub mod model_meta;

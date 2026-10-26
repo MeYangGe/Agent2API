@@ -35,7 +35,7 @@ export function apiReferenceSections(origin: string): ApiSection[] {
         { name: 'anthropic-version', type: 'HTTP header', description: t('Anthropic SDK 会自动携带版本头；手写 Messages 请求可使用 2023-06-01。/v1/models 收到该头或 x-api-key 时返回 Anthropic 列表形态。') },
       ],
       points: [
-        t('本机免鉴权模式没有启用 Key 时可调用；启用任意 Key 后，受保护接口都要携带有效 Key。公网安全模式没有配置 Key 时会拒绝受保护的 /v1 请求，并返回 503 api_key_not_configured。'),
+        t('模型调用始终需要启用且可用的网关 API Key，即使只在本机使用也不能免鉴权。管理员登录会话只用于管理面板，不能代替模型调用的 Key。'),
         t('GET /health、GET /v1/models 和网关临时图片下载不强制检查 Key。模型清单可在配 Key 前读取，但这不能证明 Key 正确；应以携带该 Key 的实际业务请求为准。'),
         t('每把 Key 的可用模型、可用提供商限制同样适用于生图和编辑图。模型名称使用 /v1/models 中的 id 或已配置的映射名，不要直接使用展示名称。'),
       ],
@@ -45,7 +45,7 @@ export function apiReferenceSections(origin: string): ApiSection[] {
       id: 'models', title: t('模型发现与健康检查'), path: 'GET /v1/models · GET /health',
       description: t('通过能力字段选择正确模型；健康检查只说明网关可访问。'),
       paragraphs: [
-        t('模型清单反映当前账号、模型启停与映射配置；携带有效网关 Key 时进一步按该 Key 的授权范围过滤。不带 Key 或 Key 无效时仍可读取未按该 Key 收窄的清单。'),
+        t('模型清单反映当前账号、模型启停与映射配置。不带 Key 时可读取公开清单；携带 Key 时必须有效，返回内容按该 Key 的授权范围过滤，无效 Key 返回 401。'),
         t('不携带 Anthropic 相关头时，模型接口返回 OpenAI 风格的 object=list、data 数组和 meta 摘要；携带 anthropic-version 或 x-api-key 时，返回 data、has_more、first_id、last_id，并保留能力扩展字段。'),
         t('GET /health 返回 status=ok 或 degraded。公网安全模式只返回简化探活信息；HTTP 200 或 status=ok 不代表所有提供商在线、账号有额度或图片模型可调用。'),
       ],
@@ -142,11 +142,11 @@ export function apiReferenceSections(origin: string): ApiSection[] {
       ],
       fields: [
         { name: '400', type: 'HTTP status', description: t('请求参数、模型能力或协议形态不支持。图片相关 code 可能为 invalid_image_input、image_generation_not_supported 或 image_editing_not_supported；修改请求后再发。') },
-        { name: '401', type: 'HTTP status', description: t('Key 缺失、无效、停用，或上游认证失败。网关鉴权失败通常为 invalid_api_key；检查请求头与「网关 Key」页，而不是仅重拉模型列表。') },
+        { name: '401', type: 'HTTP status', description: t('Key 缺失、无效、停用，或上游认证失败。网关未收到 Key 时返回 model_api_key_required，无效 Key 返回 invalid_api_key；请检查请求头与「网关 Key」页。') },
         { name: '404', type: 'HTTP status', description: t('模型不存在、已关闭或不在 Key 授权范围，常附 model_not_found；也可能是路径错误，或临时图片下载链接已过期。') },
         { name: '408 / 413', type: 'HTTP status', description: t('分别可能表示请求中断或请求过大。参考图过大时需缩小图片或减少数量，原样重试不会解决；中断的图片任务可能已经消耗额度。') },
         { name: '429', type: 'HTTP status', description: t('限流、额度不足或当前无可用账号窗口。能确定恢复时间时可能返回 Retry-After（秒）、reset_at（Unix 毫秒）与 reset_at_text；这些字段不是每次都有。') },
-        { name: '500 / 502 / 503', type: 'HTTP status', description: t('可能是网关内部错误、上游异常、插件未接入、暂无可用账号、图片下载或编码失败。公网模式的 api_key_not_configured 表示必须先配置网关 Key。') },
+        { name: '500 / 502 / 503', type: 'HTTP status', description: t('可能是网关内部错误、上游异常、插件未接入、暂无可用账号、图片下载或编码失败。') },
       ],
       warning: t('遇到“图片请求可能已消耗额度，未自动重试”或“上游已生成”等提示，先核对请求日志与上游结果。客户端超时、断线或取消不代表上游撤销任务；自动重发可能再次扣费。'),
       points: [

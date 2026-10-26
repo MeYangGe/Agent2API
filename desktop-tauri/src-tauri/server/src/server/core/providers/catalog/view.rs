@@ -51,6 +51,9 @@ fn public_builtin_items(active: &[(String, Vec<Value>)]) -> Vec<(String, Value)>
             let mut item = list_item(upstream, provider);
             if let Some(index) = claimed.get(&name.to_lowercase()).copied() {
                 let existing = &mut result[index].1;
+                if item.get("supports_image_generation").and_then(Value::as_bool) == Some(true)
+                    && existing.get("kind").and_then(Value::as_str) == Some("image")
+                { existing["supports_image_generation"] = Value::Bool(true); }
                 if item.get("supports_image_editing").and_then(Value::as_bool) == Some(true)
                     && existing.get("kind").and_then(Value::as_str) == Some("image")
                 {
@@ -212,7 +215,7 @@ fn push_managed_model(
         "kind": if super::super::images::model_is_image(&item) { json!("image") }
             else { item.get("kind").cloned().unwrap_or(json!("chat")) },
         "output_modalities": item.get("output_modalities"),
-        "supports_image_generation": super::super::images::model_is_image(&item),
+        "supports_image_generation": super::super::images::provider_model_supports_generation(provider, &item),
         "supports_image_editing": super::super::images::provider_model_supports_editing(provider, &item),
         "capOverrides": cap_overrides,
         // 每个能力键的**来源**（`upstream` / `modelsdev` / `user`，见

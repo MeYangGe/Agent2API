@@ -634,6 +634,14 @@ pub trait ProviderAdapter: Send + Sync {
         !(200..300).contains(&status)
     }
 
+    fn is_error_response_async<'a>(
+        &'a self,
+        status: u16,
+        headers: &'a HeaderMap,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.is_error_response(status, headers)) })
+    }
+
     /// 判定上游错误类型（status + 已解析的错误体）。
     ///
     /// `error_body` 是**已归一化**的错误对象：至少含 `code`（上游业务码，
@@ -1671,6 +1679,14 @@ impl ProviderAdapter for BuiltinAdapter {
 
     fn is_error_response(&self, status: u16, headers: &HeaderMap) -> bool {
         adapter_for(self.0).is_error_response(status, headers)
+    }
+
+    fn is_error_response_async<'a>(
+        &'a self,
+        status: u16,
+        headers: &'a HeaderMap,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        adapter_for(self.0).is_error_response_async(status, headers)
     }
 
     fn classify_error(&self, status: u16, error_body: &Value) -> UpstreamErrorClass {

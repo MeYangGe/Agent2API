@@ -164,10 +164,7 @@ pub fn credential(profile: &Profile) -> Result<Option<String>, String> {
             let snapshot = crate::server::config::current();
             let active = snapshot.active_api_keys();
             if active.is_empty() {
-                if crate::server::access::v1_fail_closed() {
-                    return Err("网关未配置可用 API Key".into());
-                }
-                return Ok(Some("sk-agent2api-no-auth".into()));
+                return Err("网关未配置可用 API Key，请先在「网关 Key」页创建并启用".into());
             }
             let entries = crate::server::core::api_keys::entries_from(&snapshot.raw());
             let key = if profile.gateway_key_id.is_empty() {
@@ -176,7 +173,7 @@ pub fn credential(profile: &Profile) -> Result<Option<String>, String> {
                 entries
                     .iter()
                     .find(|key| {
-                        key.enabled && key.id == profile.gateway_key_id && active.contains(&key.key)
+                        key.is_usable() && key.id == profile.gateway_key_id && active.contains(&key.key)
                     })
                     .map(|key| key.key.clone())
             };

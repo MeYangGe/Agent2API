@@ -62,25 +62,8 @@ const MIN_CHECK_GAP_MS: i64 = 60_000;
 /// 超时后按冷却/上次结果如实回答，而不是把用户挂在这里。
 const WAIT_RUNNING_MS: i64 = 75_000;
 
-/// 失败冷却期间给用户的等待提示：在通用文案后面补一句「怎么提前解除」。
-///
-/// 冷却截止时刻来自上游的 `Retry-After` / `X-RateLimit-Reset`，匿名请求动辄
-/// 几十分钟（60 次/小时、按出口 IP 计）。而「更新设置」里存一枚 GitHub 令牌会
-/// 换成按用户计的配额桶，并顺手清掉这段冷却（[`UpdateManager::clear_check_cooldown`]）
-/// —— 提示里带上这一句，用户才有「不必干等」这条路可走。
-///
-/// 只对**真的处于失败冷却**时补：`running` 是「那一轮正在跑」、`retry_at` 已过期
-/// 是「刚执行完、还差最短间隔」，两者都不是配额问题，挂这句建议只会把人引到
-/// 「更新设置」里白找。
 fn waiting_message(state: &TaskState) -> String {
-    let message = state.waiting_message();
-    let in_cooldown = !state.running()
-        && state.last_error.is_some()
-        && state.retry_at > logging::now_ms();
-    if !in_cooldown {
-        return message;
-    }
-    format!("{message}，或者在更新设置中完善GitHub 令牌")
+    source::GithubSettings::Update.waiting_message(state)
 }
 
 impl UpdateManager {
@@ -89,18 +72,22 @@ impl UpdateManager {
     /// `pub(super)`：只有 `update::mod` 的 `global_check_key()`（定时任务的排期
     /// 键要跟这里一致）与检查自身用它，不必暴露给整个 crate。
     pub(super) fn check_key(&self) -> String {
-        format!("updateCheck:{}", self.repository())
+        self.check_key_for(CURRENT_VERSION)
     }
 
-    /// 本条记录当前落盘的状态（排期 / 冷却 / 最近一次 Release）。
-    fn check_state(&self) -> Result<TaskState, String> {
-        task_state::read(&self.check_key())
+    fn check_key_for(&self, current: &str) -> String {
+        let base = format!("updateCheck:{}", self.repository());
+        self.force_update(current).and_then(|value| value["targetVersion"].as_str().map(|target| format!("{base}:required:{target}"))).unwrap_or(base)
+    }
+
+    fn check_state(&self, current: &str) -> Result<TaskState, String> {
+        task_state::read(&self.check_key_for(current))
     }
 
     fn current_channel_result(&self, state: &TaskState) -> bool {
         state.value.as_ref().is_some_and(|value| {
             value.get("invalidated").and_then(Value::as_bool) != Some(true)
-                && value.get("channels") == Some(&json!(config::update_channels()))
+                && (value.get("channels") == Some(&json!(config::update_channels())) || value.get("required") == Some(&json!(true)))
         })
     }
 
@@ -139,7 +126,9 @@ impl UpdateManager {
         result["channels"] = json!(config::update_channels());
         result["checkedAt"] = json!(state.last_success_at);
         result["lastAttemptAt"] = json!(state.last_attempt_at);
-        result["lastError"] = json!(state.last_error);
+        result["lastError"] = json!(state.last_error.as_deref().map(|error| {
+            source::GithubSettings::Update.describe_error(error, state.retry_at)
+        }));
         result["retryAt"] = json!(state.retry_at);
         result["nextCheckAt"] = json!(state.due_at());
         result["checking"] = json!(state.running());
@@ -151,7 +140,7 @@ impl UpdateManager {
     /// **不触发任何网络请求**：本进程还没查过时返回 `checked:false`，
     /// 界面据此显示「未检查」—— 与改造前「前端自己打一次 GitHub」的差别正在这里。
     pub fn last_check(&self) -> Value {
-        match self.check_state() {
+        match self.check_state(CURRENT_VERSION) {
             Ok(state) => self.checked_result(CURRENT_VERSION, &state),
             Err(error) => json!({ "checked": false, "lastError": error }),
         }
@@ -182,7 +171,9 @@ impl UpdateManager {
     }
 
     async fn check_with_mode(&self, current_version: &str, manual: bool) -> Result<Value, UpdateError> {
-        let key = self.check_key();
+        self.resolve_repository().await;
+        let required = self.force_update(current_version);
+        let key = self.check_key_for(current_version);
         let interval = config::scheduled_settings().update_check.interval * 60_000;
         let started = logging::now_ms();
         // 手动检查仍受失败冷却约束（ManualBackoff::Respect）：这里的冷却记的是
@@ -210,7 +201,7 @@ impl UpdateManager {
             }
         };
         let channels = config::update_channels();
-        let outcome = self.fetch_release(channels).await;
+        let outcome = self.fetch_release(channels, required.as_ref()).await;
         let interval = config::scheduled_settings().update_check.interval * 60_000;
         match outcome {
             Ok((release, retry_at)) => {
@@ -221,7 +212,7 @@ impl UpdateManager {
                 } else {
                     "已完成版本检查".to_string()
                 };
-                let state = guard.finish(true, summary, Some(json!({ "release": release, "channels": channels })), retry_at, interval)
+                let state = guard.finish(true, summary, Some(json!({ "release": release, "channels": channels, "required": required.is_some() })), retry_at, interval)
                     .map_err(|error| UpdateError::new(error))?;
                 if channels != config::update_channels() {
                     task_state::schedule_now(&key).map_err(|error| UpdateError::new(error))?;
@@ -243,11 +234,15 @@ impl UpdateManager {
     async fn fetch_release(
         &self,
         channels: UpdateChannels,
+        required: Option<&Value>,
     ) -> Result<(Option<Value>, i64), (UpdateError, i64)> {
         let repository = self.resolve_repository().await;
         let beta = channels.beta;
         // 自建更新源与 GitHub 使用同形的 Release 接口。
-        let url = if beta {
+        let target = required.and_then(|rule| rule["targetVersion"].as_str());
+        let url = if let Some(target) = target {
+            format!("{}/repos/{repository}/releases/tags/v{}", api_base(), target.trim_start_matches(['v', 'V']))
+        } else if beta {
             format!(
                 "{}/repos/{repository}/releases?per_page={RELEASE_LIST_PER_PAGE}",
                 api_base()
@@ -260,7 +255,7 @@ impl UpdateManager {
             &client::github_headers(),
             REQUEST_TIMEOUT_MS,
             |payload| {
-                if beta {
+                if beta && target.is_none() {
                     payload.is_array()
                 } else {
                     payload.get("tag_name").and_then(Value::as_str).is_some()
@@ -280,9 +275,10 @@ impl UpdateManager {
             return Ok((None, retry_at));
         }
         if status == 403 || status == 429 {
-            return Err((UpdateError::new(
-                "GitHub 接口访问受限，已暂停检查并保留上次结果；也可自行配置 GITHUB_TOKEN 提高限额"
-            ), retry_at));
+            return Err((
+                UpdateError::new(source::GithubSettings::Update.rate_limit_message(retry_at)),
+                retry_at,
+            ));
         }
         if !response.status.is_success() {
             return Err((
@@ -292,7 +288,12 @@ impl UpdateManager {
         }
         let from_official = response.official && source::is_official_api(&url);
         let payload = response.value;
-        let raw = if beta {
+        let raw = if let Some(target) = target {
+            if payload["draft"] == true || version::compare_versions(payload["tag_name"].as_str().unwrap_or(""), target) != Some(0) {
+                return Err((UpdateError::new("索引指定的强制更新版本与发布信息不匹配"), retry_at));
+            }
+            Some(payload)
+        } else if beta {
             version::pick_listed_release(&payload, channels).cloned()
         } else {
             let prerelease = payload.get("prerelease").and_then(Value::as_bool) == Some(true)

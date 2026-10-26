@@ -37,7 +37,6 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use serde_json::{json, Value};
 
-use crate::server::config;
 use crate::server::core::api_keys;
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
@@ -45,7 +44,10 @@ use crate::server::logging;
 use crate::server::ServerState;
 
 fn list_json(state: &ServerState) -> Value {
-    let keys: Vec<Value> = api_keys::list().iter().map(api_keys::ApiKeyEntry::public_json).collect();
+    let entries = api_keys::list();
+    let usable_key_count = entries.iter().filter(|entry| entry.is_usable()).count()
+        + usize::from(crate::server::config::parse::env_api_key_value().is_some());
+    let keys: Vec<Value> = entries.iter().map(api_keys::ApiKeyEntry::public_json).collect();
     // 可用提供商多选的候选：**注册表 + 已建的自定义家**（加一家内置 provider 时
     // 这里自动多一项，前端零改动）。带上 count 让界面能显示「这家有几个账号」——
     // 用户在这里勾「允许哪几家」时，那几家有没有账号是他最需要知道的信息。
@@ -81,7 +83,8 @@ fn list_json(state: &ServerState) -> Value {
     providers.extend(crate::server::core::custom_providers::summary_json(&count_accounts));
     json!({
         "keys": keys,
-        "authRequired": config::current().api_key_set(),
+        "authRequired": true,
+        "usableKeyCount": usable_key_count,
         "providers": providers,
         // 「可用模型」多选的候选：**每家 → 对外名清单**，界面按当前勾了哪几家
         // 取并集（见模块头那一节与 catalog::models_by_provider 的说明）。
@@ -270,11 +273,7 @@ pub async fn delete_key(State(state): State<ServerState>, Path(id): Path<String>
     }
     match api_keys::remove(&id) {
         Ok(()) => {
-            let remaining = config::current().api_key_set();
-            logging::log(
-                "[Config]",
-                if remaining { "API Key 已删除" } else { "API Key 已删除，接口恢复免鉴权（仅监听 127.0.0.1）" },
-            );
+            logging::log("[Config]", "API Key 已删除；模型调用仍需携带启用的 Key");
             ok_json(list_json(&state))
         }
         Err(message) => errors::management_error(404, message),

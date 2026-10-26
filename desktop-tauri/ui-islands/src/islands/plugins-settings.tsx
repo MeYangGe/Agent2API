@@ -93,7 +93,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'check' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('检查计划')}</h3>
-                <p>{t('默认跟随软件的自动检查和间隔。关闭自动检查也会暂停插件自动更新和自动下载；手动检查与安装不受影响。')}</p>
+                <p>{t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.checkMode || 'follow'} disabled={busy || !settings}
@@ -129,7 +129,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'channel' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('更新通道')}</h3>
-                <p>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响插件。始终按版本号选择更新，不会降级。')}</p>
+                <p>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响日常更新，最低版本补齐按当前软件版本选择配套包。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.channelMode || 'follow'} disabled={busy || !settings}
@@ -163,7 +163,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                       onCheckedChange={value => void save({ autoUpdate: value === true })} aria-label={t('自动更新插件')} />
                   </div>
                   <p className='mt-1.5 text-[12px] text-subtle'>
-                    {t('检测到更新后自动下载、校验并安装已启用的官方签名插件。未签名或第三方插件仍需手动更新。')}
+                    {t('检测到更新后自动下载、校验并安装已启用的官方签名插件。关闭此项不影响最低版本补齐；未签名或第三方插件仍需手动更新。')}
                   </p>
                 </div>
                 <div className='h-px bg-hairline' />
@@ -179,7 +179,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                   </p>
                 </div>
                 <p className='text-[12px] text-subtle'>
-                  {t('默认跟随软件的自动检查和间隔。关闭自动检查也会暂停插件自动更新和自动下载；手动检查与安装不受影响。')}
+                  {t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}
                 </p>
               </div>
             </div> : null}

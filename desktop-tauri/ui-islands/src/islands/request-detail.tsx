@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
+import { requestApiKeyLabel, requestClientLabel } from '../../../ui-shared/model-api-key'
 import {
   Badge, BadgeDot, Button, Dialog, DialogBody, DialogContent, DialogFooter,
   DialogHeader, DialogTitle, SegmentedControl, StatusDot, Table, TableBody,
@@ -124,6 +125,10 @@ type RequestRow = {
   route?: unknown
   /** 模型测试发起的请求（后端 `is_test` 透传到列表行；老行没有这个键） */
   isTest?: boolean
+  client?: string
+  apiKeyId?: string
+  apiKeyName?: string
+  apiKeySource?: string
 } & ProviderFields
 
 /** 终止按钮的三态：可点 / 在途（禁用）/ 已受理（禁用且不再放开） */
@@ -496,6 +501,8 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
           )}
         </Field>
         <Field label={t('重试次数')}>{String(Number(row.attempts) || 1)}</Field>
+        <Field label='API Key'>{requestApiKeyLabel(row, t)}</Field>
+        <Field label={t('来源客户端')}>{requestClientLabel(row, t)}</Field>
         <Field label={t('模型')}><ModelCell row={row} /></Field>
         <Field label={t('提供商')}>
           {providerName(row) || '—'}
@@ -517,8 +524,8 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
         {row.isTest ? (
           <Field label={t('来源')}>
             <Badge variant='brand' shape='tag'
-              title={t('模型管理页操作列那颗「测试」发起的请求：与真实请求同一条转发链路，但不计入报表统计')}>
-              {t('模型测试')}
+              title={t('面板内发起的模型调用，消耗额度并记录 Key，不计入生产报表')}>
+              {requestClientLabel(row, t)}
             </Badge>
           </Field>
         ) : null}

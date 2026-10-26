@@ -10,6 +10,7 @@ import { cloneProfile, loadWorkspace, saveProfile } from './routing-state'
 import { bridge, errorMessage, host, notify, type RouteSettings, type RoutingWorkspace } from './routing-types'
 import { RouteIcon, RouteStateBadge } from './routing-ui'
 import { displayNameOf } from './accounts-domain'
+import { groupSortSummary } from './accounts-group-settings'
 
 export function RoutingSettingsDialog({ workspace, onClose }: { workspace: RoutingWorkspace; onClose(): void }) {
   const [draft, setDraft] = React.useState<RouteSettings>(() => ({ ...workspace.settings }))
@@ -36,7 +37,7 @@ export function RoutingSettingsDialog({ workspace, onClose }: { workspace: Routi
     <DialogContent className='w-[min(680px,calc(100vw-48px))]'>
       <DialogHeader><RouteIcon name='settings' /><DialogTitle>{t('统一路由设置')}</DialogTitle></DialogHeader>
       <DialogBody>
-        <p className='text-xs text-muted-foreground'>{t('这些设置由所有模型共用；提供商与账号的参与范围和顺序在各自视图中独立配置。')}</p>
+        <p className='text-xs text-muted-foreground'>{t('所有模型共用路由策略与保护设置；全局顺序和消耗规则与账号页联动，模型独立配置可明确覆盖顺序。')}</p>
         <DialogSection>
           <Field><FieldLabel>{t('路由策略')}</FieldLabel><FieldContent>
             <SegmentedControl aria-label={t('路由策略')} value={draft.routingStrategy} disabled={busy} options={[
@@ -78,7 +79,7 @@ export function RoutingSettingsDialog({ workspace, onClose }: { workspace: Routi
   </Dialog>
 }
 
-export function ProviderRoutingDialog({ provider, workspace, onClose }: { provider: string; workspace: RoutingWorkspace; onClose(): void }) {
+export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: { provider: string; workspace: RoutingWorkspace; onSort(): void; onClose(): void }) {
   const label = workspace.providers.find(item => item.id === provider)?.label || provider
   const [draft, setDraft] = React.useState(() => structuredClone(workspace.profile))
   const [busy, setBusy] = React.useState(false)
@@ -104,6 +105,13 @@ export function ProviderRoutingDialog({ provider, workspace, onClose }: { provid
       <DialogHeader><RouteIcon name='plugins' /><DialogTitle>{t('{name} · 提供商路由设置', { name: label })}</DialogTitle></DialogHeader>
       <DialogBody>
         <Badge variant='brand' shape='tag' className='self-start'>{workspace.model || t('全局配置')}</Badge>
+        <DialogSection>
+          <div className='flex items-center justify-between gap-3'><h3 className='text-sm font-semibold'>{t('消耗顺序')}</h3>
+            <Button variant='outline' size='sm' disabled={busy} onClick={onSort}>{t('调整全局消耗规则')}</Button></div>
+          <p className='text-xs text-muted-foreground'>{workspace.model && workspace.customized
+            ? t('当前模型使用独立顺序，不受全局自动消耗排序影响。恢复继承后会重新跟随账号页。')
+            : t('与账号页共用：{rules}。积分到期等规则直接影响网关实际选路。', { rules: groupSortSummary(workspace.sorting.rules[provider] || []) || t('仅按手动顺序') })}</p>
+        </DialogSection>
         {workspace.providers.find(item => item.id === provider)?.available === false ? <p className='text-xs text-warning'>{t('此提供商当前没有可用的模型绑定，配置已保留；在模型管理中恢复绑定后会自动回来。')}</p> : null}
         <Field orientation='horizontal'><FieldContent><FieldLabel htmlFor='routing-provider-enabled'>{t('参与当前视图转发')}</FieldLabel><FieldDescription>{t('停用后保留卡片与账号，方便随时恢复；不会全局禁用提供商。')}</FieldDescription></FieldContent>
           <Switch id='routing-provider-enabled' checked={enabled} disabled={busy} onCheckedChange={on => setDraft(current => ({ ...current,

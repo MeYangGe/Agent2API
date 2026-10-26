@@ -56,7 +56,7 @@ use crate::server::core::providers::kind_id;
 use crate::server::core::providers::ProviderKind;
 
 use identity::{
-    allocate_priority, allocate_unique_id, identity_of_item, identity_of_record,
+    allocate_priority, allocate_unique_id, identity_of_item,
     is_desktop_item, is_reserved_desktop_id, resolve_provider, CREDENTIAL_KEYS,
 };
 use normalize::normalize_imported;
@@ -375,14 +375,14 @@ fn import_one_item(
     }
 
     // ── 身份：provider + 业务身份（四家字段不同，见 identity.rs）──
-    let identity = identity_of_item(&provider, object)?;
+    identity_of_item(&provider, object)?;
 
     // 本机 id 撞上桌面端实时登录态时跳过：固定桌面 id 不可被普通导入记录顶替
     // （它的凭证在客户端存储，改写只会把实时登录态变成一份过期副本）
     if state
         .accounts
         .iter()
-        .any(|record| record.id() == item_id && record.is_desktop())
+        .any(|record| record.id() == item_id && is_desktop_item(record.fields()))
     {
         return Ok(ImportOutcome::Skipped(format!(
             "账号 id「{item_id}」在本机是桌面端实时登录态（凭证在客户端存储），\
@@ -394,10 +394,15 @@ fn import_one_item(
     // 桌面端记录不参与匹配：它与普通账号可以是同一个人的两份记录，
     // 拿它当合并目标就会把「实时登录态」改写掉。
     let matched = state.accounts.iter().position(|record| {
-        !record.is_desktop()
+        !is_desktop_item(record.fields())
             && record.provider() == provider
-            && identity_of_record(&provider, record).as_deref() == Some(identity.as_str())
-    });
+            && crate::server::core::account_store::account_identity::same(&provider, record.fields(), object)
+    }).or_else(|| state.accounts.iter().position(|record| {
+        !is_desktop_item(record.fields())
+            && record.provider() == provider
+            && record.id() == item_id
+            && !crate::server::core::account_store::account_identity::conflicts(&provider, record.fields(), object)
+    }));
     if let Some(index) = matched {
         // 同 provider 内「id ↔ 业务身份」必须一致：导入 id 若已指向本 provider 的
         // 另一条身份，说明导出文件与本地状态自相矛盾 —— 该条失败，不覆盖也不改名
@@ -405,13 +410,10 @@ fn import_one_item(
             let points_elsewhere = state.accounts.iter().any(|record| {
                 record.id() == item_id
                     && record.provider() == provider
-                    && identity_of_record(&provider, record).as_deref() != Some(identity.as_str())
+                    && crate::server::core::account_store::account_identity::conflicts(&provider, record.fields(), object)
             });
             if points_elsewhere {
-                return Err(format!(
-                    "账号 id「{item_id}」在本提供商内指向另一条身份，与身份「{identity}」矛盾\
-                     （不覆盖，请先核对导出文件）"
-                ));
+                return Err("导入的账号 ID 在本提供商内指向另一条业务身份，未覆盖原账号".to_string());
             }
         }
         // 同 provider + 同业务身份 → 合并到本机记录，**保留本机 id**：
@@ -446,18 +448,14 @@ fn import_one_item(
     // 别的身份占用，就是导出文件自相矛盾 —— 失败而不是覆盖，也不静默改名
     if let Some(existing) = state.accounts.iter().find(|record| record.id() == item_id) {
         if existing.provider() == provider {
-            return Err(format!(
-                "账号 id「{item_id}」在本提供商内已属于另一条身份「{}」，无法用于身份「{identity}」\
-                 （不覆盖，请先核对导出文件）",
-                existing.name()
-            ));
+            return Err("导入的账号 ID 在本提供商内已属于另一条业务身份，未覆盖原账号".to_string());
         }
     }
     // 本机 id 空间是**全局**的（四家共用一份列表）：导入原值被别家记录占用时，
     // 分配一个真正唯一的 id（绝不覆盖他人，也不回落成同样可能冲突的派生值）
     let taken: std::collections::HashSet<String> = taken_ids.iter().cloned().collect();
     let Some(new_id) = allocate_unique_id(&item_id, &taken) else {
-        return Err(format!("账号 id「{item_id}」冲突，且无法分配唯一 id"));
+        return Err("导入账号 ID 冲突，无法分配独立 ID，未覆盖原账号".to_string());
     };
 
     let normalized = normalize_imported(object, &provider, None)?;
@@ -486,10 +484,7 @@ fn import_one_item(
         let fallback = {
             let nickname = saved.nickname();
             if nickname.is_empty() {
-                format!(
-                    "账号 {}",
-                    crate::server::core::account_store::store_util::truncate_text(&identity, 8)
-                )
+                format!("账号 {}", state.accounts.len() + 1)
             } else {
                 nickname
             }

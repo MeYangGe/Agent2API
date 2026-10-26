@@ -7,7 +7,11 @@ import { store } from '../state/store'
 import { fetchAgents, previewAgentRestore, restoreAgentClient, type AgentClient } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
-import { Card, Button } from '@ui'
+import { Card, Button, SegmentedControl } from '@ui'
+import { AgentResourcesPanel } from '../../../ui-shared/agent-resources-panel'
+import { apiCall } from '../api/client'
+import type { ResourceKind, ResourceRequest } from '../../../ui-shared/agent-resources'
+const resourceRequest: ResourceRequest = (method, path, body) => apiCall(path, { method, body })
 import { confirmDialog } from '@ui'
 
 /**
@@ -27,6 +31,7 @@ export function AgentPage() {
   const [clients, setClients] = useState<AgentClient[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  const [tabs, setTabs] = useState<Record<string, string>>({})
 
   const load = async () => {
     try {
@@ -81,7 +86,7 @@ export function AgentPage() {
           style={{ background: 'var(--m-warn-soft)', borderColor: 'color-mix(in srgb, var(--m-warn) 24%, transparent)' }}
         >
           <div style={{ fontSize: 12.3, lineHeight: 1.6, color: 'var(--m-text-2)' }}>
-            {t('手机端可查看客户端实际配置并撤销上次应用；编辑方案请使用桌面端。')}
+            {t('手机端可查看模型配置、撤销上次应用，并管理提示词、Skill 与 MCP。')}
             <b style={{ color: 'var(--m-text)' }}>{t('所有操作作用在网关所在机器。')}</b>
           </div>
         </Card>
@@ -121,6 +126,10 @@ export function AgentPage() {
               </div>
               <Badge tone={client.viaGateway ? 'ok' : 'mute'}>{client.viaGateway ? t('接入本网关') : t('未接入本网关')}</Badge>
             </div>
+            <SegmentedControl className='mt-3' value={tabs[client.id || ''] || 'config'} onValueChange={value => setTabs(previous => ({ ...previous, [client.id || '']: value }))}
+              aria-label={t('客户端管理分类')} options={[{ value: 'config', label: t('模型配置') }, { value: 'prompt', label: t('提示词') }, { value: 'skills', label: 'Skill' }, { value: 'mcp', label: 'MCP' }]} />
+            {tabs[client.id || ''] && tabs[client.id || ''] !== 'config' ? <AgentResourcesPanel clientId={client.id || ''} kind={tabs[client.id || ''] as ResourceKind}
+              capabilities={client.resources} request={resourceRequest} t={t} notify={(text, bad) => store.toast(text, bad ? 'err' : 'ok')} /> : null}
             <div
               style={{
                 display: 'flex',

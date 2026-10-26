@@ -3,6 +3,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { type CustomDates } from '../../../../ui-shared/date-range'
 export { DateRangeFields as LogDateFilters } from '../date-range-fields'
 import { t } from '../../i18n'
+import { requestApiKeyLabel, requestClientLabel, type RequestIdentity } from '../../../../ui-shared/model-api-key'
 
 export type SourceFilters = { client: string; apiKey: string }
 export type SourceOption = { value: string; label: string }
@@ -35,7 +36,7 @@ export function SourceLogFilters({ filters, clients, apiKeys, onChange }: {
 }) {
   const clientOptions = React.useMemo(() => [
     { value: ALL_CLIENTS, label: t('全部客户端') },
-    ...clients.map(item => ({ value: clientFilterValue(item.value), label: t(item.label) })),
+    ...clients.map(item => ({ value: clientFilterValue(item.value), label: requestClientLabel({ client: item.value }, t) })),
   ], [clients])
   const keyOptions = React.useMemo(() => [{ value: '', label: t('全部 API Key') },
     ...apiKeys.map(item => ({ ...item, label: t(item.label) })),
@@ -58,9 +59,10 @@ export function SourceLogFilters({ filters, clients, apiKeys, onChange }: {
   )
 }
 
-export function apiKeyRequestLabel(entry: { apiKeyId?: string; apiKeyName?: string; apiKeySource?: string }): string {
-  if (entry.apiKeySource === 'key') return entry.apiKeyName || entry.apiKeyId || t('未命名')
-  if (entry.apiKeySource === 'env') return t('环境变量 Key')
-  if (entry.apiKeySource === 'none') return t('免鉴权调用')
-  return t('历史未记录 Key')
+export function apiKeyRequestLabel(entry: RequestIdentity): string {
+  return requestApiKeyLabel(entry, t)
+}
+
+export function clientRequestLabel(entry: RequestIdentity): string {
+  return requestClientLabel(entry, t)
 }

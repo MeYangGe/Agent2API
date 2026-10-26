@@ -64,6 +64,11 @@ pub(super) fn client_label(client: &str) -> &str {
     match client {
         "" => "未记录客户端",
         "other" => "其它",
+        "model_test" => "模型测试",
+        "assistant" => "AI 助手",
+        "assistant_images" => "助手图片工具",
+        "assistant_title" => "助手标题总结",
+        "checkin_keepalive" => "日活保活",
         _ => client,
     }
 }

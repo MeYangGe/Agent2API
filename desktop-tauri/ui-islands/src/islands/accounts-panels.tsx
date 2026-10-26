@@ -52,6 +52,7 @@ import {
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { isSnapshotWallet, snapshotReadingsOf, usageUnitLabel } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { LimiterStatus } from './accounts-limiter-status'
 import { limiterHit } from './accounts-limiter-model'
@@ -306,7 +307,7 @@ function GroupBalanceBadge({ balance }: { balance: GroupBalance }) {
     ? '∞'
     : balance.sum === null ? '—' : balanceAmountText(balance.sum)
   // 单位只在不是「积分」时拼出来：绝大多数家的单位就是积分，写出来只是把组头撑长
-  const unit = balance.unit && balance.unit !== '积分' && balance.unit !== t('积分') ? balance.unit : ''
+  const unit = balance.unit && balance.unit !== '积分' && balance.unit !== t('积分') ? usageUnitLabel(balance.unit, t) : ''
   // 有 ∞ 时不报「计入 x/y」：那会让人以为 ∞ 也是加出来的
   const note = balance.unlimited === 0 && balance.counted < balance.total
     ? t('计入 {counted}/{total}', { counted: balance.counted, total: balance.total })
@@ -665,12 +666,16 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     }
   }
   if (Object.prototype.hasOwnProperty.call(data, 'available') || Array.isArray(data.wallets)) {
-    const unit = String(data.unit || t('积分'))
+    const unit = usageUnitLabel(String(data.unit || t('积分')), t)
     const wallets = Array.isArray(data.wallets) ? data.wallets as Array<Record<string, unknown>> : []
     // 上游给的展示串优先（带千分位 / 单位的格式化），没有才按数值拼
     const detail = wallets
+      .filter(wallet => !isSnapshotWallet(wallet))
       .map(wallet => `${wallet?.displayName || wallet?.type || t('明细')} `
         + `${wallet?.balanceView ? String(wallet.balanceView) : numberText(wallet?.balance)}`)
+      .join(' · ')
+    const readings = snapshotReadingsOf(data, t, numberText)
+      .map(reading => `${reading.name} ${reading.view}`)
       .join(' · ')
     const subscription = subscriptionText(data.subscription)
     // ── 没有额度桶时的口径说明（两档，判据都是**结构**不是文案）───────
@@ -704,7 +709,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
       : fallbackWallet
         ? t('可用 {value} {unit}', {
             value: numberText(fallbackWallet.balance),
-            unit: String(fallbackWallet.unit || unit),
+            unit: usageUnitLabel(String(fallbackWallet.unit || unit), t),
           })
         : t('可用 {value} {unit}', { value: numberText(data.available), unit })
     // ── 部分失败：一份账读到了、另一份没读到 ────────────────────
@@ -729,7 +734,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     return {
       text: available + (missing.length ? ' ⚠' : ''),
       kind: missing.length ? 'warn' : 'ok',
-      title: [available, detail, subscription, ...notes, ...absent, ...missing].filter(Boolean).join(' · '),
+      title: [available, detail, readings, subscription, ...notes, ...absent, ...missing].filter(Boolean).join(' · '),
     }
   }
   return { text: t('无数据'), kind: 'muted', title: t('未返回可识别的余额数据') }
@@ -820,7 +825,9 @@ function grantUsage(plan: Record<string, unknown>): { used: number; total: numbe
 export function usagePool(entry: UsageEntry): { planName: string; text: string; percent: number | null } | null {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
   const data = entry as Record<string, unknown>
-  const wallets = Array.isArray(data.wallets) ? data.wallets as Array<Record<string, unknown>> : []
+  const wallets = Array.isArray(data.wallets)
+    ? (data.wallets as Array<Record<string, unknown>>).filter(wallet => !isSnapshotWallet(wallet))
+    : []
   let lead: Record<string, unknown> | null = null
   for (const wallet of wallets) {
     const total = Number(wallet?.total)
@@ -1805,6 +1812,7 @@ export function ActionsCell({ account, atFront }: { account: AccountRecord; atFr
 export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront: boolean }) {
   const [open, setOpen] = React.useState(false)
   const enabled = isEnabled(account)
+  const sortActive = groupSortRules(providerOf(account)).some(rule => rule.on)
   const maxConcurrent = Number(account.maxConcurrent) || 0
   const itemClass = 'w-full justify-start px-2 font-normal'
   const dangerClass = `${itemClass} text-destructive hover:text-destructive`
@@ -1818,8 +1826,8 @@ export function MoreMenu({ account, atFront }: { account: AccountRecord; atFront
             onClick={() => { setOpen(false); void setAccountEnabled(account.id, !enabled) }}>
             {enabled ? t('禁用') : t('启用')}
           </Button>
-          <Button variant='ghost' size='sm' className={itemClass} disabled={atFront}
-            title={atFront ? t('已在全局队列第一位') : t('仅将优先级调整到全局第一位，不改变启用状态')}
+          <Button variant='ghost' size='sm' className={itemClass} disabled={atFront || sortActive}
+            title={sortActive ? t('自动消耗排序已启用，请先关闭规则再手动调整') : atFront ? t('已在全局队列第一位') : t('仅将优先级调整到全局第一位，不改变启用状态')}
             onClick={() => { setOpen(false); shared().wbApp?.runAccountAction?.('switch', account.id) }}>
             {t('设为首选')}
           </Button>

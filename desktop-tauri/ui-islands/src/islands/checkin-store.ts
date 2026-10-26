@@ -92,7 +92,7 @@ type CheckinBridge = {
   runCheckinSchedule?: (id: string) => Promise<CheckinRunResult | null | undefined>
   saveAutoCheckin?: (patch: Record<string, unknown>) => Promise<AutoState | null | undefined>
   getCheckinKeepalive?: () => Promise<KeepaliveState | null | undefined>
-  saveCheckinKeepalive?: (models: string[]) => Promise<KeepaliveState | null | undefined>
+  saveCheckinKeepalive?: (models: string[], apiKeyId?: string | null) => Promise<KeepaliveState | null | undefined>
   getTravelSchedule?: () => Promise<TravelState | null | undefined>
   saveTravelSchedule?: (patch: Record<string, unknown>) => Promise<TravelState | null | undefined>
   runTravelScheduleNow?: () => Promise<TravelRunResult | null | undefined>
@@ -483,10 +483,10 @@ export async function runScheduleEntry(id: string): Promise<void> {
 }
 
 /** 保活模型链 */
-export async function saveKeepaliveModels(models: string[]): Promise<void> {
+export async function saveKeepaliveModels(models: string[], apiKeyId?: string | null): Promise<void> {
   await run(
     async () => {
-      const data = await bridge().saveCheckinKeepalive?.(models)
+      const data = await bridge().saveCheckinKeepalive?.(models, apiKeyId)
       if (data && store.center) {
         patch({ center: { ...store.center, keepalive: data }, keepaliveDraft: null })
       }

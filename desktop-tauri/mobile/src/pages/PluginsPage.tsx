@@ -3,7 +3,7 @@ import { Button, Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, Sheet
 import { PageIntro, ErrorNote, Empty, SectionHead } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import {
-  checkPluginUpdates, getPlugins, refreshPluginCatalog, setPluginEnabled, setPluginProvider,
+  checkPluginUpdates, getPlugins, pluginErrorMessage, refreshPluginCatalog, setPluginEnabled, setPluginProvider,
   startPluginInstall, uninstallPlugin, type PackSummary, type PluginMutation, type PluginsPayload,
 } from '../api/plugins'
 import { usePolling } from '../lib/usePolling'
@@ -46,11 +46,11 @@ export function PluginsPage() {
         if (seenOperations.current.has(key)) continue
         seenOperations.current.add(key)
         if (Date.now() - operation.updatedAt > 30_000) continue
-        if (operation.error || operation.hostError) store.toast(operation.error || operation.hostError || '', 'err')
+        if (operation.error || operation.hostError) store.toast(pluginErrorMessage(operation.error || operation.hostError), 'err')
         else if (operation.done) store.toast(t('插件包已安装到 v{version}', { version: operation.version }))
       }
     } catch (cause) {
-      if (serverIdentity() === identity) setError(cause instanceof Error ? cause.message : String(cause))
+      if (serverIdentity() === identity) setError(pluginErrorMessage(cause))
     }
   }, [identity])
 
@@ -67,7 +67,7 @@ export function PluginsPage() {
       await load()
       return result
     } catch (cause) {
-      if (serverIdentity() === identity) store.toast(cause instanceof Error ? cause.message : String(cause), 'err')
+      if (serverIdentity() === identity) store.toast(pluginErrorMessage(cause), 'err')
       return undefined
     } finally { locked.current = false; if (serverIdentity() === identity) setBusy('') }
   }
@@ -85,11 +85,11 @@ export function PluginsPage() {
 
   const refresh = async () => {
     const result = await run('catalog', refreshPluginCatalog)
-    if (result?.error) store.toast(result.reason || t('读取插件仓库失败'), 'err')
+    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('读取插件仓库失败'), 'err')
   }
   const check = async () => {
     const result = await run('check', checkPluginUpdates)
-    if (result?.error) store.toast(result.reason || t('检查更新失败'), 'err')
+    if (result?.error) store.toast(pluginErrorMessage(result.reason) || t('检查更新失败'), 'err')
   }
   const install = async (id: string, update: boolean) => {
     if (!payload?.target) return
@@ -132,7 +132,7 @@ export function PluginsPage() {
           onUpdate={() => void install(pack.id, true)} onRemove={() => setRemove(pack)} />)}
         {!packs.length ? <Card className='m-card'><Empty text={payload ? t('这台网关还没有安装插件') : t('正在读取插件列表…')} /></Card> : null}
       </div>
-      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'>{payload.catalog.reason}</p></div> : null}
+      {payload?.catalog?.reason ? <div className='m-section'><p className='m-ck-note'>{pluginErrorMessage(payload.catalog.reason)}</p></div> : null}
       {payload ? <div className='m-section'><Collapsible className='m-card m-card-pad'>
         <CollapsibleTrigger className='m-ck-title'>{t('诊断信息')}</CollapsibleTrigger><CollapsibleContent keepMounted>
         <p className='m-ck-note'>{t('插件目录')}：<span className='m-mono'>{payload.pluginsDir}</span></p>

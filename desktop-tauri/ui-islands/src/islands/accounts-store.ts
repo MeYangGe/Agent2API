@@ -25,12 +25,12 @@
  */
 
 import {
-  shared, type AccountRecord, type AccountsSnapshot, type ClashSnapshot,
+  shared, type AccountRecord, type AccountsSnapshot, type ClashSnapshot, type AccountSorting,
   type HiddenAccountProvider, type HiddenAccountsSummary,
 } from './accounts-shared'
 import {
-  accountGroups, byPriorityOrder, filterCounts, matchesFilter, positionMap, providerSummaries,
-  visibleAccounts, DEFAULT_GROUP_SORT,
+  accountGroups, filterCounts, matchesFilter, positionMap, providerSummaries,
+  defaultGroupSortRules,
   type AccountFilter, type AccountGroup, type GroupSortRule, type TokenUsageLookup, type UsageLookup,
 } from './accounts-domain'
 
@@ -66,12 +66,10 @@ export type AccountsStore = {
    * 设置 → 显示 → 账号列表里。与 namesHidden 同属「怎么看这张表」的偏好。
    */
   groupTotalFiltered: boolean
-  /**
-   * 每家自己的**组内排序规则**（provider → 规则数组，按数组顺序比较）。
-   * 没有键 = 用 `DEFAULT_GROUP_SORT`（积分到期 → 添加时间），规则可被关掉；
-   * 见 accounts-domain 的 sortGroupMembers。与 collapsed 同一档展示偏好，落盘保存。
-   */
+  /** 全局消耗规则由网关保存；本地值仅用于旧设置迁移。 */
   groupSort: Readonly<Record<string, GroupSortRule[]>>
+  sorting: AccountSorting | null
+  sortBusy: boolean
 }
 
 /* ─── 跨次启动的记忆键 ───────────────────────── */
@@ -91,13 +89,7 @@ const NAMES_HIDDEN_KEY = 'workbuddy-desktop-accounts-names-hidden'
  */
 export const GROUP_TOTAL_FILTERED_KEY = 'workbuddy-desktop-accounts-group-total-filtered'
 
-/**
- * 组内排序规则的记忆键：`{ [provider]: GroupSortRule[] }`。
- *
- * 只存**显式改过**的那些家（没改的留给 `DEFAULT_GROUP_SORT`）——
- * 存全量的话，默认值以后要调整（比如把「添加时间」提到前面）时，
- * 所有老用户都会被自己那份旧快照钉死在新默认之外。
- */
+/** 旧版浏览器排序设置的迁移来源，不再写入新规则。 */
 export const GROUP_SORT_KEY = 'workbuddy-desktop-accounts-group-sort'
 
 /** 读回组内排序规则（坏数据整段丢弃，不让一个手改坏的键把整页排序拖垮） */
@@ -202,6 +194,8 @@ let store: AccountsStore = {
   usageInflight: new Set<string>(),
   groupTotalFiltered: loadGroupTotalFiltered(),
   groupSort: loadGroupSort(),
+  sorting: null,
+  sortBusy: false,
 }
 
 const listeners = new Set<() => void>()
@@ -282,7 +276,7 @@ export function findAccount(id: string): AccountRecord | null {
  *  注入：限流维度把「余额不足已跳过 / Token 限额已跳过」都算进已限流，而两份缓存
  *  都在 accounts-data（本文件不反向依赖它，避免 store⇄data 成环） */
 export function visibleList(usageOf?: UsageLookup, tokenUsageOf?: TokenUsageLookup): AccountRecord[] {
-  return visibleAccounts(allAccounts(), store.filter, usageOf, tokenUsageOf).slice().sort(byPriorityOrder)
+  return groupView(usageOf, tokenUsageOf).groups.flatMap(group => group.accounts)
 }
 
 export type GroupView = {
@@ -318,48 +312,26 @@ export function groupView(
     usageOf,
     tokenUsageOf,
     groupSortRules,
+    store.sorting || snapshot()?.sorting,
   )
   const groups = allGroups.filter(group => group.accounts.length > 0)
   return { groups, allGroups }
 }
 
-/**
- * 某一家当前的排序规则（没配过 = 默认规则的一份副本）。
- *
- * 返回副本而不是 `DEFAULT_GROUP_SORT` 本身：设置弹窗会就地改数组（上移 / 下移），
- * 直接把默认值递出去等于让一次取消不掉的操作写进模块常量。
- */
+/** 已保存的选择优先；未配置的家按当前申报能力生成默认规则。 */
 export function groupSortRules(provider: string): GroupSortRule[] {
-  const saved = store.groupSort[provider]
-  if (saved) return saved.map(rule => ({ ...rule }))
-  return DEFAULT_GROUP_SORT.map(rule => ({ ...rule }))
+  const effective = store.sorting?.rules[provider] || snapshot()?.sorting?.rules[provider]
+  const saved = effective || store.groupSort[provider]
+  if (saved) {
+    const rules = saved.map(rule => ({ ...rule }))
+    return [...rules, ...defaultGroupSortRules(provider).filter(rule => !rules.some(current => current.key === rule.key)).map(rule => ({ ...rule, on: false }))]
+  }
+  return defaultGroupSortRules(provider)
 }
 
 /** 这一家有没有**显式改过**规则（设置弹窗据此决定「恢复默认」是否可点） */
 export function hasCustomGroupSort(provider: string): boolean {
-  return Boolean(store.groupSort[provider])
-}
-
-/**
- * 写入某一家的排序规则。
- *
- * `null` = 删掉这条记录（回到默认）。空数组**不当作删除**：那是用户把两条规则
- * 都关掉了（想纯手动排序），与「恢复默认」是两件事 —— 混成一个会让「关掉所有
- * 规则」在下次启动时悄悄变回默认排序。
- */
-export function setGroupSortRules(provider: string, rules: GroupSortRule[] | null): void {
-  if (!provider) return
-  const next: Record<string, GroupSortRule[]> = { ...store.groupSort }
-  if (rules === null) delete next[provider]
-  else next[provider] = rules.map(rule => ({ ...rule }))
-  persistGroupSort(next)
-  patch({ groupSort: next })
-}
-
-function persistGroupSort(groupSort: Readonly<Record<string, GroupSortRule[]>>): void {
-  try {
-    localStorage.setItem(GROUP_SORT_KEY, JSON.stringify(groupSort))
-  } catch { /* 隐私模式等存不了就算了：本次会话内仍然生效 */ }
+  return Object.prototype.hasOwnProperty.call(store.sorting?.configured || store.groupSort, provider)
 }
 
 export function providerSummaryList(): Array<{ id: string; label: string; count: number }> {
@@ -370,9 +342,9 @@ export function segmentCounts(usageOf?: UsageLookup, tokenUsageOf?: TokenUsageLo
   return filterCounts(allAccounts(), store.filter, usageOf, tokenUsageOf)
 }
 
-/** 该账号在**全局队列**里的位置（序号与 ↑/↓ 的边界同源） */
+/** 全局有效消耗队列的位置，不受筛选影响。 */
 export function seats(): Map<string, { position: number; total: number }> {
-  return positionMap(allAccounts())
+  return positionMap(allAccounts(), store.sorting || snapshot()?.sorting)
 }
 
 /* ─── 筛选 ─────────────────────────────────── */

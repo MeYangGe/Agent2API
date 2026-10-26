@@ -24,12 +24,17 @@ pub struct ApiRequest {
     pub path: String,
     #[serde(default)]
     pub body: Option<Value>,
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// 统一的管理 API 入口：返回后端 data，出错时返回可读消息。
 #[tauri::command]
 pub async fn api_request(request: ApiRequest) -> Result<Value, String> {
-    gateway::call(&request.method, &request.path, request.body.as_ref()).await
+    match request.api_key.as_deref() {
+        Some(key) => gateway::call_with_api_key(&request.method, &request.path, request.body.as_ref(), key).await,
+        None => gateway::call(&request.method, &request.path, request.body.as_ref()).await,
+    }
 }
 
 /// 取原始文本（导出日志用）
@@ -422,7 +427,8 @@ pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Re
 pub async fn direct_credentials() -> Result<Value, String> {
     crate::startup::wait().await?;
     crate::panel_session::refresh_if_expiring().await;
-    let mut headers = serde_json::Map::new();
+    crate::panel_session::ensure_local_access()?;
+    let mut headers = crate::panel_session::credential_headers();
     if let Some(key) = crate::gateway::management_key() {
         headers.insert("x-api-key".to_string(), Value::String(key));
     }

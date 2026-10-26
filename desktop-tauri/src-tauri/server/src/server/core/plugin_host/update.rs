@@ -1,6 +1,10 @@
 //! 插件索引、发行版与下载。网络出口和 GitHub 令牌复用软件更新链路。
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+mod required;
+pub(super) use required::required_release;
 
 use crate::server::core::update::client::{
     fetch_candidate, fetch_json, fetch_public, github_headers,
@@ -13,7 +17,7 @@ const GITHUB_API: &str = "https://api.github.com";
 const QUERY_TIMEOUT_MS: u64 = 30_000;
 const MAX_DOWNLOAD_BYTES: usize = 24 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PackAsset {
     pub version: String,
     pub name: String,
@@ -89,7 +93,16 @@ pub(super) fn retry_key() -> String {
     format!("pluginGithub:{INDEX_REPO}")
 }
 
+pub(super) fn waiting_message(state: &crate::server::core::task_state::TaskState) -> String {
+    source::GithubSettings::Plugin.waiting_message(state)
+}
+
+pub(super) fn describe_error(message: &str, retry_at: i64) -> String {
+    source::GithubSettings::Plugin.describe_error(message, retry_at)
+}
+
 pub fn clear_cooldown() {
+    super::compatibility::clear_cooldown();
     super::catalog::clear_cooldown();
     if let Err(error) = crate::server::core::task_state::clear_cooldown(&retry_key()) {
         crate::server::logging::verbose("[Plugin]", &error);
@@ -99,39 +112,15 @@ pub fn clear_cooldown() {
 async fn fetch(url: &str) -> Result<reqwest::Response, String> {
     let state = crate::server::core::task_state::read(&retry_key())?;
     if source::is_official_api(url) && state.retry_at > crate::server::logging::now_ms() {
-        return Err(state.waiting_message());
+        return Err(waiting_message(&state));
     }
-    let response = fetch_public(url, &github_headers(), Some(QUERY_TIMEOUT_MS)).await?;
+    let response = fetch_public(url, &github_headers(), Some(QUERY_TIMEOUT_MS))
+        .await
+        .map_err(|error| describe_error(&error, 0))?;
     let status = response.status().as_u16();
     if source::is_official_api(url) && (status == 403 || status == 429) {
-        let now = crate::server::logging::now_ms();
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-        };
-        let after = header("retry-after")
-            .and_then(|value| {
-                value
-                    .parse::<i64>()
-                    .ok()
-                    .map(|seconds| now.saturating_add(seconds.max(0).saturating_mul(1000)))
-                    .or_else(|| {
-                        chrono::DateTime::parse_from_rfc2822(value)
-                            .ok()
-                            .map(|date| date.timestamp_millis())
-                    })
-            })
-            .unwrap_or(0);
-        let reset = if header("x-ratelimit-remaining") == Some("0") {
-            header("x-ratelimit-reset")
-                .and_then(|value| value.parse::<i64>().ok())
-                .map(|value| value.saturating_mul(1000).saturating_add(1000))
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let retry_at = source::retry_deadline(response.headers(), status);
+        let message = source::GithubSettings::Plugin.rate_limit_message(retry_at);
         if let Ok(crate::server::core::task_state::Claim::Acquired(guard)) =
             crate::server::core::task_state::claim(
                 &retry_key(),
@@ -143,13 +132,13 @@ async fn fetch(url: &str) -> Result<reqwest::Response, String> {
         {
             let _ = guard.finish(
                 false,
-                "GitHub 接口访问受限".to_string(),
+                message.clone(),
                 None,
-                after.max(reset).max(now + 60_000),
+                retry_at,
                 60_000,
             );
         }
-        return Err("GitHub 接口访问受限，请稍后重试或配置 GitHub 令牌".to_string());
+        return Err(message);
     }
     Ok(response)
 }
@@ -160,7 +149,7 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
         value.get("plugins").and_then(Value::as_array).is_some()
     })
     .await
-    .map_err(|error| error.message)?;
+    .map_err(|error| describe_error(&error.message, 0))?;
     if !response.status.is_success() {
         return Err(format!(
             "读取插件索引失败：HTTP {}",
@@ -373,32 +362,16 @@ pub(super) async fn release_for_channels(
         .map(|detail| detail.tag_template != "v{version}")
         .unwrap_or(false);
     let listed = channels.beta || custom_tag;
-    let url = format!(
-        "{GITHUB_API}/repos/{repo}/releases{}",
-        if listed { "?per_page=100" } else { "/latest" }
-    );
-    let state = crate::server::core::task_state::read(&retry_key())?;
-    if state.retry_at > crate::server::logging::now_ms() {
-        return Err(state.waiting_message());
-    }
-    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
-        if listed {
-            value.is_array()
-        } else {
-            value.get("tag_name").and_then(Value::as_str).is_some()
-        }
-    })
-    .await
-    .map_err(|error| error.message)?;
-    if response.status.as_u16() == 404 {
-        return Ok(None);
-    }
-    if !response.status.is_success() {
-        return Err(format!(
-            "查询插件更新失败：GitHub 返回 HTTP {}",
-            response.status.as_u16()
-        ));
-    }
+    let response = match query_releases(
+        repo,
+        if listed { "?per_page=100" } else { "/latest" },
+        listed,
+    )
+    .await?
+    {
+        Some(response) => response,
+        None => return Ok(None),
+    };
     let document = response.value;
     let list: Vec<&Value> = if listed {
         document
@@ -439,6 +412,44 @@ pub(super) async fn release_for_channels(
         }
     }
     Ok(best)
+}
+
+async fn query_releases(
+    repo: &str,
+    suffix: &str,
+    listed: bool,
+) -> Result<Option<crate::server::core::update::client::JsonResponse>, String> {
+    if !valid_repo(repo) {
+        return Err("插件发布仓库必须是 owner/repo".to_string());
+    }
+    let state = crate::server::core::task_state::read(&retry_key())?;
+    if state.retry_at > crate::server::logging::now_ms() {
+        return Err(waiting_message(&state));
+    }
+    let url = format!("{GITHUB_API}/repos/{repo}/releases{suffix}");
+    let response = fetch_json(&url, &github_headers(), QUERY_TIMEOUT_MS, |value| {
+        if listed {
+            value.is_array()
+        } else {
+            value.get("tag_name").and_then(Value::as_str).is_some()
+        }
+    })
+    .await
+    .map_err(|error| describe_error(&error.message, 0))?;
+    if response.status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if matches!(response.status.as_u16(), 403 | 429) {
+        let retry_at = source::retry_deadline(&response.headers, response.status.as_u16());
+        return Err(source::GithubSettings::Plugin.rate_limit_message(retry_at));
+    }
+    if !response.status.is_success() {
+        return Err(format!(
+            "查询插件更新失败：GitHub 返回 HTTP {}",
+            response.status.as_u16()
+        ));
+    }
+    Ok(Some(response))
 }
 
 pub async fn latest(pack_id: &str, target: &str) -> Result<Option<PackAsset>, String> {
@@ -482,7 +493,7 @@ pub async fn download(
             Ok(response) => response,
             Err(error) => {
                 candidate.forget();
-                last_error = error;
+                last_error = describe_error(&error, 0);
                 continue;
             }
         };
@@ -521,7 +532,7 @@ pub async fn download(
             }
             Err(error) => {
                 candidate.forget();
-                last_error = error;
+                last_error = describe_error(&error, 0);
             }
         }
     }

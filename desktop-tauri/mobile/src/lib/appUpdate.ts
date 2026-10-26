@@ -32,9 +32,11 @@
  * 用于「我不想让手机耗流量」这种纯本地偏好。
  */
 
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { ApiError, apiCall } from '../api/client'
 import { activeServerId, nativePlatform } from '../lib/servers'
 import { t } from '../i18n'
+import type { ForceUpdatePolicy } from '../../../ui-shared/updates'
 
 /** 构建期注入的本工程版本号 */
 declare const __APP_VERSION__: string
@@ -43,6 +45,7 @@ export const APP_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_V
 
 /** 更新检查结果里手机端关心的那部分 */
 export type ApkUpdateInfo = {
+  forceUpdate?: ForceUpdatePolicy | null
   currentVersion: string
   latestVersion: string | null
   hasUpdate: boolean | null
@@ -55,6 +58,7 @@ export type ApkUpdateInfo = {
 }
 
 type RawCheckResult = {
+  forceUpdate?: ForceUpdatePolicy | null
   currentVersion?: string | null
   latestVersion?: string | null
   hasUpdate?: boolean | null
@@ -84,6 +88,7 @@ export async function checkApkUpdate(): Promise<ApkUpdateInfo> {
   if (raw.channelChanged && raw.checked === false) throw new Error(t('更新通道已改变，请重新检查更新。'))
   const asset = raw.androidAsset && raw.androidAsset.url ? raw.androidAsset : null
   return {
+    forceUpdate: raw.forceUpdate,
     currentVersion: APP_VERSION,
     latestVersion: raw.latestVersion || null,
     // 有新版但没挂 APK 时，对手机端来说等于「没有可更新的包」：
@@ -164,18 +169,12 @@ type ApkUpdaterPlugin = {
   ): Promise<PluginListenerHandle>
 }
 
-type CapacitorGlobal = {
-  isNativePlatform?: () => boolean
-  Plugins?: Record<string, unknown>
-}
+const ApkUpdater = registerPlugin<ApkUpdaterPlugin>('ApkUpdater')
 
 /** 取原生插件；不在 APK 里（或插件没注册）时返回 null */
 function plugin(): ApkUpdaterPlugin | null {
-  // iOS 没有这个插件（也不可能有：苹果不允许 App 自装可执行代码）
-  if (nativePlatform() !== 'android') return null
-  const capacitor = (window as unknown as { Capacitor?: CapacitorGlobal }).Capacitor
-  const found = capacitor?.Plugins?.ApkUpdater
-  return (found as ApkUpdaterPlugin | undefined) || null
+  if (nativePlatform() !== 'android' || !Capacitor.isPluginAvailable('ApkUpdater')) return null
+  return ApkUpdater
 }
 
 /** 当前壳能不能在应用内下载并安装安装包（只有 Android 能） */

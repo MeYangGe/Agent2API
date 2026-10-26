@@ -29,14 +29,17 @@ export function RouteStateBadge({ state, children }: { state: string; children?:
     {children || label}
   </Badge>
 }
-export function ProviderRouteBadge({ rank, unavailable, disabled, states }: {
+export function ProviderRouteBadge({ rank, effectiveRank, unavailable, disabled, states }: {
   rank?: number
+  effectiveRank?: number
   unavailable: boolean
   disabled: boolean
   states: string[]
 }) {
   if (unavailable || disabled) return <Badge shape='tag' variant='secondary'>{unavailable ? t('模型绑定不可用') : t('未参与')}</Badge>
-  if (rank !== undefined) return <Badge shape='tag' variant='brand' title={t('当前有效顺位以路由预演为准，不改变保存的配置优先级。')}>{t('第 {n} 顺位', { n: rank })}</Badge>
+  if (rank !== undefined) return <Badge shape='tag' variant={effectiveRank === undefined ? 'secondary' : 'brand'} title={effectiveRank === undefined
+    ? t('此为配置顺位，当前没有可用候选账号。')
+    : t('配置第 {rank} 顺位；当前可用候选第 {effective} 顺位。', { rank, effective: effectiveRank })}>{t('第 {n} 顺位', { n: rank })}</Badge>
   if (!states.length) return <Badge shape='tag' variant='secondary'>{t('没有参与路由的账号')}</Badge>
   const state = states[0]
   if (!states.every(value => value === state)) return <Badge shape='tag' variant='secondary'>{t('无可用账号')}</Badge>

@@ -5,7 +5,7 @@
 //!   upstreamBaseUrl / authSource / currentAccountId /
 //!   tokenExpiresAt / canRefresh 全来自 `auth.get_config_summary()`；
 //!   login 为 `auth.get_status()` 的完整形态（已登录/未登录两分支）；
-//!   authRequired 按是否配置了 API Key / defaultModel / models 数量。
+//!   authRequired 表示模型调用始终需要网关 Key / defaultModel / models 数量。
 //!
 //! `authApiBase` / `chatApiUrl` 两栏已删除（2026-10 拆家）：它们是**上游端点**，
 //! 随「怎么打上游」的知识一起搬到了提供商插件，网关不再持有。字段整体移除
@@ -74,7 +74,7 @@ pub async fn handle(State(state): State<ServerState>) -> Response {
                 .cloned()
                 .unwrap_or_else(|| Value::String(UNCONFIGURED_REASON.to_string()))
         },
-        "authRequired": snapshot.api_key_set(),
+        "authRequired": true,
         "defaultModel": snapshot.default_model(),
         // 模型目录条数（对照 Node 的 `models: modelCatalog.list().length`）。
         // 本字段是「唯一上游时代」的契约读数：那时进程里只有 workbuddy 一份

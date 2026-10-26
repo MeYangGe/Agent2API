@@ -31,7 +31,7 @@
 //! ── 记账 ────────────────────────────────────────────────────
 //! 与模型测试同一口径：进请求日志（用户在「请求日志」里看得到助手的每一次
 //! 消耗），`is_test = true` 使报表聚合排除它（人工反复发起的样本混进趋势图
-//! 会把真实流量读歪）。`client` 留空：助手是网关自己发起的，没有下游 UA。
+//! 会把真实流量读歪）。来源为 `assistant`，实际 Key 身份随请求记入日志。
 
 use std::sync::Arc;
 
@@ -153,9 +153,35 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
             .collect(),
         Some(_) => return Err("tools 必须是对象".to_string()),
     };
+    let title_model = match block.get("titleModel") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if text.chars().count() > MAX_MODEL_CHARS { return Err("标题总结模型名过长".into()); }
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Some(_) => return Err("titleModel 必须是字符串或 null".into()),
+    };
+    let title_prompt = match block.get("titlePrompt") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) if text.chars().count() <= MAX_SYSTEM_PROMPT_CHARS => text.clone(),
+        Some(Value::String(_)) => return Err(format!("标题总结提示词最长 {MAX_SYSTEM_PROMPT_CHARS} 字")),
+        Some(_) => return Err("titlePrompt 必须是字符串".into()),
+    };
+    let api_key_id = match block.get("apiKeyId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if id.trim().len() <= 128 => {
+            let id = id.trim();
+            (!id.is_empty()).then(|| id.to_string())
+        }
+        Some(_) => return Err("apiKeyId 必须是有效的 Key ID 或 null".to_string()),
+    };
     Ok(AssistantConfig {
         model,
+        api_key_id,
         reasoning,
+        title_model,
+        title_prompt,
         // 权限模式：只认 confirm / full，缺失与未知值都回落到「变更前确认」
         // （解析取向与 assistant_config::from_raw 一致）
         mode: match block.get("mode") {
@@ -175,7 +201,11 @@ fn parse_config(block: &Map<String, Value>) -> Result<AssistantConfig, String> {
 /* ─── 对话（SSE）────────────────────────────────────────── */
 
 /// POST /api/assistant/chat
-pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    let access = match super::model_access::authenticate(&headers, super::model_access::ASSISTANT) {
+        Ok(access) => access,
+        Err(error) => return chat_error(error),
+    };
     let payload = match parse_body(&body) {
         Ok(payload) => payload,
         Err(error) => return errors::management_error(400, error.message),
@@ -255,15 +285,19 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
     }
 
     // 模型路由：对外名 → 上游名（默认值 / 映射别名 / 目录校验与 /v1/* 同源）
-    let requested_model = match pipeline::resolve_model(&state, &mut upstream, None) {
+    let started_at = logging::now_ms();
+    let requested_model = match pipeline::resolve_model(&state, &mut upstream, access.scope.as_ref()) {
         Ok(name) => name,
-        Err(error) => return chat_error(error),
+        Err(error) => {
+            pipeline::record_early_failure(&state, started_at, &model, reasoning.as_deref().unwrap_or(""), &access.source, &error);
+            return chat_error(error);
+        }
     };
 
     if upstream.get("tools").and_then(Value::as_array).is_some_and(|tools| tools.iter().any(|tool| {
         tool.pointer("/function/name").and_then(Value::as_str) == Some("edit_images")
     })) {
-        let catalog = crate::server::core::providers::catalog::models_response(state.store(), None);
+        let catalog = crate::server::core::providers::catalog::models_response(state.store(), access.scope.as_ref());
         let supports_images = catalog.get("data").and_then(Value::as_array)
             .and_then(|models| models.iter().find(|item| {
                 item.get("id").and_then(Value::as_str).is_some_and(|id| id.eq_ignore_ascii_case(&requested_model))
@@ -272,7 +306,6 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
             super::assistant_images::preserve_tool_references(&mut upstream);
         }
     }
-    let started_at = logging::now_ms();
     let telemetry = Arc::new(RequestTelemetry::with_id());
     let telemetry_id = telemetry.snapshot().id;
     // 进行中行：与真实请求同一时点。`is_test = true` —— 报表排除、请求日志标记
@@ -282,8 +315,8 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
         started_at,
         &requested_model,
         &model,
-        "",
-        &Default::default(),
+        reasoning.as_deref().unwrap_or(""),
+        &access.source,
         true,
     );
     if let Some(token) = cancellation::register(&telemetry_id) {
@@ -303,7 +336,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
             telemetry: telemetry.clone(),
             // **不钉提供商**：对话模型是对外名，路由语义与 /v1/chat/completions
             // 完全一致 —— 同名在多家时按账号优先级主备，失败自动落下一家
-            allowed_providers: None,
+            allowed_providers: access.scope.clone(),
             pinned_account: None,
             // 尊重模型启停：助手用的是「已启用的模型」，用户关掉的模型不该
             // 因为助手而继续消耗额度（与生产请求同一道门禁）
@@ -326,7 +359,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                 raw_request: None,
                 raw_response: None,
                 is_test: true,
-                source: Default::default(),
+                source: access.source.clone(),
             };
             // 记账移交给响应流（它与流的生命周期同长）；守卫不再兜底
             guard.handoff();
@@ -356,7 +389,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                     raw_request: None,
                     raw_response,
                     is_test: true,
-                    source: Default::default(),
+                    source: access.source.clone(),
                 },
                 None,
             );
@@ -378,7 +411,7 @@ pub async fn chat(State(state): State<ServerState>, body: Bytes) -> Response {
                     raw_request: None,
                     raw_response: None,
                     is_test: true,
-                    source: Default::default(),
+                    source: access.source.clone(),
                 },
                 Some(message.clone()),
             );

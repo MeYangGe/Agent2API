@@ -42,9 +42,16 @@ export type ClaimResult = {
   endsAt?: number
 }
 
-type CaptchaConfig = { enabled?: boolean; region?: string; prefix?: string; sceneId?: string }
+export type CaptchaPhase = 'preparing' | 'verifying' | 'submitting'
+export type CaptchaPoolStats = {
+  ready?: number; target?: number; required?: boolean; needsTokens?: boolean
+  demandActive?: boolean; startPlanAccounts?: number; configError?: string; error?: string
+}
+type CaptchaConfig = { enabled?: boolean; region?: string; prefix?: string; sceneId?: string; skipModelRequest?: boolean }
 type CaptchaApi = {
-  solve<T>(config: CaptchaConfig, request: (param: string) => Promise<{ captchaResult: boolean; bizResult: boolean; result: T }>, signal?: AbortSignal): Promise<{ result: T }>
+  solve<T>(config: CaptchaConfig, request: (param: string) => Promise<{ captchaResult: boolean; bizResult: boolean; result: T }>, signal?: AbortSignal,
+    options?: { protocol: 'v3'; onPhase?: (phase: CaptchaPhase) => void }): Promise<{ result: T }>
+  requestToken(config: CaptchaConfig, signal?: AbortSignal, options?: { onPhase?: (phase: CaptchaPhase) => void }): Promise<{ param: string }>
   cancel(): boolean
   isBusy(): boolean
 }
@@ -82,28 +89,60 @@ export function previewPlans(id: string): Promise<PreviewResult> {
   return apiCall(`${accountPath(id)}/zcode-claim/preview`, { method: 'POST' })
 }
 
-export async function claimPlan(id: string, planId: string, signal?: AbortSignal): Promise<ClaimResult> {
+export async function claimPlan(id: string, planId: string, signal?: AbortSignal, onPhase?: (phase: CaptchaPhase) => void): Promise<ClaimResult> {
   const identity = serverIdentity()
   const requireCurrent = () => {
     if (signal?.aborted || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
   }
   requireCurrent()
+  onPhase?.('preparing')
   const config = await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, { method: 'POST', signal })
+  requireCurrent()
+  if (!config || typeof config.enabled !== 'boolean') throw new Error(t('风控验证配置不完整，请稍后重试'))
   const claim = (captchaVerifyParam: string) => {
     requireCurrent()
+    onPhase?.('submitting')
     return apiCall<ClaimResult>(`${accountPath(id)}/zcode-claim`, {
-      method: 'POST', body: { planId, captchaVerifyParam, captchaRegion: config.region || '' }, signal,
+      method: 'POST', body: { planId, captchaVerifyParam, captchaRegion: config.region || '' },
     })
   }
   if (!config.enabled) return claim('')
   const captcha = await loadCaptcha()
   requireCurrent()
-  const response = await captcha.solve({ ...config, region: config.region || 'ga' }, async param => {
+  const response = await captcha.solve({ ...config, region: config.region || 'cn' }, async param => {
     const result = await claim(param)
-    return { captchaResult: result.failure !== 'captcha', bizResult: true, result }
-  }, signal)
+    return { captchaResult: result.failure !== 'captcha', bizResult: Boolean(result.ok), result }
+  }, signal, { protocol: 'v3', onPhase })
   requireCurrent()
   return response.result
+}
+
+export function captchaPoolStats(signal?: AbortSignal): Promise<CaptchaPoolStats> {
+  return apiCall('/api/zcode/captcha', { signal })
+}
+
+export async function verifyPlanChannel(id: string, signal?: AbortSignal, onPhase?: (phase: CaptchaPhase) => void): Promise<boolean> {
+  const identity = serverIdentity()
+  const requireCurrent = () => {
+    if (signal?.aborted || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
+  }
+  requireCurrent()
+  onPhase?.('preparing')
+  const config = await apiCall<CaptchaConfig>(`${accountPath(id)}/zcode-claim/captcha-config`, { method: 'POST', signal })
+  requireCurrent()
+  const stats = await captchaPoolStats(signal)
+  requireCurrent()
+  if (stats.required === false) return false
+  const captcha = await loadCaptcha()
+  requireCurrent()
+  const token = await captcha.requestToken(config, signal, { onPhase })
+  requireCurrent()
+  onPhase?.('submitting')
+  const result = await apiCall<{ accepted?: number }>('/api/zcode/captcha', {
+    method: 'POST', body: { tokens: [{ param: token.param, region: config.region || '' }] },
+  })
+  if (result.accepted !== 1) throw new Error(t('验证码令牌未全部入池'))
+  return true
 }
 
 export function cancelPlanCaptcha(): void {

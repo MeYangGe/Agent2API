@@ -176,7 +176,7 @@ pub(super) fn normalize_imported(
     // （uid 身份 + edition/endpoint/prefixPath/platform），写成单 id 会让国际版
     // 掉进 else 分支把那些字段**清掉** —— 导入后账号只剩默认端点，转发必然 401。
     if crate::server::core::providers::workbuddy::is_workbuddy_family(&provider) {
-        normalize_workbuddy_known_fields(&mut record, item, before);
+        normalize_workbuddy_known_fields(&mut record, item, before, provider);
     } else {
         // 非 WorkBuddy：edition / prefixPath / endpoint / platform 是腾讯端点
         // 身份，不属于其余各家的 schema，一律不写入。
@@ -308,15 +308,10 @@ fn normalize_workbuddy_known_fields(
     record: &mut Map<String, Value>,
     item: &Map<String, Value>,
     before: Option<&StoredAccount>,
+    provider: &str,
 ) {
-    let edition = resolve_edition(
-        item.get("edition")
-            .filter(|value| !value.is_null())
-            .map(|value| text_of(Some(value)))
-            .filter(|value| !value.is_empty())
-            .or_else(|| before.and_then(StoredAccount::edition))
-            .as_deref(),
-    );
+    let edition = crate::server::core::providers::workbuddy::Region::from_provider_id(provider)
+        .map(|region| region.edition()).unwrap_or_else(|| resolve_edition(None));
     let explicit = |key: &str| item.get(key).filter(|value| !value.is_null());
     record.insert("edition".to_string(), Value::String(edition.id.to_string()));
     record.insert(

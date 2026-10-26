@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import { githubErrorMessage } from '../../../ui-shared/updates'
 import type { PluginMutation } from './plugins-types'
 
 export type PluginBridge = {
@@ -17,8 +18,12 @@ export function bridge(): PluginBridge {
   return window as unknown as PluginBridge
 }
 
+export function errorMessage(error: unknown): string {
+  return githubErrorMessage(error, t, 'plugin')
+}
+
 export function toast(message: string, kind?: 'err' | 'ok'): void {
-  bridge().wbApp?.toast?.(message, kind)
+  bridge().wbApp?.toast?.(errorMessage(message), kind)
 }
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {

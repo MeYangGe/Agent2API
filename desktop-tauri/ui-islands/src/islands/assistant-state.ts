@@ -20,8 +20,10 @@
  */
 
 import { t } from '../i18n'
-import { imageAssets, type ImageAsset } from '../../../ui-shared/assistant-image-tools'
 import { readAssistantStream, type ChatEvent, type ToolCall } from '../../../ui-shared/assistant-stream'
+import { parseAssistantMessages, type ChatMessage } from '../../../ui-shared/assistant-history'
+export { DEFAULT_TITLE_PROMPT } from '../../../ui-shared/assistant-history'
+export type { ChatMessage } from '../../../ui-shared/assistant-history'
 export type { ChatEvent, ToolCall } from '../../../ui-shared/assistant-stream'
 
 export function newSessionId(): string {
@@ -164,8 +166,11 @@ export type PermissionMode = 'confirm' | 'full'
  *  完全一致，同名在多家时按账号优先级主备。 */
 export type AssistantConfig = {
   model: string | null
+  apiKeyId: string | null
   /** 思考等级（`reasoning_effort` 的取值）；null = 不指定（交给映射绑定） */
   reasoning: string | null
+  titleModel: string | null
+  titlePrompt: string
   /** 权限模式（改动类工具要不要先问） */
   mode: PermissionMode
   systemPromptEnabled: boolean
@@ -266,13 +271,17 @@ function wrapFetchError(error: unknown, base: string): Error {
  */
 export async function requestDirect(
   path: string,
-  options: { method: string; body?: unknown; signal?: AbortSignal },
+  options: { method: string; body?: unknown; signal?: AbortSignal; apiKey?: string },
   retried = false,
 ): Promise<Response> {
   const api = bridge()
   if (api?.platform !== 'web' && api?.waitForBackend) await api.waitForBackend()
   const base = await gatewayBase()
   const headers: Record<string, string> = { ...(await directAuthHeaders()) }
+  if (options.apiKey !== undefined) {
+    headers['x-api-key'] = options.apiKey
+    headers.Authorization = `Bearer ${options.apiKey}`
+  }
   const payload = options.body === undefined ? undefined : JSON.stringify(options.body)
   if (payload !== undefined) headers['Content-Type'] = 'application/json'
   let response: Response
@@ -289,7 +298,7 @@ export async function requestDirect(
     if (options.signal?.aborted) throw error
     throw wrapFetchError(error, base)
   }
-  if (response.status === 401 && !retried && (options.method === 'GET' || !path.startsWith('/api/assistant/images/'))) {
+  if (response.status === 401 && !retried && options.apiKey === undefined && (options.method === 'GET' || !path.startsWith('/api/assistant/images/'))) {
     // 先把响应体读掉再重试：不消费会让这条连接一直吊着（同一把凭证再来一次
     // 也还是同一个 401，内容没有价值）
     await response.text().catch(() => '')
@@ -299,8 +308,8 @@ export async function requestDirect(
   return response
 }
 
-export async function callJson<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await requestDirect(path, { method, body, signal })
+export async function callJson<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, apiKey?: string): Promise<T> {
+  const response = await requestDirect(path, { method, body, signal, apiKey })
   const text = await response.text()
   let parsed: unknown = null
   try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
@@ -322,7 +331,10 @@ export async function loadAssistantConfig(): Promise<AssistantConfig> {
     : (config.model as { id?: unknown } | null)?.id
   return {
     model: typeof model === 'string' && model.trim() ? model : null,
+    apiKeyId: typeof config.apiKeyId === 'string' && config.apiKeyId.trim() ? config.apiKeyId : null,
     reasoning: typeof config.reasoning === 'string' && config.reasoning.trim() ? config.reasoning : null,
+    titleModel: typeof config.titleModel === 'string' && config.titleModel.trim() ? config.titleModel : null,
+    titlePrompt: typeof config.titlePrompt === 'string' ? config.titlePrompt : '',
     mode: config.mode === 'full' ? 'full' : 'confirm',
     systemPromptEnabled: config.systemPromptEnabled !== false,
     systemPrompt: typeof config.systemPrompt === 'string' ? config.systemPrompt : '',
@@ -345,11 +357,6 @@ export async function saveAssistantConfig(config: AssistantConfig): Promise<Assi
  * 真正发请求时由 [`toWireMessages`] 拼成 OpenAI 的
  * `[{type:"text"}, {type:"image_url"}]` 形态 —— 那才是上游认的形状。
  */
-export type ChatMessage =
-  | { role: 'user'; content: string; images?: string[] }
-  | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
-  | { role: 'tool'; toolCallId: string; content: string; images?: ImageAsset[] }
-
 /** 把页面层的消息数组转成上游认的形态（OpenAI 协议） */
 export function toWireMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
   return messages.map(message => {
@@ -387,6 +394,7 @@ export function toWireMessages(messages: ChatMessage[]): Array<Record<string, un
  */
 export async function streamChat(options: {
   model: string
+  apiKey: string
   messages: ChatMessage[]
   tools: Array<Record<string, unknown>>
   /** 本次请求的思考等级；缺省由后端的设置值兜底（见 api::assistant::chat） */
@@ -402,6 +410,7 @@ export async function streamChat(options: {
     method: 'POST',
     body,
     signal: options.signal,
+    apiKey: options.apiKey,
   })
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => '')
@@ -443,6 +452,7 @@ export type SessionSummary = {
   reasoning: string | null
   createdAt: number
   updatedAt: number
+  titleGenerated: boolean
 }
 
 /** 打开某一条时的完整形态 */
@@ -458,63 +468,7 @@ export type SessionDetail = SessionSummary & {
  * 等于「这段对话全丢了」。
  */
 function parseMessages(raw: unknown): ChatMessage[] {
-  if (!Array.isArray(raw)) return []
-  const messages: ChatMessage[] = []
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue
-    const row = item as Record<string, unknown>
-    const role = String(row.role ?? '')
-    if (role === 'user') {
-      // content 两种形态：字符串（纯文本）或多模态块数组（带图）。块数组要
-      // 拆回「文本 + 图片 data URL」，页面层才不用到处判类型。
-      const rawContent = row.content
-      if (Array.isArray(rawContent)) {
-        const texts: string[] = []
-        const images: string[] = []
-        for (const part of rawContent) {
-          if (!part || typeof part !== 'object') continue
-          const block = part as Record<string, unknown>
-          if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text)
-          if (block.type === 'image_url') {
-            const holder = block.image_url
-            const url = typeof holder === 'string'
-              ? holder
-              : (holder as { url?: unknown } | null | undefined)?.url
-            if (typeof url === 'string' && url) images.push(url)
-          }
-        }
-        messages.push({ role: 'user', content: texts.join('\n'), ...(images.length ? { images } : {}) })
-      } else {
-        const content = typeof rawContent === 'string' ? rawContent : ''
-        // 本版前端另存的一份 images 字段（历史里可能有过）也兼容读回来
-        const images = Array.isArray(row.images)
-          ? row.images.filter((url): url is string => typeof url === 'string' && Boolean(url))
-          : []
-        messages.push({ role: 'user', content, ...(images.length ? { images } : {}) })
-      }
-    } else if (role === 'assistant') {
-      const content = typeof row.content === 'string' ? row.content : ''
-      const rawCalls = Array.isArray(row.toolCalls) ? row.toolCalls : []
-      const toolCalls: ToolCall[] = rawCalls
-        .filter((call): call is Record<string, unknown> => Boolean(call) && typeof call === 'object')
-        .map(call => ({
-          id: String(call.id ?? ''),
-          name: String(call.name ?? ''),
-          arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
-        }))
-        .filter(call => call.name)
-      messages.push({
-        role: 'assistant',
-        content,
-        ...(toolCalls.length ? { toolCalls } : {}),
-      })
-    } else if (role === 'tool') {
-      const content = typeof row.content === 'string' ? row.content : ''
-      const images = imageAssets(row.images)
-      messages.push({ role: 'tool', toolCallId: String(row.toolCallId ?? ''), content, ...(images.length ? { images } : {}) })
-    }
-  }
-  return messages
+  return parseAssistantMessages(raw)
 }
 
 function toSummary(raw: unknown): SessionSummary | null {
@@ -529,6 +483,7 @@ function toSummary(raw: unknown): SessionSummary | null {
     reasoning: typeof row.reasoning === 'string' && row.reasoning ? row.reasoning : null,
     createdAt: Number(row.createdAt) || 0,
     updatedAt: Number(row.updatedAt) || 0,
+    titleGenerated: row.titleGenerated === true,
   }
 }
 
@@ -572,6 +527,20 @@ export async function saveSession(input: {
   const summary = toSummary(data?.session)
   if (!summary) throw new Error(t('会话响应不完整'))
   return summary
+}
+
+export async function summarizeSession(id: string, apiKey: string): Promise<SessionSummary> {
+  const data = await callJson<{ session?: unknown }>('POST', `/api/assistant/sessions/${encodeURIComponent(id)}/title`, undefined, undefined, apiKey)
+  const summary = toSummary(data.session)
+  if (!summary) throw new Error(t('会话响应不完整'))
+  return summary
+}
+
+export async function forkSession(id: string, messageId: string): Promise<SessionDetail> {
+  const data = await callJson<{ session?: unknown }>('POST', `/api/assistant/sessions/${encodeURIComponent(id)}/fork`, { id: newSessionId(), messageId })
+  const summary = toSummary(data.session)
+  if (!summary) throw new Error(t('会话响应不完整'))
+  return { ...summary, messages: parseMessages((data.session as Record<string, unknown>).messages) }
 }
 
 /** 删除一条会话 */

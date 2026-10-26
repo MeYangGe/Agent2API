@@ -67,6 +67,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::Response;
 use serde_json::{json, Value};
 
@@ -468,7 +469,11 @@ struct TestOutcome {
 }
 
 /// POST /api/models/test
-pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    let access = match super::model_access::authenticate(&headers, super::model_access::MODEL_TEST) {
+        Ok(access) => access,
+        Err(error) => return error.payload_response(),
+    };
     let payload = match parse_body(&body) {
         Ok(payload) => payload,
         Err(error) => return errors::management_error(400, error.message),
@@ -481,6 +486,18 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
     if model.is_empty() {
         return errors::management_error(400, "缺少 model");
     }
+    let key_scope = access.scope.clone().unwrap_or_default();
+    if !key_scope.allows_model(&model) {
+        let error = errors::GatewayError::with_status(404, format!("模型 '{model}' 不在这把网关 Key 的可用模型列表里"))
+            .with_code("model_not_found");
+        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);
+        return error.payload_response();
+    }
+    let Some(test_scope) = key_scope.for_test_provider(&provider) else {
+        let error = errors::GatewayError::with_status(403, format!("提供商 '{provider}' 不在这把网关 Key 的可用提供商列表里"));
+        pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);
+        return error.payload_response();
+    };
     // 模型必须**这一家认识**：清单里没有它时，转发层的收窄会以「不在这把网关
     // Key 的可用提供商列表里」收场 —— 那句话对测试场景毫无信息量，这里先拒掉
     // 并说清下一步（多半是清单没刷新，或者模型名被上游改名了）
@@ -598,11 +615,10 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
     let test_id = telemetry.id();
     // 「进行中」行：与真实请求同一处时点（解析成功、转发开始前）。
     // `is_test = true` 一路带下去 —— 报表排除它、请求日志标记它。
-    // 客户端给空串：测试是网关自己发起的，没有下游 UA —— 「谁发起」
-    // 那件事已经由 `is_test` 表达（见 `request_stats::RequestEntry::client`）
+    // 测试来源与实际通过鉴权的 Key 身份一起记录。
     state
         .request_stats()
-        .record_started(&test_id, started_at, &model, &model, &reasoning, &Default::default(), true);
+        .record_started(&test_id, started_at, &model, &model, &reasoning, &access.source, true);
     if let Some(token) = cancellation::register(&test_id) {
         telemetry.set_cancel_token(token);
     }
@@ -616,7 +632,6 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
     let outcome = run_forward(
         &state,
         &telemetry,
-        &provider,
         &account_id,
         protocol,
         &model,
@@ -624,6 +639,7 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
         request_body,
         stream,
         proxy_override,
+        test_scope,
     )
     .await;
     let finished_at = logging::now_ms();
@@ -645,8 +661,7 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
         raw_request,
         raw_response: outcome.raw_response.clone(),
         is_test: true,
-        // 客户端空串：测试没有下游 UA（与上面的 record_started 同口径）
-        source: Default::default(),
+        source: access.source.clone(),
     };
     pipeline::record_entry(&context, None);
     guard.complete();
@@ -661,6 +676,9 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
         "model": model,
         "protocol": protocol.as_str(),
         "proxy": proxy_label,
+        "apiKeyId": access.source.api_key.id,
+        "apiKeyName": access.source.api_key.name,
+        "apiKeySource": access.source.api_key.source,
         // 实际承载的家与账号（选路结果，取自 telemetry 快照）：正常情况就是
         // 请求里点名的那两个，但「账号被删 / 被禁用」这类情况下转发层给出的
         // 结论与请求不同，如实回报比回显请求参数有用
@@ -688,7 +706,6 @@ pub async fn run_model_test(State(state): State<ServerState>, body: Bytes) -> Re
 async fn run_forward(
     state: &ServerState,
     telemetry: &Arc<RequestTelemetry>,
-    provider: &str,
     account_id: &str,
     protocol: TestProtocol,
     model: &str,
@@ -696,6 +713,7 @@ async fn run_forward(
     request_body: Value,
     stream: bool,
     proxy_override: Option<Option<ResolvedProxy>>,
+    test_scope: KeyScope,
 ) -> TestOutcome {
     let forward = state.upstream().forward(ForwardRequest {
         body: request_body,
@@ -707,7 +725,7 @@ async fn run_forward(
         client_headers: Default::default(),
         telemetry: telemetry.clone(),
         // 钉住这一家（同一个对外名可能挂在多家上，见模块头）
-        allowed_providers: Some(KeyScope::provider_only(provider)),
+        allowed_providers: Some(test_scope),
         // 钉住这一个账号，且不顺延
         pinned_account: if account_id.is_empty() {
             None

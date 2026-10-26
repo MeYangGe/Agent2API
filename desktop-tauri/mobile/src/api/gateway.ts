@@ -10,6 +10,7 @@ import { apiCall } from './client'
 import type { ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { CheckinCenter } from '../../../ui-shared/checkin'
 import type { HiddenAccountsSummary } from '../../../ui-shared/plugins'
+import type { AccountSorting } from '../../../ui-shared/account-sorting'
 import { logQueryString, type LogPage, type LogQuery } from '../../../ui-shared/logs'
 
 export type { LogEntry, LogPage } from '../../../ui-shared/logs'
@@ -66,6 +67,7 @@ export type SessionPayload = {
     accounts?: Account[]
     providers?: ProviderSummary[]
     hiddenAccounts?: HiddenAccountsSummary
+    sorting?: AccountSorting
   }
   accountFeatures?: Record<string, unknown>
   lastRequestModel?: string | null
@@ -84,6 +86,7 @@ export function fetchAccounts(signal?: AbortSignal): Promise<{
   accounts?: Account[]
   providers?: ProviderSummary[]
   hiddenAccounts?: HiddenAccountsSummary
+  sorting?: AccountSorting
   currentAccountId?: string | null
   currentAccountIds?: Record<string, string | null>
 }> {
@@ -197,6 +200,7 @@ export type RequestRow = {
   sensitiveHits?: Array<{ word?: string; count?: number }>
   route?: unknown
   client?: string
+  isTest?: boolean
   apiKeyId?: string; apiKeyName?: string; apiKeySource?: string
 }
 
@@ -400,6 +404,7 @@ export function runScheduledTask(id: string): Promise<unknown> {
 /* ─── Agent 接管 ───────────────────────────────── */
 
 export type AgentClient = {
+  resources?: import('../../../ui-shared/agent-resources').ResourceCapabilities
   id?: string
   name?: string
   resolvedPath?: string
@@ -447,6 +452,7 @@ export type UsageRow = {
 }
 
 export type UsageSnapshot = {
+  sorting?: AccountSorting
   /** 全部行里最新的结论时刻 */
   at?: number
   results?: UsageRow[]

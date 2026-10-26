@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Badge, Button, Progress, Switch, Label, Card as UiCard } from '@ui'
-import { formatSize, formatTime, platformLabel, pluginDescription, pluginName } from './plugins-shared'
+import { errorMessage, formatSize, formatTime, platformLabel, pluginDescription, pluginName } from './plugins-shared'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
 
@@ -31,7 +31,7 @@ export function OperationProgress({ operation }: { operation: PluginOperation })
   const download = operation.stage === 'downloading'
   return <div className='px-4 pb-4 pt-3' aria-live='polite'>
     <div className='mb-1.5 flex items-center justify-between gap-2 text-[11.5px]'>
-      <span className='text-subtle'>{stage}</span>
+      <span className='text-subtle'>{operation.required ? `${t('正在补齐插件…')} · ${stage}` : stage}</span>
       <span className='tabular-nums text-muted-foreground'>
         {download ? (operation.total > 0
           ? `${formatSize(operation.received) || '0 B'} / ${formatSize(operation.total)} · ${Math.round(operation.percent || 0)}%`
@@ -64,8 +64,8 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
     <div className='flex flex-wrap gap-3 px-4 pt-3 text-[11px] text-muted-foreground'>
       <span>{platformLabel(target)}</span><span>{formatSize(platform?.size || 0) || t('当前平台暂无包')}</span>
     </div>
-    {item.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{item.reason}</p> : null}
-    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{operation.error}</p> : null}
+    {item.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(item.reason)}</p> : null}
+    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
     {operation?.active ? <OperationProgress operation={operation} /> : <div className='mt-auto flex gap-2 px-4 pb-4 pt-3.5'>
       <Button size='sm' disabled={disabled || !installable} onClick={onInstall}>{t('下载并安装')}</Button>
       {item.version ? <Button variant='outline' size='sm' onClick={onNotes}>{t('查看更新日志')}</Button> : null}
@@ -86,14 +86,16 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
   onUpdate: () => void
   onNotes: () => void
 }) {
-  const blocked = update?.error === true
+  const required = pack.updateRequired === true
+  const blocked = update?.error === true && !required
   const packHost = pack.host === undefined ? host : pack.host
   return <Card installed>
     <CardHead id={pack.id} name={store?.name || pack.name} version={pack.version} icon={pack.icon || store?.icon}>
       <Badge variant={pack.enabled ? 'default' : 'secondary'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
       <Badge variant={pack.signed ? 'success' : 'warning'}>{pack.signed ? t('已签名') : t('未签名')}</Badge>
       {pack.version.includes('-') ? <Badge variant='warning'>{t('beta 版')}</Badge> : null}
-      {update?.available ? <Badge variant='brand'>{t('有更新')}</Badge> : null}
+      {required ? <Badge variant='destructive'>{t('需要补齐插件')}</Badge>
+        : update?.available ? <Badge variant='brand'>{t('有更新')}</Badge> : null}
       {!pack.entryPresent ? <Badge variant='destructive'>{t('文件缺失')}</Badge> : null}
     </CardHead>
     <p className='px-4 pt-2.5 text-[12px] leading-relaxed text-subtle'>
@@ -106,10 +108,20 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
       <span>{packHost?.running ? t('运行中') : t('未运行')}</span>
       <span>{t('已加载')} {t('{count} 家', { count: String(pack.providers.filter(provider => provider.loaded).length) })}</span>
     </div>
+    {required ? <div className='mx-4 mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12px]' aria-live='polite'>
+      <p className='font-medium text-destructive'>{t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}</p>
+      <p className='mt-1 text-subtle'>{pack.signed
+        ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
+        : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
+      {update?.reason ? <p className={'mt-1 ' + (update.error ? 'text-destructive' : 'text-subtle')}>{errorMessage(update.reason)}</p> : null}
+      {update?.retryAt && update.retryAt > Date.now() ? <p className='mt-1 text-subtle'>
+        {t('下次自动重试：{time}', { time: formatTime(update.retryAt) })}
+      </p> : null}
+    </div> : null}
     {!pack.entryPresent ? <p className='px-4 pt-2 text-[12px] text-destructive'>
       {t('插件包的可执行文件不在磁盘上（可能被手工删除或移动），请重新安装。')}
     </p> : null}
-    {update?.available ? <div className='mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3'>
+    {update?.available && !required ? <div className='mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-hairline pt-3'>
       <span className='text-[12px] font-medium text-primary-fg'>
         {t('可更新到 v{version}', { version: update.latest || '' })}
       </span>
@@ -117,8 +129,8 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
         {t('更新日志')}<Button variant='outline' size='xs' onClick={onNotes}>{t('查看')}</Button>
       </div>
     </div> : null}
-    {update?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{update.reason}</p> : null}
-    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{operation.error}</p> : null}
+    {update?.error && !required ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(update.reason)}</p> : null}
+    {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
     {packHost?.lastError ? <p className='px-4 pt-2 text-[12px] text-destructive'>{packHost.lastError}</p> : null}
     {operation?.hostError ? <p className='px-4 pt-2 text-[12px] text-warning'>{operation.hostError}</p> : null}
     {operation?.active ? <OperationProgress operation={operation} /> : <div className='mt-auto flex flex-wrap items-center gap-2 px-4 pb-4 pt-3.5'>
@@ -128,10 +140,12 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
       <Button variant='outline' size='sm' onClick={onSettings} aria-haspopup='dialog'>{t('设置')}</Button>
       <Button variant='outline' size='sm' disabled={disabled} onClick={onRemove}>{t('卸载')}</Button>
       <span className='flex-1' />
-      {update?.available ? <Button size='sm' disabled={disabled || blocked} onClick={onUpdate}>
+      {required ? <Button size='sm' disabled={disabled || update?.repairing === true} onClick={onUpdate}>
+        {update?.repairing ? t('正在补齐插件…') : t('补齐插件')}
+      </Button> : update?.available ? <Button size='sm' disabled={disabled || blocked} onClick={onUpdate}>
         {t('更新到 v{version}', { version: update.latest || '' })}
       </Button> : <span className={'text-[11px] ' + (update?.error ? 'text-destructive' : 'text-muted-foreground')}>
-        {update?.checked ? update.reason || t('已是最新') : t('尚未检查更新')}
+        {update?.checked ? errorMessage(update.reason) || t('已是最新') : t('尚未检查更新')}
       </span>}
     </div>}
   </Card>

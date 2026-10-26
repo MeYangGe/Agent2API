@@ -583,7 +583,7 @@ pub fn shim_js() -> &'static str {
   }
 
   // ── HTTP 调用：信封解包与桌面 gateway::unwrap_envelope 对齐 ──
-  async function httpCall(method, path, body, retried) {
+  async function httpCall(method, path, body, retried, selectedKey) {
     // 到期前先把令牌换掉：这一步让「access 过期 → 401 → 续期」不再发生，
     // 也就没有那条每 2 小时一次的 401（见 `ensureFreshSession`）。
     // 只在首轮做：重试那一趟（retried=true）刚刚续过期，再判一次纯属多余。
@@ -603,6 +603,7 @@ pub fn shim_js() -> &'static str {
       var panelRefresh = storedPanelToken('refresh');
       if (panelRefresh) headers['x-panel-refresh'] = panelRefresh;
     }
+    if (selectedKey !== undefined) headers['x-api-key'] = selectedKey;
     var init = { method: method, headers: headers };
     var wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH'
       || !(body === null || body === undefined);
@@ -626,7 +627,7 @@ pub fn shim_js() -> &'static str {
       var errorType = probe && probe.error && probe.error.type;
       if (errorType === 'panel_login_required') {
         var refreshed = await tryRefresh();
-        if (refreshed) return httpCall(method, path, body, true);
+        if (refreshed) return httpCall(method, path, body, true, selectedKey);
         // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
         // 否则下次进来还带着死 token，永远是同一轮失败。
         clearPanelAuth();
@@ -634,10 +635,10 @@ pub fn shim_js() -> &'static str {
         // 页面即将整页跳转，返回一个挂起的承诺占位
         return new Promise(function () {});
       }
-      var key = await askForKey();
+      var key = selectedKey === undefined ? await askForKey() : null;
       if (key) {
         storeKey(key);
-        return httpCall(method, path, body, true);
+        return httpCall(method, path, body, true, selectedKey);
       }
     }
     var payload;
@@ -918,7 +919,8 @@ pub fn shim_js() -> &'static str {
   var shellCommands = {
     api_request: function (args) {
       var request = (args && args.request) || {};
-      return httpCall(request.method || 'GET', request.path || '/', request.body);
+      return httpCall(request.method || 'GET', request.path || '/', request.body, false,
+        request.apiKey === undefined ? undefined : String(request.apiKey));
     },
     check_update: function () {
       // 网页端没有「壳打包的版本号」这个概念：不带 current，服务端按自己的
@@ -1464,7 +1466,8 @@ pub fn shim_js() -> &'static str {
     // 模型测试：真打上游、会消耗额度；payload 原样透传（与桌面 bridge 对齐），
     // 各键都可选（account_id / prompt / system_prompt / reasoning / stream / test_id）。
     // 结论失败也返回 2xx —— 上游的错误在返回值的 status / error 里
-    testModel: function (payload) { return call('POST', '/api/models/test', payload || {}); },
+    testModel: function (payload, selectedKey) { return httpCall('POST', '/api/models/test', payload || {}, false, String(selectedKey || '')); },
+    getModelApiKeys: function () { return call('GET', '/api/model-access/keys'); },
 
     // ── 网关 API Key（多把）──
     getKeys: function () { return call('GET', '/api/keys'); },
@@ -1474,6 +1477,8 @@ pub fn shim_js() -> &'static str {
 
     // ── 多账号 ──
     getAccounts: function () { return call('GET', '/api/accounts'); },
+    getAccountSorting: function () { return call('GET', '/api/accounts/sorting'); },
+    saveAccountSorting: function (payload) { return call('PUT', '/api/accounts/sorting', payload || {}); },
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
     refreshAccountToken: function (id) { return call('POST', '/api/accounts/refresh', id ? { id: id } : {}); },
     removeAccount: function (id) { return call('DELETE', '/api/accounts/' + encodeURIComponent(id)); },
@@ -1683,7 +1688,7 @@ pub fn shim_js() -> &'static str {
     },
     // WorkBuddy 国际版日活保活的模型链（与 bridge.rs 的同名方法成对维护）
     getCheckinKeepalive: function () { return call('GET', '/api/checkin-keepalive'); },
-    saveCheckinKeepalive: function (models) { return call('POST', '/api/checkin-keepalive', { models: models }); },
+    saveCheckinKeepalive: function (models, apiKeyId) { return call('POST', '/api/checkin-keepalive', { models: models, apiKeyId: apiKeyId }); },
     // 猫猫旅行定时排程（国内版；与 bridge.rs 的同名方法成对维护）
     getTravelSchedule: function () { return call('GET', '/api/travel-schedule'); },
     saveTravelSchedule: function (patch) { return call('POST', '/api/travel-schedule', patch); },

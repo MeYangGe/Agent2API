@@ -121,10 +121,20 @@ impl UsageSniffer {
             self.done |= complete;
             return;
         }
-        if !self.data.windows(5).any(|window| window == b"usage") { return; }
+        if ![b"usage".as_slice(), b"error".as_slice()]
+            .iter().any(|field| self.data.windows(field.len()).any(|window| window == *field))
+        {
+            return;
+        }
         let Ok(chunk) = serde_json::from_slice::<Value>(&self.data) else { return };
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
             telemetry.report_usage(usage);
+        }
+        if let Some(error) = chunk.get("error").filter(|value| crate::server::core::protocol::is_truthy(value)) {
+            let message = error.get("message").and_then(Value::as_str)
+                .or_else(|| error.as_str()).filter(|text| !text.trim().is_empty())
+                .map(str::to_string).unwrap_or_else(|| "上游流式返回错误".to_string());
+            telemetry.note_error(&message);
         }
     }
 }

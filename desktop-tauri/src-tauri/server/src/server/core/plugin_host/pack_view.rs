@@ -27,6 +27,9 @@ pub struct PackSummary {
     pub description: Option<String>,
     /// 版本。
     pub version: String,
+    pub required_version: Option<String>,
+    pub update_required: bool,
+    pub compatibility_error: Option<String>,
     /// 是否启用。
     pub enabled: bool,
     /// 是否已签名（安装时验签通过才为 true —— 界面据此显示「已签名 / 未签名」）。
@@ -228,6 +231,8 @@ pub fn list_packs() -> Vec<PackSummary> {
         .iter()
         .map(|pack| {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
+            let compatibility_error = super::compatibility::version_error(&pack.id, &pack.version);
+            let update_required = compatibility_error.is_some();
             let manifest = read_manifest(&dir).ok();
             let name = manifest
                 .as_ref()
@@ -262,6 +267,9 @@ pub fn list_packs() -> Vec<PackSummary> {
                 name,
                 description,
                 version: pack.version.clone(),
+                required_version: super::compatibility::minimum_version(&pack.id).map(str::to_string),
+                update_required,
+                compatibility_error,
                 enabled: pack.enabled,
                 signed: pack.signed,
                 installed_at: pack.installed_at,
@@ -279,7 +287,7 @@ pub fn list_packs() -> Vec<PackSummary> {
                 protocol,
                 homepage,
                 icon: pack_icon(&dir, manifest.as_ref()),
-                ui: pack_ui_pages(&pack.id, manifest.as_ref()),
+                ui: if update_required { Vec::new() } else { pack_ui_pages(&pack.id, manifest.as_ref()) },
             }
         })
         .collect()
@@ -310,6 +318,9 @@ pub fn resolve_ui_file(pack_id: &str, rest: &str) -> Option<PathBuf> {
         .packs
         .iter()
         .find(|item| item.id == pack_id && item.enabled)?;
+    if super::compatibility::version_error(&pack.id, &pack.version).is_some() {
+        return None;
+    }
     let root = plugins_dir().join(&pack.id).join(&pack.version).join("ui");
     // ② 逐段归一化（与 `static_files::resolve_file` 同一套规则）
     let mut segments: Vec<&str> = Vec::new();

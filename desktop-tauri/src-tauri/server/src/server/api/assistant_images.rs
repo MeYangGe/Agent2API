@@ -1,4 +1,4 @@
-//! 图片工具走管理面鉴权；只向模型返回附件 ID，图片字节不进入工具文本或对话上下文。
+//! 图片生成与编辑必须携带网关 Key；只向模型返回附件 ID，图片字节不进入工具文本或对话上下文。
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -16,12 +16,12 @@ use crate::server::{logging, ServerState};
 
 use super::images::{self, ImageExecution};
 
-pub async fn generations(State(state): State<ServerState>, body: Bytes) -> Response {
-    respond(run(&state, &body, ImageOperation::Generate).await)
+pub async fn generations(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(run(&state, &headers, &body, ImageOperation::Generate).await)
 }
 
-pub async fn edits(State(state): State<ServerState>, body: Bytes) -> Response {
-    respond(run(&state, &body, ImageOperation::Edit).await)
+pub async fn edits(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(run(&state, &headers, &body, ImageOperation::Edit).await)
 }
 
 fn respond(result: Result<Value, GatewayError>) -> Response {
@@ -39,9 +39,11 @@ fn respond(result: Result<Value, GatewayError>) -> Response {
 
 async fn run(
     state: &ServerState,
+    headers: &HeaderMap,
     bytes: &[u8],
     operation: ImageOperation,
 ) -> Result<Value, GatewayError> {
+    let access = super::model_access::authenticate(headers, super::model_access::ASSISTANT_IMAGES)?;
     let config = config::assistant_config();
     if !config.tool_enabled(operation.tool()) {
         return Err(GatewayError::with_status(
@@ -102,8 +104,8 @@ async fn run(
         ImageExecution {
             operation,
             headers: HeaderMap::new(),
-            scope: None,
-            source: Default::default(),
+            scope: access.scope,
+            source: access.source,
             started_at: logging::now_ms(),
             is_assistant: true,
         },

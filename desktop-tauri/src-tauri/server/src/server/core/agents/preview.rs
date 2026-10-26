@@ -103,8 +103,8 @@ fn fingerprint(plan: &Plan) -> Result<String, String> {
 pub fn plan_view(plan: &Plan) -> Result<Value, String> {
     let mut files = Vec::new();
     for change in &plan.changes {
-        let before = redact(&files::text(change.before.as_deref())?, &change.path)?;
-        let after = redact(&files::text(change.after.as_deref())?, &change.path)?;
+        let before = if plan.profile.kind == "resource" { files::text(change.before.as_deref())? } else { redact(&files::text(change.before.as_deref())?, &change.path)? };
+        let after = if plan.profile.kind == "resource" { files::text(change.after.as_deref())? } else { redact(&files::text(change.after.as_deref())?, &change.path)? };
         let diff = line_diff(&before, &after);
         files.push(json!({
             "path": change.path.display().to_string(), "before": before, "text": after,

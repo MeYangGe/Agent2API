@@ -85,7 +85,8 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         "profile": effective,
         "providers": provider_rows,
         "accounts": accounts,
-        "queue": routing_api::queue_json(state, (!model_name.is_empty()).then(|| model_name.to_string())),
+        "sorting": account_snapshot.get("sorting"),
+        "queue": routing_api::queue_for_accounts(state, (!model_name.is_empty()).then(|| model_name.to_string()), &accounts),
         "settings": routing_api::routing_json(config::routing_settings()),
         "metrics": metrics,
         "gateway": { "port": state.port, "host": state.host.to_string() },
@@ -110,7 +111,7 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         Err(error) => return errors::management_error(400, error),
     };
     let Some(raw) = object.get("profile") else { return errors::management_error(400, "缺少 profile（恢复继承请传 null）") };
-    let profile = if raw.is_null() { None } else {
+    let mut profile = if raw.is_null() { None } else {
         let profile: config::RoutingProfile = match serde_json::from_value(raw.clone()) {
             Ok(profile) => profile,
             Err(error) => return errors::management_error(400, format!("路由配置格式错误: {error}")),
@@ -137,6 +138,32 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         }
         Some(profile)
     };
+    if model.is_empty() {
+        if let Some(order) = object.get("orderChange") {
+            let Some(kind) = order.get("kind").and_then(Value::as_str) else {
+                return errors::management_error(400, "顺序修改缺少 kind 字段");
+            };
+            let provider = match kind {
+                "provider" => None,
+                "account" => match order.get("provider").and_then(Value::as_str) {
+                    Some(provider) => Some(provider),
+                    None => return errors::management_error(400, "账号顺序修改缺少 provider 字段"),
+                },
+                _ => return errors::management_error(400, "顺序修改 kind 必须为 provider 或 account"),
+            };
+            let Some(profile) = &profile else { return errors::management_error(400, "修改顺序必须提供路由配置") };
+            let accounts = routing::accounts_of(&state.store().list_visible_accounts());
+            let ids = match crate::server::core::routing_order::global_queue(&accounts, profile, provider) {
+                Ok(ids) => ids,
+                Err(error) => return errors::management_error(400, error),
+            };
+            if let Err(error) = state.store().reorder_accounts(&ids) { return super::accounts::store_error(error); }
+            return ok_json(workspace_json(&state, None));
+        }
+        if let Some(profile) = &mut profile {
+            profile.account_order.clear();
+        }
+    }
     if let Err(error) = config::save_routing_profile(&model, profile) {
         return errors::management_error(500, error);
     }

@@ -1,30 +1,6 @@
-//! AI 助手的对话会话存储（`assistant_sessions` 表，schema v16）。
-//!
-//! ── 解决什么问题 ────────────────────────────────────────────
-//! 改造前助手是「一次性对话」：关掉页面（或点「新对话」）之后那串消息就没了，
-//! 没有任何地方能翻回上一次聊了什么。会话列表要的是**可翻阅、可命名、可删除**
-//! 的一列对话 —— 这张表就是那个落点。
-//!
-//! ── 存整条消息流而不是逐条消息一行 ──────────────────────────
-//! 读写单元天然是「一整个会话」（打开 = 取全部、发一句 = 存全部），逐条存只会
-//! 让每次保存变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
-//! 会话量级是几十条、每条几十到几百条消息，整份 JSON 进出没有性能问题。
-//!
-//! ── 为什么 id 由前端生成 ────────────────────────────────────
-//! 新建会话时前端立刻要用这个 id 挂消息。让后端自增/生成的话，「点新建 → 立刻
-//! 发第一句」之间会多一个必须等待的往返；而前端生成（`crypto.randomUUID()`）
-//! 让这两步在同一次渲染里完成，保存时按 id upsert 即可。
-//!
-//! ── 写失败不报错（与 `checkin_records` 同一取舍）────────────
-//! 保存发生在每轮回答之后，那时用户已经看到了内容 —— 落库失败不该让那次对话
-//! 报错（那会把人引到「是不是模型挂了」的方向）。失败打一行 **verbose** 日志，
-//! 界面上的表现是「这次会话没进历史」，下次保存会再试。
-//!
-//! ── 硬约束：持锁（连接锁）期间不打日志 ──────────────────────
-//! 与 `core::usage_records` / `core::checkin_records` 同一条：`Db::with*` 拿的是
-//! 全局唯一的连接锁，`logging::log` 要往同一个库写 `logs` 表 —— 闭包里打日志
-//! 会当场死锁。本模块的所有日志都在 `with` 返回之后打。
+//! AI 助手会话按整条消息流保存；图片复制和会话分叉在同一事务内完成。
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rusqlite::{params, OptionalExtension};
@@ -34,229 +10,153 @@ use crate::server::db::Db;
 use crate::server::logging;
 
 static DB: OnceLock<Option<Db>> = OnceLock::new();
-
-/// 标题长度上限（字符）。侧边栏一行放不下更长的；超出的部分在写入侧就裁掉，
-/// 不留一条读回来还得再截一次的脏数据。
 const MAX_TITLE_CHARS: usize = 120;
-/// 会话 id 的长度上限。前端给的是 UUID（36 字符），留足余量但不接受任意长串
-/// （那是拿管理接口当文件存储用）。
 const MAX_ID_CHARS: usize = 128;
-/// 单条会话消息流的**字符**上限。
-///
-/// 不是防用户，是防「一条会话聊了几个月、每次保存都把几 MB 的 JSON 写一遍」：
-/// 8 MB 已经远超一场正常长会话（每条消息按 2 KB 算 = 4000 条），到这个量级
-/// 更该做的是开新会话，而不是继续往同一条里堆。
 const MAX_MESSAGES_CHARS: usize = 8 * 1024 * 1024;
 
-pub fn install(db: Option<Db>) {
-    let _ = DB.set(db);
+pub fn install(db: Option<Db>) { let _ = DB.set(db); }
+fn database() -> Option<&'static Db> { DB.get().and_then(Option::as_ref) }
+fn truncate(text: &str, limit: usize) -> String { text.chars().take(limit).collect() }
+fn field<'a>(value: &'a Value, key: &str) -> &'a str { value.get(key).and_then(Value::as_str).unwrap_or("").trim() }
+
+fn summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id": row.get::<_, String>(0)?, "title": row.get::<_, String>(1)?,
+        "model": row.get::<_, Option<String>>(2)?, "reasoning": row.get::<_, Option<String>>(3)?,
+        "createdAt": row.get::<_, i64>(4)?, "updatedAt": row.get::<_, i64>(5)?,
+        "titleGenerated": row.get::<_, bool>(6)?,
+    }))
 }
 
-fn database() -> Option<&'static Db> {
-    DB.get().and_then(Option::as_ref)
-}
-
-fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    text.chars().take(limit).collect()
-}
-
-/// 一条会话的公开形态（侧边栏 / 打开会话都读它）。
-///
-/// `messages` 只在「打开某一条」时给全量；列表接口给的是**不带消息体**的摘要
-/// （见 [`list`] 的说明）—— 侧边栏只需要 id / 标题 / 时间，把几十条会话的
-/// 全部消息都拉一遍是纯浪费。
-fn row_to_summary(id: &str, title: &str, model: Option<String>, reasoning: Option<String>, created_at: i64, updated_at: i64) -> Value {
-    json!({
-        "id": id,
-        "title": title,
-        "model": model,
-        "reasoning": reasoning,
-        "createdAt": created_at,
-        "updatedAt": updated_at,
-    })
-}
-
-/// 全部会话的**摘要**（按 `updated_at` 倒序 —— 最近聊过的在最上面）。
-///
-/// 刻意不带 `messages`：侧边栏只用得到标题与时间。会话全量在几十条量级，
-/// 一次全取、前端自己排/筛都够用，不做分页（那会让「列表」这个动作多一层
-/// 状态，而收益为零）。
 pub fn list() -> Vec<Value> {
     let Some(db) = database() else { return Vec::new() };
-    // 闭包的返回类型是 `T`（不是 `Option<T>` / `Result<_, _>`），所以这里不能
-    // 用 `?` —— prepare / query_map 的失败都用显式 match 收敛成「空表」。
-    let rows = db.with(|conn| {
-        let Ok(mut statement) = conn.prepare(
-            "SELECT id, title, model, reasoning, created_at, updated_at
-             FROM assistant_sessions
-             ORDER BY updated_at DESC",
-        ) else {
-            return Vec::new();
-        };
-        let Ok(mapped) = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        }) else {
-            return Vec::new();
-        };
-        mapped.filter_map(Result::ok).collect()
-    });
-    let Some(rows) = rows else {
-        logging::verbose("[Assistant]", "⚠️  读取会话列表失败");
-        return Vec::new();
-    };
-    rows.into_iter()
-        .map(|(id, title, model, reasoning, created_at, updated_at)| {
-            row_to_summary(&id, &title, model, reasoning, created_at, updated_at)
-        })
-        .collect()
+    db.with(|conn| {
+        let mut statement = conn.prepare("SELECT id, title, model, reasoning, created_at, updated_at, title_generated FROM assistant_sessions ORDER BY updated_at DESC")?;
+        let rows = statement.query_map([], summary)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok::<_, rusqlite::Error>(rows)
+    }).and_then(Result::ok).unwrap_or_default()
 }
 
-/// 取一条会话（含 `messages` 全量）。不存在返回 `None`。
 pub fn get(id: &str) -> Option<Value> {
-    let id = id.trim();
-    if id.is_empty() {
-        return None;
-    }
     let db = database()?;
-    // `Db::with` 给 `Option<T>`（拿不到连接锁 = None），`optional()` 再包一层
-    // `Option`（行不存在），`query_row` 的 `Result` 第三层 —— 三层都要解开，
-    // 用 `?` 串起来读不出来「是哪一层空」，所以显式 match。
-    let queried = db.with(|conn| {
-        conn.query_row(
-            "SELECT id, title, messages, model, reasoning, created_at, updated_at
-             FROM assistant_sessions WHERE id = ?1",
-            params![id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )
-        .optional()
-    });
-    let Some(Ok(Some(row))) = queried else { return None };
-    let (id, title, messages, model, reasoning, created_at, updated_at) = row;    let parsed: Value = serde_json::from_str(&messages).unwrap_or_else(|_| Value::Array(Vec::new()));
-    let mut value = row_to_summary(&id, &title, model, reasoning, created_at, updated_at);
-    value["messages"] = parsed;
-    Some(value)
+    db.with(|conn| conn.query_row(
+        "SELECT id, title, model, reasoning, created_at, updated_at, title_generated, messages FROM assistant_sessions WHERE id = ?1",
+        params![id.trim()], |row| {
+            let mut value = summary(row)?;
+            value["messages"] = serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_else(|_| json!([]));
+            Ok(value)
+        },
+    ).optional().ok().flatten()).flatten()
 }
 
-/// 保存（新建或覆盖）一条会话，返回写入后的摘要。
-///
-/// ── 校验为什么这么写 ────────────────────────────────────────
-///   - `id` 必须有（见模块头「为什么 id 由前端生成」）；
-///   - `messages` 必须是数组：它是发给上游的 wire 形态，形状错了下游会用一次
-///     400 才告诉你；
-///   - 标题按字符截断而不是拒绝：标题是前端从第一条消息里截出来的，超长是
-///     正常的（用户第一句写了一大段），为此报错没有意义。
-///
-/// `createdAt` 只在**首次插入**时落定：覆盖已有会话时保留原来的创建时刻
-/// （否则「按创建时间」这类排序会随每次保存漂移），`updatedAt` 每次都刷新。
 pub fn save(payload: &Value) -> Result<Value, String> {
-    let id = payload
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if id.is_empty() {
-        return Err("缺少会话 id".to_string());
-    }
-    if id.chars().count() > MAX_ID_CHARS {
-        return Err("会话 id 过长".to_string());
-    }
+    let id = field(payload, "id");
+    if id.is_empty() || id.chars().count() > MAX_ID_CHARS { return Err("缺少有效的会话 id".into()); }
     let messages = payload.get("messages").cloned().unwrap_or_else(|| json!([]));
-    if !messages.is_array() {
-        return Err("messages 必须是数组".to_string());
-    }
-    let messages_text = serde_json::to_string(&messages)
-        .map_err(|error| format!("messages 序列化失败：{error}"))?;
-    if messages_text.chars().count() > MAX_MESSAGES_CHARS {
-        return Err("这条会话的消息量过大，请开一条新会话".to_string());
-    }
-    let title = truncate_chars(
-        payload.get("title").and_then(Value::as_str).map(str::trim).unwrap_or(""),
-        MAX_TITLE_CHARS,
-    );
-    let model = payload.get("model").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
-    let reasoning = payload.get("reasoning").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
+    if !messages.is_array() { return Err("messages 必须是数组".into()); }
+    let encoded = serde_json::to_string(&messages).map_err(|error| error.to_string())?;
+    if encoded.chars().count() > MAX_MESSAGES_CHARS { return Err("这条会话的消息量过大，请开一条新会话".into()); }
+    let title = truncate(field(payload, "title"), MAX_TITLE_CHARS);
+    let model = (!field(payload, "model").is_empty()).then(|| field(payload, "model"));
+    let reasoning = (!field(payload, "reasoning").is_empty()).then(|| field(payload, "reasoning"));
     let now = logging::now_ms();
-
-    let Some(db) = database() else {
-        return Err("会话存储不可用".to_string());
-    };
-    // 一条 UPSERT 同时覆盖「新建」与「保存」：`created_at` 用 `COALESCE` 保住
-    // 首次插入的值（冲突分支里 `excluded.created_at` 是本次算的 now，不能直接用）。
-    let written = db.with(|conn| {
-        conn.execute(
-            "INSERT INTO assistant_sessions (id, title, messages, model, reasoning, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-               title = excluded.title,
-               messages = excluded.messages,
-               model = excluded.model,
-               reasoning = excluded.reasoning,
-               updated_at = excluded.updated_at",
-            params![id, title, messages_text, model, reasoning, now],
-        )
-        .is_ok()
-    });
-    if written != Some(true) {
-        return Err("会话写入失败".to_string());
-    }
-    // 回读 `created_at`：UPSERT 的冲突分支不覆盖它，所以已有会话读到的是原来的
-    // 创建时刻、新会话读到的是刚写的 now。三层 `Option`（连接锁 / 行 / 列）里
-    // 任何一层缺失都按 now 兜底 —— 这里只是给响应拼一个展示字段，不值得报错。
-    let created_at = match db.with(|conn| {
-        conn.query_row(
-            "SELECT created_at FROM assistant_sessions WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-    }) {
-        Some(Ok(Some(value))) => value,
-        _ => now,
-    };
-    Ok(row_to_summary(id, &title, model.map(str::to_string), reasoning.map(str::to_string), created_at, now))
+    let db = database().ok_or("会话存储不可用")?;
+    let written = db.with(|conn| conn.execute(
+        "INSERT INTO assistant_sessions (id, title, messages, model, reasoning, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+           title = CASE WHEN assistant_sessions.title_generated = 1 THEN assistant_sessions.title ELSE excluded.title END,
+           messages = excluded.messages, model = excluded.model, reasoning = excluded.reasoning, updated_at = excluded.updated_at",
+        params![id, title, encoded, model, reasoning, now],
+    ).is_ok());
+    if written != Some(true) { return Err("会话写入失败".into()); }
+    let mut value = get(id).ok_or("会话写入后无法读取")?;
+    value.as_object_mut().expect("session object").remove("messages");
+    Ok(value)
 }
 
-/// 删除一条会话。返回是否真的删掉了（不存在 = `false`，调用方据此给 404）。
+pub fn set_title(id: &str, expected_messages: &Value, title: &str) -> Result<Value, String> {
+    let db = database().ok_or("会话存储不可用")?;
+    let expected = serde_json::to_string(expected_messages).map_err(|error| error.to_string())?;
+    db.with(|conn| conn.execute(
+        "UPDATE assistant_sessions SET title = ?2, title_generated = 1 WHERE id = ?1 AND title_generated = 0 AND messages = ?3",
+        params![id, truncate(title, MAX_TITLE_CHARS), expected],
+    )).ok_or("会话数据库不可用")?.map_err(|_| "保存标题失败")?;
+    let mut value = get(id).ok_or("会话不存在")?;
+    value.as_object_mut().expect("session object").remove("messages");
+    Ok(value)
+}
+
+pub fn fork(id: &str, new_id: &str, message_id: &str) -> Result<Value, String> {
+    if new_id.is_empty() || new_id.chars().count() > MAX_ID_CHARS || id == new_id { return Err("分叉会话 id 无效".into()); }
+    let db = database().ok_or("会话存储不可用")?;
+    db.with_mut(|conn| -> Result<(), String> {
+        let tx = conn.transaction().map_err(|_| "无法开始会话复制")?;
+        let (title, raw, model, reasoning): (String, String, Option<String>, Option<String>) = tx.query_row(
+            "SELECT title, messages, model, reasoning FROM assistant_sessions WHERE id = ?1", params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).map_err(|_| "原会话不存在")?;
+        let mut messages: Value = serde_json::from_str(&raw).map_err(|_| "原会话消息无效")?;
+        let items = messages.as_array_mut().ok_or("原会话消息无效")?;
+        if !message_id.is_empty() {
+            let index = items.iter().position(|message| field(message, "id") == message_id).ok_or("分叉消息不存在")?;
+            if field(&items[index], "role") != "assistant" { return Err("只能从模型消息分叉".into()); }
+            let calls = items[index].get("toolCalls").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut end = index + 1;
+            while end < items.len() && field(&items[end], "role") == "tool"
+                && calls.iter().any(|call| field(call, "id") == field(&items[end], "toolCallId")) { end += 1; }
+            items.truncate(end);
+        }
+        let mut replacements = HashMap::new();
+        collect_image_ids(&messages, &mut replacements);
+        let used: i64 = tx.query_row("SELECT COALESCE(SUM(length(bytes)), 0) FROM assistant_images", [], |row| row.get(0)).map_err(|_| "无法读取图片用量")?;
+        let mut bytes_added = 0i64;
+        let now = logging::now_ms();
+        tx.execute("INSERT INTO assistant_sessions (id, title, messages, model, reasoning, created_at, updated_at, title_generated) VALUES (?1, ?2, '[]', ?3, ?4, ?5, ?5, 1)",
+            params![new_id, truncate(&format!("{title} · 分叉"), MAX_TITLE_CHARS), model, reasoning, now]).map_err(|_| "新会话 id 已存在或无法创建")?;
+        for (old, new) in &mut replacements {
+            let (mime, bytes): (String, Vec<u8>) = tx.query_row("SELECT mime, bytes FROM assistant_images WHERE id = ?1 AND session_id = ?2", params![old, id],
+                |row| Ok((row.get(0)?, row.get(1)?))).map_err(|_| "原会话的图片已不存在，无法完整复制")?;
+            bytes_added = bytes_added.saturating_add(bytes.len() as i64);
+            if used.saturating_add(bytes_added) > 512 * 1024 * 1024 { return Err("助手图片存储已满，无法复制会话".into()); }
+            let mut random = [0u8; 32];
+            getrandom::getrandom(&mut random).map_err(|_| "无法生成图片 id")?;
+            *new = random.iter().map(|byte| format!("{byte:02x}")).collect();
+            tx.execute("INSERT INTO assistant_images (id, session_id, mime, bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![new.as_str(), new_id, mime, bytes, now]).map_err(|_| "图片复制失败")?;
+        }
+        replace_image_ids(&mut messages, &replacements);
+        tx.execute("UPDATE assistant_sessions SET messages = ?2 WHERE id = ?1", params![new_id, messages.to_string()]).map_err(|_| "保存复制消息失败")?;
+        tx.commit().map_err(|_| "会话复制失败".to_string())
+    }).ok_or("会话数据库不可用")??;
+    get(new_id).ok_or_else(|| "会话复制后无法读取".into())
+}
+
+fn collect_image_ids(value: &Value, ids: &mut HashMap<String, String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(id) = object.get("id").and_then(Value::as_str).filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                if object.get("mime").and_then(Value::as_str).is_some_and(|mime| mime.starts_with("image/")) { ids.insert(id.to_string(), String::new()); }
+            }
+            for child in object.values() { collect_image_ids(child, ids); }
+        }
+        Value::Array(items) => for child in items { collect_image_ids(child, ids); },
+        _ => {}
+    }
+}
+
+fn replace_image_ids(value: &mut Value, ids: &HashMap<String, String>) {
+    match value {
+        Value::String(text) => for (old, new) in ids { *text = text.replace(old, new); },
+        Value::Object(object) => for child in object.values_mut() { replace_image_ids(child, ids); },
+        Value::Array(items) => for child in items { replace_image_ids(child, ids); },
+        _ => {}
+    }
+}
+
 pub fn remove(id: &str) -> bool {
-    let id = id.trim();
-    if id.is_empty() {
-        return false;
-    }
-    let Some(db) = database() else { return false };
-    db.with(|conn| {
-        conn.execute("DELETE FROM assistant_sessions WHERE id = ?1", params![id])
-            .map(|count| count > 0)
-            .unwrap_or(false)
-    })
-    .unwrap_or(false)
+    database().and_then(|db| db.with(|conn| conn.execute("DELETE FROM assistant_sessions WHERE id = ?1", params![id.trim()]).map(|count| count > 0).unwrap_or(false))).unwrap_or(false)
 }
 
-/// 清空全部会话，返回删掉的行数。
 pub fn clear() -> usize {
-    let Some(db) = database() else { return 0 };
-    db.with(|conn| {
-        conn.execute("DELETE FROM assistant_sessions", [])
-            .unwrap_or(0)
-    })
-    .unwrap_or(0)
+    database().and_then(|db| db.with(|conn| conn.execute("DELETE FROM assistant_sessions", []).unwrap_or(0))).unwrap_or(0)
 }

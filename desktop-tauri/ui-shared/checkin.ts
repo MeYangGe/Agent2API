@@ -136,6 +136,8 @@ export type AutoState = {
 export type KeepaliveState = {
   models: string[]
   defaultModels: string[]
+  apiKeyId?: string | null
+  authError?: string | null
 }
 
 export type TravelState = {

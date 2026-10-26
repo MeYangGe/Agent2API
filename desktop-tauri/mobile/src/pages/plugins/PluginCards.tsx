@@ -1,6 +1,7 @@
 import { Button, Progress, Switch , Card, Label, Collapsible, CollapsibleTrigger, CollapsibleContent } from '@ui'
 import { Badge } from '../../components/ui'
 import type { PackSummary, PluginOperation, PluginUpdate, StorePlugin } from '../../api/plugins'
+import { pluginErrorMessage } from '../../api/plugins'
 import { t } from '../../i18n'
 
 function PluginProgress({ operation }: { operation?: PluginOperation }) {
@@ -9,10 +10,10 @@ function PluginProgress({ operation }: { operation?: PluginOperation }) {
     : operation.stage === 'verifying' ? t('网关正在校验…') : t('网关正在安装…')
   return <>
     {operation.active ? <div className='my-3' aria-live='polite'>
-      <p className='m-ck-note'>{stage}{operation.stage === 'downloading' && operation.percent != null ? ` ${Math.round(operation.percent)}%` : ''}</p>
+      <p className='m-ck-note'>{operation.required ? `${t('正在补齐插件…')} · ` : ''}{stage}{operation.stage === 'downloading' && operation.percent != null ? ` ${Math.round(operation.percent)}%` : ''}</p>
       <Progress value={operation.stage === 'downloading' ? operation.percent : null} aria-label={stage} />
     </div> : null}
-    {operation.error ? <p className='m-ck-error'>{operation.error}</p> : null}
+    {operation.error ? <p className='m-ck-error'>{pluginErrorMessage(operation.error)}</p> : null}
     {operation.hostError ? <p className='m-ck-error'>{operation.hostError}</p> : null}
   </>
 }
@@ -39,7 +40,7 @@ export function StorePluginCard({ item, target, busy, operation, onInstall }: {
     <Head name={item.name || item.id} version={item.version} icon={item.icon} />
     <p className='m-ck-note'>{t(item.description)}</p>
     {item.official ? <Badge tone='brand'>{t('官方')}</Badge> : null}
-    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{item.reason}</p> : null}
+    {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(item.reason)}</p> : null}
     <PluginProgress operation={operation} />
     {!operation?.active ? <div className='m-ck-actions'>
       <Button size='sm' disabled={busy || !asset || !item.version || item.error} onClick={onInstall}>{t('在网关下载并安装')}</Button>
@@ -59,18 +60,30 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
   onUpdate: () => void
   onRemove: () => void
 }) {
+  const required = pack.updateRequired === true
   const locked = busy || operation?.active === true
   return <Card render={<article />} className='m-card m-card-pad'>
     <Head name={pack.name || pack.id} version={pack.version} icon={pack.icon} />
     <div className='m-ck-actions'>
       <Badge tone={pack.enabled ? 'ok' : 'mute'}>{pack.enabled ? t('已启用') : t('已停用')}</Badge>
       <Badge tone={pack.signed ? 'ok' : 'warn'}>{pack.signed ? t('已签名') : t('未签名')}</Badge>
+      {required ? <Badge tone='warn'>{t('需要补齐插件')}</Badge> : null}
       <Badge tone={pack.providers?.some(provider => provider.loaded) ? 'ok' : 'warn'}>{t('已加载 {n} 家', { n: pack.providers?.filter(provider => provider.loaded).length || 0 })}</Badge>
     </div>
     {pack.description ? <p className='m-ck-note'>{t(pack.description)}</p> : null}
+    {required ? <div className='mt-3 rounded-md border border-destructive/30 px-3 py-2' aria-live='polite'>
+      <p className='m-ck-error'>{t('当前网关要求插件版本不低于 v{version}，补齐前暂不加载。', { version: pack.requiredVersion || '' })}</p>
+      <p className='m-ck-note'>{pack.signed
+        ? t('正在自动补齐官方插件，不受日常更新开关和通道限制。')
+        : t('未签名包不会自动覆盖；点击「补齐插件」将安装官方签名包。')}</p>
+      {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
+      {update?.retryAt && update.retryAt > Date.now() ? <p className='m-ck-note'>
+        {t('下次自动重试：{time}', { time: new Date(update.retryAt).toLocaleString() })}
+      </p> : null}
+    </div> : null}
     {!pack.entryPresent ? <p className='m-ck-error'>{t('插件文件缺失，请重新安装插件包')}</p> : null}
     {pack.host?.lastError ? <p className='m-ck-error'>{pack.host.lastError}</p> : null}
-    {update?.reason ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{update.reason}</p> : null}
+    {update?.reason && !required ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
     <PluginProgress operation={operation} />
     <div className='m-ck-actions'>
       <Label className='m-ck-toolbar m-ck-note'>
@@ -78,7 +91,9 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
           onCheckedChange={onEnabled} />
       </Label>
       <Button size='sm' variant='outline' disabled={locked} onClick={onRemove}>{t('卸载')}</Button>
-      {update?.available ? <Button size='sm' disabled={locked || update.error || !update.asset || update.asset.target !== target} onClick={onUpdate}>
+      {required ? <Button size='sm' disabled={locked || update?.repairing === true} onClick={onUpdate}>
+        {update?.repairing ? t('正在补齐插件…') : t('补齐插件')}
+      </Button> : update?.available ? <Button size='sm' disabled={locked || update.error || !update.asset || update.asset.target !== target} onClick={onUpdate}>
         {t('更新到 v{version}', { version: update.latest || '' })}
       </Button> : null}
     </div>

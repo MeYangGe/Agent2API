@@ -6,6 +6,9 @@ import { store } from '../../state/store'
 import { formatStamp } from '../../lib/format'
 import type { CheckinAction } from '../CheckinPage'
 import { t } from '../../i18n'
+import { apiCall } from '../../api/client'
+import { ModelApiKeyField } from '../../../../ui-shared/model-api-key-field'
+import { useModelApiKeys } from '../../../../ui-shared/use-model-api-keys'
 
 export function CheckinRegionSettings({ center, busy, action }: {
   center: CheckinCenter
@@ -23,6 +26,7 @@ export function CheckinRegionSettings({ center, busy, action }: {
 
 function KeepalivePanel({ center, busy, action }: { center: CheckinCenter; busy: string; action: CheckinAction }) {
   const [draft, setDraft] = useState<string | null>(null)
+  const keyState = useModelApiKeys(() => apiCall('/api/model-access/keys'))
   const text = draft ?? center.keepalive.models.join('\n')
   const save = async () => {
     const models = [...new Set(text.split(/[\n,，、]+/).map(item => item.trim()).filter(Boolean))]
@@ -34,6 +38,10 @@ function KeepalivePanel({ center, busy, action }: { center: CheckinCenter; busy:
     <div className='m-section'>
       <SectionHead title={t('保活模型链')} />
       <Card className='m-card m-card-pad'>
+        <ModelApiKeyField {...keyState} value={center.keepalive.apiKeyId ?? null} disabled={Boolean(busy)}
+          onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} id='keepalive-api-key'
+          onChange={apiKeyId => { void action('keepalive', () => saveKeepalive(center.keepalive.models, apiKeyId), t('保活 API Key 已保存')) }} />
+        {center.keepalive.authError ? <p role='status' className='m-ck-error'>{center.keepalive.authError}</p> : null}
         <p className='m-ck-note'>{t('按顺序尝试免费模型，一行一个；清空并保存恢复默认链。')}</p>
         <Textarea className='text-base' rows={4} value={text} disabled={Boolean(busy)}
           aria-label={t('保活模型链')} onChange={event => setDraft(event.currentTarget.value)} />

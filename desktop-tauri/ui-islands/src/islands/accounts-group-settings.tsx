@@ -16,8 +16,7 @@
  * 其余家那一行置灰成「不可用」而**不是隐藏** —— 藏起来会让人以为界面上少了
  * 一块，而置灰还能说明「这家确实没这个概念」。
  *
- * 改动即时生效（不设「保存」）：排序是纯展示偏好，改错了当场就能看出来；
- * 一个「保存」按钮只会让用户以为还有别的地方要一起提交。
+ * 消耗规则由网关保存，账号页和全局路由共用；改动影响下一次选路。
  */
 
 import * as React from 'react'
@@ -93,11 +92,12 @@ export function groupSortSummary(rules: GroupSortRule[]): string {
  *   · `unsupported` —— 这一家的数据里根本没有到期字段。勾选框禁用、方向位换成
  *                      「不可用」，整行不压淡（压淡是「这次没勾」的语义）。
  */
-function RuleRow({ rule, priority, isLast, state, onChange }: {
+function RuleRow({ rule, priority, isLast, state, busy, onChange }: {
   rule: GroupSortRule
   priority: number
   isLast: boolean
   state: 'ready' | 'no-data' | 'unsupported'
+  busy: boolean
   onChange: (patch: Partial<GroupSortRule>) => void
 }) {
   const meta = ruleMeta(rule.key)
@@ -111,7 +111,7 @@ function RuleRow({ rule, priority, isLast, state, onChange }: {
       off && 'opacity-[.58]',
     )}>
       <span className='text-center text-[10.5px] font-bold text-subtle tabular-nums'>{priority}</span>
-      <Checkbox checked={rule.on && !blocked} disabled={blocked}
+      <Checkbox checked={rule.on && !blocked} disabled={blocked || busy}
         aria-label={meta.name}
         onCheckedChange={next => onChange({ on: next === true })} />
       <span className='flex min-w-0 flex-col gap-px'>
@@ -124,11 +124,15 @@ function RuleRow({ rule, priority, isLast, state, onChange }: {
         )} title={blocked ? t('这一家查不到积分到期时间') : undefined}>
           {blocked
             ? t('这一家查不到积分到期时间')
-            : state === 'no-data' ? t('暂无数据：先查询一次余额，之后会自动按到期排序') : meta.hint}
+            : state === 'no-data'
+              ? rule.on
+                ? t('暂无数据：先查询一次余额，之后会自动按到期排序')
+                : t('暂无数据：先查询一次余额，可按需启用到期排序')
+              : meta.hint}
         </span>
       </span>
       {!blocked ? (
-        <Select value={rule.dir} disabled={!rule.on}
+        <Select value={rule.dir} disabled={!rule.on || busy}
           onValueChange={value => onChange({ dir: value } as Partial<GroupSortRule>)}>
           <SelectTrigger className='h-[26px] w-full text-[11px]' aria-label={t('{name}的方向', { name: meta.name })}>
             <SelectValue>{meta.options.find(item => item.value === rule.dir)?.label || ''}</SelectValue>
@@ -145,7 +149,7 @@ function RuleRow({ rule, priority, isLast, state, onChange }: {
         </span>
       )}
       <span className='flex flex-col gap-px'>
-        <Button size='default' variant='ghost' type='button' disabled={priority <= 1}
+        <Button size='default' variant='ghost' type='button' disabled={priority <= 1 || busy}
           className='h-3 w-4 rounded-[3px] text-subtle hover:bg-nav-hover hover:text-foreground disabled:cursor-default disabled:opacity-30'
           title={t('提高优先级')} aria-label={t('提高优先级')}
           onClick={() => onChange({ __move: 'up' } as unknown as Partial<GroupSortRule>)}>
@@ -153,7 +157,7 @@ function RuleRow({ rule, priority, isLast, state, onChange }: {
             <path fill='none' stroke='currentColor' strokeWidth='2.4' strokeLinecap='round' strokeLinejoin='round' d='m6 14 6-6 6 6' />
           </svg>
         </Button>
-        <Button size='default' variant='ghost' type='button' disabled={isLast}
+        <Button size='default' variant='ghost' type='button' disabled={isLast || busy}
           className='h-3 w-4 rounded-[3px] text-subtle hover:bg-nav-hover hover:text-foreground disabled:cursor-default disabled:opacity-30'
           title={t('降低优先级')} aria-label={t('降低优先级')}
           onClick={() => onChange({ __move: 'down' } as unknown as Partial<GroupSortRule>)}>
@@ -205,13 +209,16 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
   const creditHasData = React.useMemo(
     () => allAccounts()
       .filter(account => providerOf(account) === provider)
-      .some(account => creditExpiryOf(usageEntryOf(account)) !== null),
+      .some(account => getStore().sorting
+        ? getStore().sorting?.creditExpiresAt[account.id] != null
+        : creditExpiryOf(usageEntryOf(account)) !== null),
     [provider, version],
   )
   const creditState: 'ready' | 'no-data' | 'unsupported' =
     !creditSupported ? 'unsupported' : creditHasData ? 'ready' : 'no-data'
   const summary = groupSortSummary(rules)
   const customized = hasCustomGroupSort(provider)
+  const busy = getStore().sortBusy
 
   /** 改一条规则：勾选 / 方向直接落库；上移下移改的是数组里的位置 */
   const changeRule = (key: GroupSortRule['key'], patch: Partial<GroupSortRule>) => {
@@ -229,11 +236,11 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
     } else {
       next[index] = { ...next[index], ...patch } as GroupSortRule
     }
-    setGroupSortRules(provider, next)
+    void setGroupSortRules(provider, next)
   }
 
   return (
-    <Dialog open onOpenChange={next => { if (!next) onClose() }}>
+    <Dialog open onOpenChange={next => { if (!next && !busy) onClose() }}>
       <DialogContent className='w-[min(560px,calc(100vw-48px))]' showCloseButton>
         <DialogHeader>
           <span className='inline-flex size-[26px] flex-none items-center justify-center'>
@@ -247,7 +254,7 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
         </DialogHeader>
 
         <DialogBody>
-          <GroupSettingSection title={t('排序')} hint={t('按优先级从上到下比较，勾选的项才参与')}>
+          <GroupSettingSection title={t('消耗顺序')} hint={t('按优先级从上到下比较，勾选的项才参与')}>
             {rules.map((rule, index) => (
               <RuleRow
                 key={rule.key}
@@ -255,6 +262,7 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
                 priority={index + 1}
                 isLast={index === rules.length - 1}
                 state={rule.key === 'credit' ? creditState : 'ready'}
+                busy={busy}
                 onChange={patch => changeRule(rule.key, patch)}
               />
             ))}
@@ -279,13 +287,14 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
                 rules: summary || t('仅按手动顺序'),
               })}
             </p>
-            {/* 规则默认全关时，把「怎么开始用」说清楚 —— 否则用户看到两个空勾选框
-                会以为功能没生效，而实际上这正是默认状态 */}
-            {!summary ? (
-              <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
-                {t('默认不排序：组内顺序保持你拖出来的样子。需要自动排序时，勾选上面的规则即可。')}
-              </p>
-            ) : null}
+            <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
+              {t('账号页与全局路由共用此消耗顺序，网关按最新余额数据选路，不需要保持页面打开。模型独立顺序会覆盖全局。')}
+            </p>
+            <p className='m-0 mt-1.5 px-2.5 text-[10.5px] leading-relaxed text-subtle'>
+              {creditSupported
+                ? t('本提供商默认启用最快到期优先，账号添加时间默认关闭；关闭全部规则可恢复手动顺序。')
+                : t('本提供商不支持积分到期排序，默认保持手动顺序；可按需启用账号添加时间排序。')}
+            </p>
           </GroupSettingSection>
 
           {/* 后续设置的位置：先把「这里还会有东西」说清楚，加小节时直接替换这一块 */}
@@ -303,13 +312,15 @@ export function GroupSettingsDialog({ provider, onClose }: { provider: string; o
         </DialogBody>
 
         <DialogFooter>
-          <Button variant='ghost' size='sm' disabled={!customized}
-            title={customized ? t('恢复到「积分到期 → 添加时间」这套默认规则') : t('当前已经是默认规则')}
-            onClick={() => setGroupSortRules(provider, null)}>
+          <Button variant='ghost' size='sm' disabled={!customized || busy}
+            title={customized
+              ? creditSupported ? t('恢复默认：最快到期优先，账号添加时间关闭') : t('恢复默认：仅按手动顺序')
+              : t('当前已经是默认规则')}
+            onClick={() => void setGroupSortRules(provider, null)}>
             {t('恢复默认')}
           </Button>
-          <span className='mr-auto text-[10.5px] text-subtle'>{t('改动即时生效')}</span>
-          <Button variant='default' onClick={onClose}>{t('完成')}</Button>
+          <span className='mr-auto text-[10.5px] text-subtle'>{busy ? t('保存中…') : t('改动即时生效')}</span>
+          <Button variant='default' disabled={busy} onClick={onClose}>{t('完成')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

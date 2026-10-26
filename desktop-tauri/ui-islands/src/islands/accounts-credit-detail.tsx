@@ -28,6 +28,8 @@
  *   unit          与主读数不同单位时才在（Trae 的套餐包 vs 积分包）
  *   daily         每日重置的包（到期字段对它是「今天 24 点」的意思）
  *   grantReason   WorkBuddy 的发放原因（官方活动 / 拉新奖励…），可无
+ *   snapshot      钱包余额 / 计数器读数，不参与积分包的耗尽 / 到期分组
+ *   balance       snapshot 的钱包余额（调用计数用 used），数字缺失时为 null
  * ```
  * 这里只读不猜：谁缺键谁就不显示那一段。`null` 与 `0` 的区别在这一层就得守住 ——
  * `Number(null) === 0`，把"没读到"当 0 会画出「剩 0 / 共 0」这种看起来像读到了的
@@ -50,6 +52,7 @@ import * as React from 'react'
 import { Meter, Popover, PopoverContent, PopoverTrigger, Button } from '@ui'
 import { t } from '../i18n'
 import { formatTime, numberText, type UsageEntry } from './accounts-shared'
+import { creditPacksOf, snapshotReadingOf, usageUnitLabel } from '../../../ui-shared/usage-readings'
 
 /** 明细里的一行（`creditRowsOf` 的产物；渲染输入与 `usageDetailOf` 的行同形） */
 export type CreditRow = {
@@ -75,6 +78,8 @@ export type CreditRow = {
    * "还能不能花"可言，一条 `-0.96` 的消耗也不是"用完了的积分包"。
    */
   spent: boolean
+  /** 钱包余额 / 计数器快照，不表示一份会被耗尽或过期的积分包。 */
+  snapshot?: boolean
   /**
    * 这一行是**流水一笔**（`record: true`）而不是积分包：有它时右侧读数是带符号
    * 的金额（`+1000` / `-0.96`），没有「剩 / 共」那套措辞、也不画比例条。
@@ -117,9 +122,7 @@ function shortTime(value: number): string {
  * 的回落同一取向）。
  */
 function unitLabel(unit: string): string {
-  if (unit === '积分') return t('积分')
-  if (unit === '额度') return t('额度')
-  return unit
+  return usageUnitLabel(unit, t)
 }
 
 /**
@@ -130,11 +133,24 @@ function unitLabel(unit: string): string {
  * 的口径分叉。
  */
 export function creditRowsOf(entry: UsageEntry): CreditRow[] {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
-  const data = entry as Record<string, unknown>
-  const packs = Array.isArray(data.credits) ? data.credits as Array<Record<string, unknown>> : []
+  const packs = creditPacksOf(entry)
   const now = Date.now()
   return packs.map(pack => {
+    const snapshot = snapshotReadingOf(pack, t, numberText)
+    if (snapshot) {
+      const window = snapshot.daily ? t('每日重置') : null
+      return {
+        name: snapshot.name,
+        view: snapshot.view,
+        tone: snapshot.tone,
+        percent: null,
+        window,
+        title: [snapshot.name, snapshot.view, window].filter(Boolean).join(' · '),
+        spent: false,
+        snapshot: true,
+        amount: null,
+      }
+    }
     const name = String(pack?.name || '').trim() || t('积分包')
 
     // ── 流水一笔：另一套读法（见 CreditRow.amount）──────────────
@@ -314,6 +330,7 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
   const [spentOpen, setSpentOpen] = React.useState(false)
   const liveRows = rows.filter(row => !row.spent)
   const spentRows = rows.filter(row => row.spent)
+  const detailLabel = rows.length > 0 && rows.every(row => row.snapshot) ? t('余额详情') : t('积分明细')
   const className = variant === 'pool' ? `usage-toggle usage-pool-line ${kind}` : `usage-toggle ${kind}`
 
   /**
@@ -366,7 +383,7 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         render={<Button size='default' variant='ghost' type='button' className={className} title={title}
-          aria-label={t('积分明细')} />}
+          aria-label={detailLabel} />}
       >
         {variant === 'pool' ? children : <span className='val'>{children}</span>}
         <span className='caret' aria-hidden>▾</span>
@@ -378,7 +395,7 @@ export function CreditDetailButton({ rows, subscriptionLine, variant, kind, titl
 
         <div className='usage-pop-credit' ref={attachBox} tabIndex={-1}>
           {subscriptionLine ? <div className='usage-pop-sub'>{subscriptionLine}</div> : null}
-          <div className='usage-pop-group'>{t('积分明细')}</div>
+          <div className='usage-pop-group'>{detailLabel}</div>
           {liveRows.map((row, index) => <CreditRowView key={`${row.name}-${index}`} row={row} />)}
           {spentRows.length > 0 ? (
             <div className='usage-pop-spent'>

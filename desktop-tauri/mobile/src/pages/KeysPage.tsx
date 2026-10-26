@@ -42,7 +42,6 @@ export function KeysPage() {
   const pull = usePullToRefresh({ onRefresh: load })
 
   const keys = data?.keys || []
-  const enabled = keys.filter(item => item.enabled).length
 
   const toggle = async (key: GatewayKey, next: boolean) => {
     if (!key.id) return
@@ -96,7 +95,7 @@ export function KeysPage() {
             <span className='m-mono' style={{ fontSize: 11.5, color: 'var(--m-primary)' }}>
               Authorization: Bearer &lt;Key&gt;
             </span>
-            {data?.authRequired ? t('；当前必须带 Key。') : t('；一把启用的 Key 都没有时不鉴权。')}
+            {t('；当前必须带 Key。')}
           </div>
         </Card>
       </div>

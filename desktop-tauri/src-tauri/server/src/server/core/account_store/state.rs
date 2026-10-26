@@ -59,9 +59,24 @@ fn as_optional_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn normalize_plugin_value(value: Value) -> Value {
+    if let Value::String(text) = &value {
+        if let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(text) {
+            return Value::Object(fields);
+        }
+    }
+    value
+}
+
 impl StoredAccount {
     /// 用一份字段表构造（调用方保证 id 已就位）
-    pub fn from_map(fields: Map<String, Value>) -> Self {
+    pub fn from_map(mut fields: Map<String, Value>) -> Self {
+        // 存量插件字段可能多序列化了一层；非法值保留给凭据读取端明确报错。
+        for key in ["pluginSecret", "pluginPublic"] {
+            if let Some(value) = fields.remove(key) {
+                fields.insert(key.to_string(), normalize_plugin_value(value));
+            }
+        }
         Self { fields }
     }
 
@@ -72,7 +87,7 @@ impl StoredAccount {
             return None;
         };
         match fields.get("id") {
-            Some(Value::String(id)) if !id.is_empty() => Some(Self { fields }),
+            Some(Value::String(id)) if !id.is_empty() => Some(Self::from_map(fields)),
             _ => None,
         }
     }
@@ -554,6 +569,11 @@ impl StoredAccount {
     // ── 通用字段读写（导入合并、限额标记等需要直接改字段）──
 
     pub fn set(&mut self, key: &str, value: Value) {
+        let value = if matches!(key, "pluginSecret" | "pluginPublic") {
+            normalize_plugin_value(value)
+        } else {
+            value
+        };
         self.fields.insert(key.to_string(), value);
     }
 

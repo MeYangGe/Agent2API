@@ -157,7 +157,8 @@ export function AccountSheet({
       : usageView.kind === 'warn'
         ? 'var(--m-warn)'
         : 'var(--m-text)'
-  const isPrimary = store.get().session?.accounts?.currentAccountId === account?.id
+  const isPrimary = (store.get().session?.routedAccountId || store.get().session?.accounts?.currentAccountId) === account?.id
+  const sortActive = (store.get().session?.accounts?.sorting?.rules[String(account?.provider || '')] || []).some(rule => rule.on)
   const canQueryUsage = Boolean(account && supportsUsage(account))
 
   return (
@@ -300,7 +301,8 @@ export function AccountSheet({
               <Button size='touch' variant='outline'
                 type='button'
                 className='m-btn m-ghost w-full'
-                disabled={isPrimary || Boolean(busy)}
+                disabled={isPrimary || Boolean(busy) || sortActive}
+                title={sortActive ? t('自动消耗排序已启用，请先关闭规则再手动调整') : undefined}
                 onClick={() => void promote()}
                 style={{ flexDirection: 'column', gap: 2, height: 'auto', padding: '10px 16px' }}
               >

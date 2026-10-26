@@ -61,6 +61,7 @@
 //! 约定：core 里的模块只做纯逻辑 + 文件读写 + 上游 HTTP，不认识 axum；
 //! api/ 里的 handler 负责把 HTTP 输入转成 core 调用、再把结果转成响应。
 
+pub mod account_order;
 pub mod account_store;
 // 本机 AI 客户端的接管注册表（「Agent」页）：客户端定义 + 配置读写
 pub mod agents;
@@ -112,6 +113,7 @@ pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;
+pub mod routing_order;
 pub mod routing_scope;
 pub mod sanitize;
 pub mod scheduled_tasks;

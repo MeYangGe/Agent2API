@@ -65,6 +65,7 @@ use serde_json::{Map, Value};
 
 use crate::server::db::Db;
 
+mod account_sort;
 mod assistant_config;
 mod github_access;
 pub(crate) mod parse;
@@ -74,6 +75,10 @@ pub(crate) mod sql;
 mod types;
 mod update_policy;
 
+pub use account_sort::{
+    account_sort_settings, save_account_sort, validate_account_sort, AccountSortRule, AccountSortSettings,
+    AddedSortDirection, CreditSortDirection,
+};
 pub use assistant_config::*;
 pub use github_access::{
     github_access, set_github_access, GithubAccessMode, GithubAccessPatch,
@@ -92,6 +97,7 @@ pub use update_policy::{
     set_update_channels, update_beta, update_channels, UpdateChannels, UpdateChannelsPatch,
     KEY_UPDATE_STABLE,
 };
+pub(crate) use update_policy::{sync_installed_update_channel, KEY_INSTALLED_UPDATE_VERSION};
 
 use parse::*;
 
@@ -146,6 +152,7 @@ pub struct RuntimeConfig {
     /// 请求就生效，不重启进程），解析一次存下来最省事。
     routing: RoutingSettings,
     routing_profiles: std::sync::Arc<RoutingProfiles>,
+    account_sort: std::sync::Arc<AccountSortSettings>,
     /// 事件日志的保存目录（原始配置值；None = 未设置，用配置目录）。
     /// 低频字段（启动 + 设置页读写），不值得为它发明解析层，存原始值即可。
     log_dir: Option<String>,
@@ -268,13 +275,12 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// 是否启用了鉴权：`apiKeys` 里有启用的 Key、或旧字段 / 环境变量给了 Key
-    /// （多 Key 的解析见 `core::api_keys`）
+    /// 当前是否存在启用的 Key 配置（含旧字段和环境变量）；不表示模型可免鉴权。
     pub fn api_key_set(&self) -> bool {
         !self.active_api_keys().is_empty()
     }
 
-    /// 当前**启用**的全部明文 Key（鉴权中间件逐把比对）；空 = 免鉴权
+    /// 当前启用的 Key 配置；保留不可解密记录，防止管理准入误判为无 Key。
     pub fn active_api_keys(&self) -> Vec<String> {
         crate::server::core::api_keys::active_keys_from(&self.raw)
     }
@@ -565,6 +571,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         captcha_pool,
         routing,
         routing_profiles: routing_profiles::from_raw(&raw),
+        account_sort: account_sort::from_raw(&raw),
         log_dir: string_field(&raw, KEY_LOG_DIR),
         request_stats_dir: string_field(&raw, KEY_REQUEST_STATS_DIR),
         debug_dir: string_field(&raw, KEY_DEBUG_DIR),
@@ -1411,6 +1418,9 @@ pub fn update_raw_field(key: &str, value: Value) -> bool {
         }
         if key == routing_profiles::KEY_ROUTING_PROFILES {
             config.routing_profiles = routing_profiles::from_raw(&config.raw);
+        }
+        if key == account_sort::KEY_ACCOUNT_SORT {
+            config.account_sort = account_sort::from_raw(&config.raw);
         }
     })
 }

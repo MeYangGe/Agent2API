@@ -12,6 +12,9 @@ use crate::server::core::account_store::plugin_accounts;
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
 use crate::server::logging;
 
+mod policy;
+use policy::InstallPolicy;
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Operation {
@@ -24,6 +27,8 @@ pub struct Operation {
     pub total: u64,
     pub percent: Option<f64>,
     pub version: String,
+    pub required: bool,
+    pub required_version: Option<String>,
     pub error: Option<String>,
     pub host_error: Option<String>,
     pub updated_at: i64,
@@ -106,7 +111,17 @@ pub fn snapshot() -> Value {
 }
 
 pub async fn install_prepared(prepared: packages::PreparedPack) -> Result<Value, String> {
+    install_with_policy(prepared, None).await
+}
+
+async fn install_with_policy(
+    prepared: packages::PreparedPack,
+    policy: Option<(InstallPolicy, &str, &update::PackAsset)>,
+) -> Result<Value, String> {
     let _guard = mutation_guard().await;
+    if let Some((policy, id, asset)) = policy {
+        policy.validate(id, asset)?;
+    }
     let store = plugin_accounts::shared();
     super::shutdown_all().await;
     super::clear_providers();
@@ -120,7 +135,7 @@ pub async fn install_prepared(prepared: packages::PreparedPack) -> Result<Value,
     let installed = outcome?;
     let pack = super::list_packs().into_iter().find(|pack| pack.id == installed.id)
         .unwrap_or(installed);
-    let reloaded = super::host_for_pack(&pack.id).is_some_and(|host| host.status().running);
+    let reloaded = super::host_for_pack(&pack.id).is_some_and(|host| host.ready());
     let mut result = super::management_snapshot();
     result["pack"] = serde_json::to_value(&pack).map_err(|error| error.to_string())?;
     result["hostError"] = if pack.enabled && !reloaded {
@@ -151,12 +166,36 @@ pub fn start_cached(
         page: String::new(),
         require_signed: automatic || platform["requireSigned"] == true,
     };
+    let policy = if automatic {
+        InstallPolicy::Automatic(super::settings::current().channels())
+    } else {
+        InstallPolicy::Manual
+    };
+    start_asset(id, action, asset, policy)
+}
+
+pub(super) fn start_required(
+    id: &str,
+    mut asset: update::PackAsset,
+    automatic: bool,
+) -> Result<Operation, String> {
+    asset.require_signed = true;
+    start_asset(id, "repair", asset, InstallPolicy::Required { automatic })
+}
+
+fn start_asset(
+    id: &str,
+    action: &str,
+    asset: update::PackAsset,
+    policy: InstallPolicy,
+) -> Result<Operation, String> {
+    policy.validate(id, &asset)?;
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
     let guard = match task_state::claim(
         &record_key(id),
         60_000,
         true,
-        if automatic {
+        if policy.automatic() || matches!(policy, InstallPolicy::Required { .. }) {
             ManualBackoff::Respect
         } else {
             ManualBackoff::Bypass
@@ -171,7 +210,10 @@ pub fn start_cached(
         action: action.to_string(),
         stage: "downloading".to_string(),
         active: true,
-        version: version.to_string(),
+        version: asset.version.clone(),
+        required: matches!(policy, InstallPolicy::Required { .. }),
+        required_version: matches!(policy, InstallPolicy::Required { .. })
+            .then(|| crate::server::core::update::CURRENT_VERSION.to_string()),
         updated_at: logging::now_ms(),
         ..Default::default()
     };
@@ -181,17 +223,16 @@ pub fn start_cached(
         .insert(id.to_string(), operation.clone());
     persist(id);
     let id = id.to_string();
-    let channels = super::settings::current().channels();
     crate::spawn_task(async move {
-        let result = run(&id, &asset, automatic, channels).await;
+        let result = run(&id, &asset, policy).await;
         let mut finish_value = Value::Null;
-        let success = result.is_ok();
+        let success = result.as_ref().is_ok_and(|result| result["hostError"].is_null());
         mutate(&id, |operation| {
             operation.active = false;
             match result {
                 Ok(result) => {
-                    operation.stage = "done".to_string();
-                    operation.done = true;
+                    operation.done = success;
+                    operation.stage = if success { "done" } else { "failed" }.to_string();
                     operation.percent = Some(100.0);
                     operation.host_error = result["hostError"].as_str().map(str::to_string);
                     operation.result = None;
@@ -205,12 +246,18 @@ pub fn start_cached(
         });
         let message = finish_value["error"]
             .as_str()
+            .or_else(|| finish_value["hostError"].as_str())
             .unwrap_or("插件安装完成")
             .to_string();
         if !success {
             logging::log("[Plugin]", &message);
         }
-        let _ = guard.finish(success, message, Some(finish_value), 0, 60_000);
+        let interval = if matches!(policy, InstallPolicy::Required { .. }) {
+            super::compatibility::RETRY_INTERVAL_MS
+        } else {
+            60_000
+        };
+        let _ = guard.finish(success, message, Some(finish_value), 0, interval);
     });
     Ok(operation)
 }
@@ -218,8 +265,7 @@ pub fn start_cached(
 async fn run(
     id: &str,
     asset: &update::PackAsset,
-    automatic: bool,
-    channels: crate::server::config::UpdateChannels,
+    policy: InstallPolicy,
 ) -> Result<Value, String> {
     let bytes = update::download(asset, |received, total| {
         mutate(id, |task| {
@@ -240,35 +286,30 @@ async fn run(
     persist(id);
     let expected_id = id.to_string();
     let version = asset.version.clone();
-    let require_signed = automatic || asset.require_signed;
+    let require_signed = policy.signed() || asset.require_signed;
     let prepared = tokio::task::spawn_blocking(move || {
         packages::prepare(&bytes, Some(&expected_id), Some(&version), require_signed)
     })
     .await
     .map_err(|error| format!("插件校验任务中断：{error}"))??;
-    if automatic {
-        let settings = super::settings::current();
-        let installed = super::list_packs().into_iter().find(|pack| pack.id == id);
-        let allowed = match installed {
-            Some(pack) => settings.auto_update && pack.enabled && pack.signed
-                && crate::server::core::update::compare_versions(&asset.version, &pack.version) == Some(1),
-            None => settings.auto_install_official,
-        };
-        if !allowed || !settings.auto_check || settings.channels() != channels {
-            return Err("自动安装已关闭或通道已改变，本次下载未安装".to_string());
-        }
-    }
+    policy.validate(id, asset)?;
     mutate(id, |task| {
         task.stage = "installing".to_string();
         task.percent = None;
     });
     persist(id);
-    install_prepared(prepared).await
+    install_with_policy(prepared, Some((policy, id, asset))).await
 }
 
 pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, String> {
+    if target != super::host_target() {
+        return Err("只能安装当前网关平台的插件包".to_string());
+    }
     let packs = super::list_packs();
     let pack = packs.iter().find(|pack| pack.id == id);
+    if pack.is_some_and(|pack| pack.update_required) {
+        return super::compatibility::start(id, true).await;
+    }
     if action == "update" && pack.is_none() {
         return Err("还没有安装这个插件包".to_string());
     }

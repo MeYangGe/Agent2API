@@ -160,12 +160,7 @@ async fn add_plugin_account(
         }
     };
 
-    // 账号 id：优先用插件给的稳定身份（同一账号登录两次会被识别成更新）
-    let id = if account.identity.trim().is_empty() {
-        format!("{provider}-{}", logging::now_ms())
-    } else {
-        account.identity.clone()
-    };
+    let id = account.identity.clone();
     let name = account
         .public
         .get("name")
@@ -179,6 +174,7 @@ async fn add_plugin_account(
         name,
         &account.secret,
         &account.public,
+        account.desktop,
     ) {
         Ok(record) => ok_json(json!({
             "account": record,
@@ -358,6 +354,8 @@ pub async fn dispatch(
 
     // ② 固定子路径（Node 版把它们放在 `<id>` 通配之前的原因）
     match (method.as_str(), rest) {
+        ("GET", "sorting") => return super::accounts_sort::get_sorting(&state),
+        ("PUT", "sorting") => return super::accounts_sort::save_sorting(&state, body),
         ("GET", "export") => return export_accounts(&state),
         ("POST", "export-files") => return super::accounts_export::account_files(&state, body).await,
         ("POST", "import") => return import_accounts(&state, body).await,

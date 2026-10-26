@@ -491,7 +491,7 @@ function applyStatus(info?: UpdateInfo | null): void {
  * 而面板自己的状态行已经有「检查更新失败：」前缀，原样拼会变成「失败：检查失败：」。
  */
 function describeBackendError(value: string | null | undefined): string {
-  return String(value || '').trim().replace(/^检查失败[：:]\s*/, '')
+  return errorMessage(String(value || '').trim().replace(/^检查失败[：:]\s*/, ''))
 }
 
 /** 项目源码仓库（owner/repo）来自接口；形态不对就不用，免得拼出个乱七八糟的链接。
@@ -571,7 +571,7 @@ function renderTask(task: DownloadTask | null | undefined): boolean {
 
   if (task.error) {
     setBadge(t('下载失败'), 'bad')
-    setState(t('下载失败：{error}', { error: task.error }), true)
+    setState(t('下载失败：{error}', { error: errorMessage(task.error) }), true)
     publish({ phase: 'failed' })
     return true
   }

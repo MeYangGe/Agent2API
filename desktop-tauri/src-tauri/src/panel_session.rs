@@ -9,9 +9,8 @@
 //! 共用一套校验，这里只是把「谁来保管令牌」从 localStorage 换成了壳进程。
 //!
 //! ── 什么时候启用 ────────────────────────────────────────────
-//! 只有**注册过管理员**之后才需要：那时 `/api/*` 才要求会话或 Key（见
-//! `access::panel_auth_enabled`）。没注册时壳照旧只带第一把 Key，行为与改造前
-//! 逐字一致 —— 这是「桌面当正常软件用」的默认形态，不能被登录打断。
+//! 已注册管理员时必须登录；未注册时只为可信的本机壳签发管理会话，
+//! 避免受限 Key 被用于管理接口。这份会话不能代替模型调用的网关 Key。
 //!
 //! ── 登录流程 ────────────────────────────────────────────────
 //! 已注册管理员时，窗口先加载 `login.html`（与网页端同一份页面），登录成功后
@@ -154,6 +153,31 @@ pub fn attach(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         builder = builder.header("x-panel-refresh", &pair.refresh);
     }
     builder
+}
+
+pub fn ensure_local_access() -> Result<(), String> {
+    if crate::server::access::admin_registered() {
+        return Ok(());
+    }
+    let pair = load_tokens();
+    if !pair.access.is_empty() && pair.expires_at > now_ms() {
+        return Ok(());
+    }
+    // 未注册管理员时，本机壳本就可信；这份会话只准入管理面，不能代替模型 Key。
+    let issued = crate::server::access::IssuedSession::new_session();
+    store(&issued.access_token, &issued.refresh_token, issued.expires_in)
+}
+
+pub fn credential_headers() -> serde_json::Map<String, Value> {
+    let pair = load_tokens();
+    let mut headers = serde_json::Map::new();
+    if !pair.access.is_empty() {
+        headers.insert("x-panel-token".to_string(), Value::String(pair.access));
+    }
+    if !pair.refresh.is_empty() {
+        headers.insert("x-panel-refresh".to_string(), Value::String(pair.refresh));
+    }
+    headers
 }
 
 /// 用 refresh 换一组新令牌。成功返回 true。

@@ -253,6 +253,13 @@ impl RpcAdapter {
     fn base(&self) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();
         map.insert("provider".into(), Value::String(self.id.to_string()));
+        let timeouts = crate::server::config::timeout_settings();
+        map.insert("timeouts".into(), serde_json::json!({
+            "connectSeconds": timeouts.connect_seconds,
+            "headersSeconds": timeouts.headers_seconds,
+            "streamIdleSeconds": timeouts.stream_idle_seconds,
+            "bodySeconds": timeouts.body_seconds,
+        }));
         map
     }
 
@@ -401,6 +408,27 @@ impl ProviderAdapter for RpcAdapter {
                 body: plan.body,
                 response: UpstreamResponse::Images(plan.response),
             })
+        })
+    }
+
+    fn is_error_response_async<'a>(
+        &'a self,
+        status: u16,
+        headers: &'a HeaderMap,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if !(200..300).contains(&status) {
+                return Ok(true);
+            }
+            let mut params = self.base();
+            params.insert("status".into(), Value::from(status));
+            params.insert("headers".into(), headers_json(headers));
+            let value = self.control(
+                proto::methods::gateway::IS_ERROR_RESPONSE, Value::Object(params),
+            ).await?;
+            value.as_bool().ok_or_else(|| GatewayError::with_status(
+                502, "插件返回的响应类型判定不是布尔值",
+            ))
         })
     }
 
@@ -609,13 +637,25 @@ impl ProviderAdapter for RpcAdapter {
         Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
+            let activity = self.id == "workbuddy-intl" && action == "activity.run"
+                && payload.get("mode").and_then(Value::as_str) != Some("claim");
+            let mut activity_payload = payload.clone();
+            let access = if activity {
+                let (models, identity) = crate::server::core::billing::keepalive::authorized_models()?;
+                activity_payload["models"] = serde_json::json!(models);
+                Some(identity)
+            } else { None };
             let mut params = self.with_account(account_id);
             if let Some(object) = params.as_object_mut() {
                 object.insert("action".into(), Value::String(action.to_string()));
-                object.insert("payload".into(), payload.clone());
+                object.insert("payload".into(), activity_payload.clone());
             }
-            self.network(proto::methods::gateway::ADMIN_ACTION, params)
-                .await
+            let started_at = crate::server::logging::now_ms();
+            let result = self.network(proto::methods::gateway::ADMIN_ACTION, params).await;
+            if let Some(identity) = access {
+                crate::server::core::billing::keepalive::record_activity(account_id, started_at, &activity_payload, &result, identity);
+            }
+            result
         })
     }
 
@@ -1231,23 +1271,17 @@ impl RpcAdapter {
                 "账号库尚未就绪，无法保存登录结果",
             ));
         };
-        let id = if account.identity.trim().is_empty() {
-            // 没有稳定身份：用 provider + 时间戳生成一个（可能产生重复记录，
-            // 但那比「登录成功却没落库」好）
-            format!("{}-{}", self.id, crate::server::logging::now_ms())
-        } else {
-            account.identity.clone()
-        };
+        let id = account.identity.clone();
         let name = account
             .public
             .get("name")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(self.label);
-        store
-            .plugin_upsert_account(&id, self.id, name, &account.secret, &account.public)
+        let record = store
+            .plugin_upsert_account(&id, self.id, name, &account.secret, &account.public, account.desktop)
             .map_err(|message| GatewayError::with_status(500, message))?;
-        Ok(id)
+        Ok(record.get("id").and_then(Value::as_str).unwrap_or(&id).to_string())
     }
 
     /// head 已到之后的三条分支：错误状态 / 非流式聚合 / 流式交出去。

@@ -10,6 +10,7 @@ import {
   type PlanEntry, type ProviderGroup,
 } from './checkin-types'
 import { CheckinRow, ProviderLogo } from './checkin-row'
+import { CheckinUmid } from './checkin-umid'
 import { claimOnboarding, onboardingOf, queryOnboarding } from './checkin-onboarding'
 import { t } from '../i18n'
 
@@ -285,6 +286,7 @@ function ProviderRow({ group }: { group: ProviderGroup }): React.ReactElement {
   const hasAccounts = group.totalCount > 0
   return (
     <CheckinRow provider={group.id} name={group.label} description={group.description}
+      note={group.uiHooks?.includes('umid_component') ? <CheckinUmid /> : undefined}
       expandable={hasAccounts} expanded={expanded} onExpandedChange={setExpanded}
       summary={<>
         <span className="ck-row-count">

@@ -18,7 +18,8 @@
  */
 
 import type * as React from 'react'
-import type { UpdateChannels } from '../../../ui-shared/updates'
+import type { UpdateChannels, ForceUpdatePolicy } from '../../../ui-shared/updates'
+import { githubErrorMessage } from '../../../ui-shared/updates'
 export type { UpdateChannels } from '../../../ui-shared/updates'
 // 代理池的共享类型与值前缀与账号页共用一份 —— 两处下拉的值域必须一致
 // （`pool:<id>`），各写一份迟早会漂移。accounts-shared 是纯类型 + 常量的
@@ -32,6 +33,7 @@ import { t } from '../i18n'
 /** 更新检查结果（checkUpdate 的壳命令返回 / getUpdateStatus 的缓存）。字段按可选收：
  *  后端在「仓库暂无发布版本」「版本号无法解析」等情形下会给 null */
 export type UpdateInfo = {
+  forceUpdate?: ForceUpdatePolicy | null
   currentVersion?: string | null
   latestVersion?: string | null
   /** true / false / null（版本号无法比较时后端给 null，界面显示「无法比较」） */
@@ -235,7 +237,7 @@ export function toast(message: string, kind?: 'err' | 'ok'): void {
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return githubErrorMessage(error, t, 'update')
 }
 
 /** 外链白名单：只放行 http(s)（与后端 open_release_page 的口径一致，这里先挡一道） */

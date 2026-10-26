@@ -353,21 +353,15 @@ pub async fn chat_completions(
 /// 句柄是 `Clone` 的轻量 Arc，且绝不在持锁时做网络请求（这是本项目的硬约束，
 /// 聚合层只调 `accounts_for_provider` 做一次文件读取）。
 ///
-/// ── R9：带 Key 请求时只返回被授权的模型 ────────────────────────
-/// 这条路由挂在**免鉴权组**（Node 版就是不查 API Key 的只读探针），但它仍然
-/// 要认 Key：客户端带着某把 Key 来拉列表时，只该看到那把 Key 被授权的部分 ——
-/// 否则「限制」在下游看起来根本不存在（列表里有，点了却 404，是最难解释的一种）。
-/// 所以这里主动从请求头解析命中的 Key（`http::key_scope_from_headers`，
-/// 与鉴权中间件**共用同一套匹配口径**），把它的白名单交给
-/// `catalog::models_response` 在列表生成处过滤。
-///
-/// 没带 Key / 带的是没命中的 Key / 网关一把启用的 Key 都没有（免鉴权模式）：
-/// 一律**不过滤**（空 `scope`）。这是刻意的：`/v1/models` 是探针，
-/// 在客户端配好 Key 之前就会被打一次（README 的接口说明也这么写），
-/// 那种请求拿不到完整列表会让「装完先看看有哪些模型」这一步直接失效。
-/// 与 `key_scope` 模块头列的三条「不限制」情形是同一套语义。
+/// `/v1/models` 不消耗模型额度，未携带 Key 时可读取公开清单。
+/// 携带 Key 时必须有效，列表按同一份鉴权结果的白名单过滤。
 pub async fn list_models(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    let scope = crate::server::http::key_scope_from_headers(&headers);
+    let scope = if headers.contains_key("x-api-key") || headers.contains_key(axum::http::header::AUTHORIZATION) {
+        match super::model_access::authenticate(&headers, "") {
+            Ok(access) => access.scope,
+            Err(error) => return error.payload_response(),
+        }
+    } else { None };
     let body = crate::server::core::providers::catalog::models_response(state.store(), scope.as_ref());
     // 异步刷新模型目录，不阻塞响应（对照 Node 的 `void refreshModelCatalog()`）
     spawn_catalog_refresh(&state);

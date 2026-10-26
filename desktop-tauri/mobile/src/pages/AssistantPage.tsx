@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/Icon'
 import { MarkdownLite } from '../components/MarkdownLite'
-import { Button, Textarea, confirmDialog } from '@ui'
+import { Button, Textarea, Sheet, SheetContent, SheetHeader, SheetTitle, SheetBody, confirmDialog } from '@ui'
 import { store } from '../state/store'
 import { AssistantModelPicker } from '../components/AssistantModelPicker'
 import { useAssistantModels, unavailableModelMessage } from '../lib/assistant-models'
 import { selectedModel } from '../../../ui-shared/assistant-models'
 import {
   fetchAssistantConfig,
+  saveAssistantConfig,
   streamAssistantChat,
-  saveAssistantSession,
+  saveAssistantSession, listAssistantSessions, getAssistantSession, forkAssistantSession, summarizeAssistantSession, saveAssistantTitleConfig, deleteAssistantSession,
+  type AssistantConfig, type SessionSummary, type SessionDetail,
   type ChatMessage,
   type ToolCall,
 } from '../api/assistant'
@@ -19,8 +21,19 @@ import { t } from '../i18n'
 import { imageContext, type ImageAsset } from '../../../ui-shared/assistant-image-tools'
 import { AssistantImageResults } from '../../../ui-shared/assistant-image-results'
 import { loadAssistantImage } from '../api/assistant-images'
+import { saveMobileAssistantImage } from '../lib/assistant-image-save'
 import { readMobileImages } from '../lib/assistant-attachments'
 import { serverIdentity } from '../lib/servers'
+import { AssistantMessageActions } from '../../../ui-shared/assistant-message-actions'
+import { AssistantTitleSettings } from '../../../ui-shared/assistant-title-settings'
+import { parseAssistantMessages, removeAssistantMessage } from '../../../ui-shared/assistant-history'
+import { replayBubbles, type Bubble } from './assistant/history'
+import { AssistantAvatar as Avatar, assistantBubbleStyle as bubbleStyle, parseAssistantArgs as parseArgs } from './assistant/display'
+import { AssistantHistory } from './assistant/AssistantHistory'
+import { apiCall } from '../api/client'
+import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
+import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
+import { modelApiKeyAllows, modelApiKeyLabel, type ModelApiKey } from '../../../ui-shared/model-api-key'
 
 /**
  * AI 助手（手机端）。
@@ -43,20 +56,6 @@ import { serverIdentity } from '../lib/servers'
  * 设置容易误触，而换模型是个高频的临时动作。
  */
 
-type Bubble = {
-  id: number
-  role: 'user' | 'assistant'
-  text: string
-  /** 正在流式输出：气泡上显示光标 / 停止按钮 */
-  streaming?: boolean
-  /** 失败原因（assistant 气泡下方的红字） */
-  error?: string
-  /** 这一轮里执行过的工具（显示成一行小字，让用户知道模型查了什么） */
-  tools?: string[]
-  attachments?: string[]
-  images?: ImageAsset[]
-}
-
 type QuickAsk = {
   label: string
   icon: Parameters<typeof Icon>[0]['name']
@@ -69,19 +68,28 @@ const QUICK_ASKS: QuickAsk[] = [
   { label: t('现在有哪些账号被限流？'), icon: 'alert' },
 ]
 
-let nextId = 1
-
 export function AssistantPage() {
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
   const [readingImages, setReadingImages] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [titleSettingsOpen, setTitleSettingsOpen] = useState(false)
+  const [config, setConfig] = useState<AssistantConfig | null>(null)
+  const keyState = useModelApiKeys(() => apiCall('/api/model-access/keys'))
+  const selectedKey = keyState.keys.find(key => key.id === config?.apiKeyId)
+  const [keyPickerOpen, setKeyPickerOpen] = useState(false)
+  const [savingKey, setSavingKey] = useState(false)
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [title, setTitle] = useState('')
+  const titleRef = useRef('')
   /** 默认模型（来自网关配置）；null = 还没读到 */
   const [defaultModel, setDefaultModel] = useState<string | null | undefined>(undefined)
   /** 本次会话临时选的模型；空串 = 跟随配置 */
   const [model, setModel] = useState('')
-  const { models, ready: modelsReady, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useAssistantModels()
+  const { models, ready: modelsReady, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useAssistantModels(selectedKey?.key)
   const [pickerOpen, setPickerOpen] = useState(false)
   const checkingModelRef = useRef(false)
   const [checkingModel, setCheckingModel] = useState(false)
@@ -89,7 +97,7 @@ export function AssistantPage() {
   const [tools, setTools] = useState<Array<Record<string, unknown>>>([])
   const enabledToolsRef = useRef<Record<string, boolean>>({})
   const modeRef = useRef<'confirm' | 'full'>('confirm')
-  const sessionRef = useRef(crypto.randomUUID())
+  const sessionRef = useRef<string>(crypto.randomUUID())
   const mountedRef = useRef(true)
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const historyRef = useRef<ChatMessage[]>([])
@@ -99,10 +107,15 @@ export function AssistantPage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   const persist = (session: string, messages: ChatMessage[], selected: string, identity: string): Promise<void> => {
-    const snapshot = messages.slice()
+    const snapshot = parseAssistantMessages(messages)
+    const snapshotTitle = titleRef.current
     const pending = saveQueueRef.current.catch(() => {}).then(async () => {
       if (serverIdentity() !== identity) return
-      await saveAssistantSession(session, snapshot, selected)
+      const saved = await saveAssistantSession(session, snapshot, selected, snapshotTitle || undefined)
+      if (mountedRef.current && serverIdentity() === identity) {
+        if (sessionRef.current === session) { titleRef.current = saved.title; setTitle(saved.title) }
+        setSessions(previous => [saved, ...previous.filter(item => item.id !== saved.id)])
+      }
     })
     saveQueueRef.current = pending.catch(failure => {
       if (mountedRef.current && serverIdentity() === identity) store.toast(t('这条会话没能存进历史：{message}', { message: failure instanceof Error ? failure.message : String(failure) }), 'err')
@@ -122,6 +135,7 @@ export function AssistantPage() {
       .then(config => {
         if (cancelled) return
         setDefaultModel(config.model || null)
+        setConfig(config)
         const enabled = config.tools || {}
         enabledToolsRef.current = enabled
         modeRef.current = config.mode === 'full' ? 'full' : 'confirm'
@@ -133,6 +147,12 @@ export function AssistantPage() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void listAssistantSessions().then(items => { if (!cancelled) setSessions(items) }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
@@ -167,9 +187,21 @@ export function AssistantPage() {
     checkingModelRef.current = true
     setCheckingModel(true)
     let requestModel: string
+    let requestKey: ModelApiKey
     try {
-      const options = await refreshModels()
+      const [options, keys] = await Promise.all([refreshModels(), keyState.refresh()])
       if (!mountedRef.current || sessionRef.current !== session || serverIdentity() !== identity) return
+      const key = keys.find(key => key.id === config?.apiKeyId)
+      if (!key) {
+        setKeyPickerOpen(true)
+        store.toast(t('请先选择一把 API Key'), 'err')
+        return
+      }
+      if (!modelApiKeyAllows(key, effectiveModel)) {
+        store.toast(t('所选 API Key 无权调用此模型或提供商'), 'err')
+        return
+      }
+      requestKey = key
       const option = selectedModel(options, effectiveModel)
       if (!option) {
         store.toast(unavailableModelMessage(effectiveModel), 'err')
@@ -187,14 +219,13 @@ export function AssistantPage() {
       if (serverIdentity() === identity) setCheckingModel(false)
     }
     const attached = [...attachments]
-    const history: ChatMessage[] = [...historyRef.current, { role: 'user', content, images: attached }]
-
-    const userId = nextId++
-    const replyId = nextId++
+    const userId = crypto.randomUUID()
+    const replyId = crypto.randomUUID()
+    const history: ChatMessage[] = [...historyRef.current, { id: userId, role: 'user', content, images: attached }]
     setBubbles(prev => [
       ...prev,
-      { id: userId, role: 'user', text: content, attachments: attached },
-      { id: replyId, role: 'assistant', text: '', streaming: true, tools: [] },
+      { id: userId, messageIds: [userId], role: 'user', text: content, attachments: attached },
+      { id: replyId, messageIds: [replyId], model: requestModel, role: 'assistant', text: '', streaming: true, tools: [] },
     ])
     setDraft('')
     setAttachments([])
@@ -207,6 +238,7 @@ export function AssistantPage() {
 
     let messages = history
     let unfinishedText = ''
+    let unfinishedId = replyId
     try {
       await persist(session, messages, requestModel, identity).catch(() => {})
       /** 本轮执行过的工具（显示在气泡下方，让用户知道模型查了什么） */
@@ -214,11 +246,15 @@ export function AssistantPage() {
       const generatedImages: ImageAsset[] = []
       for (let round = 0; round < 6; round++) {
         if (controller.signal.aborted || !mountedRef.current || serverIdentity() !== identity) break
+        const roundId = round === 0 ? replyId : crypto.randomUUID()
+        unfinishedId = roundId
+        setBubbles(previous => previous.map(item => item.id === replyId ? { ...item, messageIds: [...new Set([...(item.messageIds || []), roundId])] } : item))
         let pendingCalls: ToolCall[] = []
         let roundText = ''
         unfinishedText = ''
 
         await streamAssistantChat({
+          apiKey: requestKey.key,
           messages,
           tools,
           model: requestModel,
@@ -242,14 +278,14 @@ export function AssistantPage() {
         unfinishedText = ''
 
         if (!pendingCalls.length) {
-          messages = [...messages, { role: 'assistant', content: roundText }]
+          messages = [...messages, { id: roundId, role: 'assistant', model: requestModel, content: roundText }]
           break
         }
 
         // 把这一轮的 assistant 消息（含工具调用）与工具结果一起回灌
         messages = [
           ...messages,
-          { role: 'assistant', content: roundText, toolCalls: pendingCalls },
+          { id: roundId, role: 'assistant', model: requestModel, content: roundText, toolCalls: pendingCalls },
         ]
         for (const call of pendingCalls) {
           if (!mountedRef.current || sessionRef.current !== session || serverIdentity() !== identity) break
@@ -279,7 +315,7 @@ export function AssistantPage() {
             }
             if (controller.signal.aborted || !mountedRef.current || serverIdentity() !== identity) throw new DOMException('Aborted', 'AbortError')
             if (tool.id === 'generate_images' || tool.id === 'edit_images') await persist(session, messages, requestModel, identity)
-            const outcome = await tool.run(args, { session, images: imageContext(messages), confirmed: true, signal: controller.signal })
+            const outcome = await tool.run(args, { session, images: imageContext(messages), confirmed: true, signal: controller.signal, apiKey: requestKey.key, apiKeyName: requestKey.name })
             if (serverIdentity() !== identity || sessionRef.current !== session) break
             result = outcome.text
             resultImages = outcome.images
@@ -307,6 +343,13 @@ export function AssistantPage() {
       if (sessionRef.current !== session || serverIdentity() !== identity) return
       historyRef.current = messages
       await persist(session, messages, requestModel, identity).catch(() => {})
+      if (!controller.signal.aborted && !sessions.find(item => item.id === session)?.titleGenerated) {
+        void summarizeAssistantSession(session, requestKey.key).then(saved => {
+          if (!mountedRef.current || serverIdentity() !== identity) return
+          if (sessionRef.current === session) { titleRef.current = saved.title; setTitle(saved.title) }
+          setSessions(previous => previous.map(item => item.id === saved.id ? saved : item))
+        }).catch(failure => { if (mountedRef.current && serverIdentity() === identity) store.toast(t('标题总结失败：{message}', { message: failure instanceof Error ? failure.message : String(failure) }), 'warn') })
+      }
       // 流正常结束但一个字都没有：多半是上游只回了 tool_calls 或空响应
       setBubbles(prev =>
         prev.map(item => {
@@ -317,7 +360,7 @@ export function AssistantPage() {
       )
     } catch (failure) {
       if (sessionRef.current !== session || serverIdentity() !== identity) return
-      if (unfinishedText) messages = [...messages, { role: 'assistant', content: unfinishedText }]
+      if (unfinishedText) messages = [...messages, { id: unfinishedId, role: 'assistant', model: requestModel, content: unfinishedText }]
       historyRef.current = messages
       void persist(session, messages, requestModel, identity).catch(() => {})
       const aborted = controller.signal.aborted
@@ -361,7 +404,62 @@ export function AssistantPage() {
     setDraft('')
     setAttachments([])
     historyRef.current = []
+    titleRef.current = ''
+    setTitle('')
     sessionRef.current = crypto.randomUUID()
+    setHistoryOpen(false)
+  }
+
+  const showSession = (detail: SessionDetail) => {
+    historyRef.current = detail.messages
+    sessionRef.current = detail.id
+    titleRef.current = detail.title
+    setTitle(detail.title)
+    setModel(detail.model || '')
+    setBubbles(replayBubbles(detail.messages, detail.model))
+    setAttachments([])
+    setDraft('')
+    setHistoryOpen(false)
+  }
+
+  const openSession = async (id: string) => {
+    if (busy || historyBusy || checkingModelRef.current) return
+    setHistoryBusy(true)
+    try { await saveQueueRef.current; showSession(await getAssistantSession(id)) }
+    catch (failure) { store.toast(failure instanceof Error ? failure.message : String(failure), 'err') }
+    finally { setHistoryBusy(false) }
+  }
+
+  const operateMessage = async (bubble: Bubble, action: 'edit' | 'delete' | 'fork', text = '') => {
+    if (busy || historyBusy || checkingModelRef.current) return
+    setHistoryBusy(true)
+    const identity = serverIdentity()
+    try {
+      await saveQueueRef.current
+      let messages = parseAssistantMessages(historyRef.current)
+      if (action === 'fork') {
+        await persist(sessionRef.current, messages, effectiveModel, identity)
+        const detail = await forkAssistantSession(sessionRef.current, bubble.messageIds?.at(-1) || bubble.id)
+        setSessions(previous => [detail, ...previous])
+        showSession(detail)
+        return
+      }
+      const ids = new Set(bubble.messageIds || [bubble.id])
+      if (action === 'delete') { for (const id of ids) messages = removeAssistantMessage(messages, id) }
+      else {
+        let first = true
+        messages = messages.map(message => {
+          if (!ids.has(message.id!)) return message
+          const content = first ? text : ''
+          first = false
+          return { ...message, content }
+        })
+      }
+      historyRef.current = messages
+      setBubbles(replayBubbles(messages, effectiveModel))
+      await persist(sessionRef.current, messages, effectiveModel, identity)
+    } catch (failure) { store.toast(failure instanceof Error ? failure.message : String(failure), 'err') }
+    finally { setHistoryBusy(false) }
   }
 
   return (
@@ -376,8 +474,9 @@ export function AssistantPage() {
         className='m-assistant-head'
         style={{ display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}
       >
+        <Button variant='ghost' size='icon-sm' aria-label={t('历史对话')} onClick={() => setHistoryOpen(true)}><Icon name='log' /></Button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <b style={{ fontSize: 15 }}>{t('AI 助手')}</b>
+          <b style={{ fontSize: 15 }}>{title || t('新对话')}</b>
           <Button size='default' variant='ghost'
             type='button'
             disabled={busy || checkingModel}
@@ -400,6 +499,10 @@ export function AssistantPage() {
               {effectiveModel && modelsReady && !currentOption ? ` · ${t('不可用')}` : ''}
             </span>
             <Icon name='chev' style={{ width: 11, height: 11, flex: 'none', transform: 'rotate(90deg)' }} />
+          </Button>
+          <Button variant='ghost' size='xs' className='max-w-full truncate p-0 text-xs text-muted-foreground' disabled={busy || checkingModel || savingKey}
+            onClick={() => { setKeyPickerOpen(true); void keyState.refresh().catch(() => {}) }}>
+            {selectedKey ? modelApiKeyLabel(selectedKey) : t('选择 API Key…')}
           </Button>
         </div>
         <Button size='icon-touch' variant='outline'
@@ -439,9 +542,13 @@ export function AssistantPage() {
           if (bubble.role === 'user') {
             return (
               <div key={bubble.id} style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <div style={{ ...bubbleStyle(true), whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <div className='flex max-w-[82%] min-w-0 flex-col items-end'>
+                <div style={{ ...bubbleStyle(true), maxWidth: '100%', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                   {bubble.attachments?.map((url, index) => <img key={index} src={url} alt={t('图片 {n}', { n: index + 1 })} style={{ maxWidth: '100%', maxHeight: 160, borderRadius: 8, marginBottom: 6 }} />)}
                   {bubble.text}
+                </div>
+                <AssistantMessageActions text={bubble.text} t={t} disabled={busy || checkingModel || historyBusy}
+                  onEdit={text => operateMessage(bubble, 'edit', text)} onDelete={() => operateMessage(bubble, 'delete')} />
                 </div>
               </div>
             )
@@ -450,6 +557,7 @@ export function AssistantPage() {
             <div key={bubble.id} style={{ display: 'flex', gap: 8 }}>
               <Avatar />
               <div style={{ maxWidth: '82%', minWidth: 0 }}>
+                <div className='mb-1 break-all text-xs font-medium text-muted-foreground'>{bubble.model || effectiveModel}</div>
                 <div style={{ ...bubbleStyle(false), maxWidth: '100%', wordBreak: 'break-word' }}>
                   {bubble.text ? <MarkdownLite text={bubble.text} /> : bubble.streaming ? t('正在思考…') : null}
                   {bubble.streaming ? (
@@ -467,7 +575,9 @@ export function AssistantPage() {
                     />
                   ) : null}
                 </div>
-                {bubble.images?.length ? <AssistantImageResults images={bubble.images} load={loadAssistantImage} t={t} /> : null}
+                {!bubble.streaming ? <AssistantMessageActions text={bubble.text} t={t} disabled={busy || checkingModel || historyBusy}
+                  onEdit={text => operateMessage(bubble, 'edit', text)} onDelete={() => operateMessage(bubble, 'delete')} onFork={() => operateMessage(bubble, 'fork')} /> : null}
+                {bubble.images?.length ? <AssistantImageResults images={bubble.images} load={loadAssistantImage} save={saveMobileAssistantImage} t={t} /> : null}
                 {bubble.error ? (
                   <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--m-danger)', lineHeight: 1.5 }}>
                     {bubble.error}
@@ -632,6 +742,37 @@ export function AssistantPage() {
         </div>
       </div>
 
+      <AssistantHistory open={historyOpen} onClose={() => setHistoryOpen(false)} sessions={sessions} activeId={sessionRef.current} busy={busy || historyBusy || checkingModel}
+        onOpen={id => void openSession(id)} onNew={clear} onSettings={() => setTitleSettingsOpen(true)}
+        onDelete={id => { void confirmDialog(t('删除这条对话？'), { title: t('删除这条对话') }).then(async confirmed => {
+          if (!confirmed || busy || historyBusy) return
+          setHistoryBusy(true)
+          try { await saveQueueRef.current; await deleteAssistantSession(id); setSessions(previous => previous.filter(item => item.id !== id)); if (sessionRef.current === id) clear() }
+          catch (failure) { store.toast(failure instanceof Error ? failure.message : String(failure), 'err') } finally { setHistoryBusy(false) }
+        }) }} />
+      <AssistantTitleSettings open={titleSettingsOpen} onOpenChange={setTitleSettingsOpen} model={config?.titleModel ?? null} prompt={config?.titlePrompt || ''}
+        models={models.map(item => item.name)} disabled={!config} t={t} onSave={async (titleModel, titlePrompt) => {
+          if (!config) return
+          setConfig(await saveAssistantTitleConfig(config, titleModel, titlePrompt))
+        }} />
+      <Sheet open={keyPickerOpen} onOpenChange={setKeyPickerOpen}>
+        <SheetContent side='bottom'>
+          <SheetHeader><SheetTitle>{t('选择 API Key')}</SheetTitle></SheetHeader>
+          <SheetBody>
+            <ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || savingKey}
+              onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t}
+              onChange={async apiKeyId => {
+                if (!config || savingKey) return
+                setSavingKey(true)
+                try {
+                  setConfig(await saveAssistantConfig({ ...config, apiKeyId }))
+                  setKeyPickerOpen(false)
+                } catch (failure) { store.toast(failure instanceof Error ? failure.message : String(failure), 'err') }
+                finally { setSavingKey(false) }
+              }} />
+          </SheetBody>
+        </SheetContent>
+      </Sheet>
       <AssistantModelPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
@@ -650,50 +791,4 @@ export function AssistantPage() {
       />
     </div>
   )
-}
-
-/** 工具参数：模型偶尔给出不合法 JSON —— 给个空对象让它自己从报错里学 */
-function parseArgs(raw: string): Record<string, unknown> {
-  const text = String(raw || '').trim()
-  if (!text) return {}
-  try {
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {}
-  } catch {
-    return {}
-  }
-}
-
-function Avatar() {
-  return (
-    <span
-      style={{
-        width: 26,
-        height: 26,
-        borderRadius: 8,
-        flex: 'none',
-        display: 'grid',
-        placeItems: 'center',
-        background: 'var(--m-primary-soft)',
-        color: 'var(--m-primary)',
-      }}
-    >
-      <Icon name='spark' style={{ width: 15, height: 15 }} />
-    </span>
-  )
-}
-
-function bubbleStyle(mine: boolean): React.CSSProperties {
-  return {
-    maxWidth: '82%',
-    padding: '10px 13px',
-    borderRadius: mine ? '14px 14px 5px 14px' : '14px 14px 14px 5px',
-    background: mine ? 'var(--m-primary)' : 'var(--m-surface)',
-    color: mine ? '#fff' : 'var(--m-text)',
-    border: mine ? 0 : '1px solid var(--m-line)',
-    fontSize: 13.5,
-    lineHeight: 1.62,
-  }
 }

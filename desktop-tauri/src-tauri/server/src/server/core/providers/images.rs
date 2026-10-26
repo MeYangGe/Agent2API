@@ -48,6 +48,7 @@ impl ImageOperation {
 pub enum ImageResponseKind {
     Openai,
     Gemini,
+    ModelscopeAsync,
 }
 
 #[derive(Deserialize)]
@@ -88,16 +89,20 @@ pub fn operation_providers(model: &str, operation: ImageOperation) -> Vec<String
             })
         })
         .filter(|provider| {
-            if operation == ImageOperation::Generate {
-                return provider_model_is_image(provider, model);
-            }
             let wire = super::catalog::wire_target_for_provider(model, provider, None);
-            super::catalog::manifest_for_provider(provider)
-                .iter()
+            super::catalog::manifest_for_provider(provider).iter()
                 .find(|item| super::super::models::model_id(item).eq_ignore_ascii_case(&wire.model))
-                .is_some_and(|item| provider_model_supports_editing(provider, item))
+                .is_some_and(|item| match operation {
+                    ImageOperation::Generate => model_is_image(item) && item.get("supports_image_generation").and_then(Value::as_bool) != Some(false),
+                    ImageOperation::Edit => provider_model_supports_editing(provider, item),
+                })
         })
         .collect()
+}
+
+pub fn provider_model_supports_generation(provider: &str, model: &Value) -> bool {
+    model_is_image(model) && model.get("supports_image_generation").and_then(Value::as_bool) != Some(false)
+        && super::adapter::adapter_by_id(provider).is_some_and(|adapter| adapter.supports_image_generation())
 }
 
 pub fn provider_model_supports_editing(provider: &str, model: &Value) -> bool {

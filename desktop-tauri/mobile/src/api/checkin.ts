@@ -69,8 +69,8 @@ export function runCheckinSchedule(id: string): Promise<CheckinRun & AutoState> 
   return apiCall(`/api/checkin-schedules/${encodeURIComponent(id)}/run`, { method: 'POST' })
 }
 
-export function saveKeepalive(models: string[]): Promise<KeepaliveState> {
-  return apiCall('/api/checkin-keepalive', { method: 'POST', body: { models } })
+export function saveKeepalive(models: string[], apiKeyId?: string | null): Promise<KeepaliveState> {
+  return apiCall('/api/checkin-keepalive', { method: 'POST', body: { models, apiKeyId } })
 }
 
 export function saveTravel(body: { enabled?: boolean; times?: string[] }): Promise<TravelState> {

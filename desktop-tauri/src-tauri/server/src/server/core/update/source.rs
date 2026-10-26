@@ -8,7 +8,76 @@ use crate::server::config::{self, GithubAccessMode};
 use crate::server::core::task_state;
 use crate::server::logging;
 
+use super::token;
+
 const PREFERENCE_MS: i64 = 10 * 60_000;
+
+#[derive(Clone, Copy)]
+pub enum GithubSettings {
+    Update,
+    Plugin,
+}
+
+impl GithubSettings {
+    pub fn rate_limit_message(self, retry_at: i64) -> String {
+        self.message_for_token(retry_at, token::effective_token().is_some())
+    }
+
+    fn message_for_token(self, retry_at: i64, filled: bool) -> String {
+        if !filled {
+            return match self {
+                Self::Update => "GitHub 接口限流中，请在「更新设置」的「GitHub 令牌」中填写凭证，以提高请求限额。",
+                Self::Plugin => "GitHub 接口限流中，请在「插件设置」的「GitHub 令牌」中填写凭证，以提高请求限额。",
+            }
+            .to_string();
+        }
+        let seconds = retry_at.saturating_sub(logging::now_ms()).max(0).saturating_add(999) / 1000;
+        if seconds > 0 {
+            format!("GitHub 接口限流中，请在 {seconds} 秒后重试")
+        } else {
+            "GitHub 接口限流中，请稍后重试".to_string()
+        }
+    }
+
+    pub fn describe_error(self, message: &str, retry_at: i64) -> String {
+        if !is_rate_limit_error(message) {
+            return message.to_string();
+        }
+        let filled = token::effective_token().is_some();
+        if filled && retry_at == 0 {
+            if let Some(seconds) = message
+                .split_once("请在 ")
+                .and_then(|(_, tail)| tail.split_once(" 秒后重试"))
+                .and_then(|(seconds, _)| seconds.parse::<i64>().ok())
+                .filter(|seconds| *seconds > 0)
+            {
+                return format!("GitHub 接口限流中，请在 {seconds} 秒后重试");
+            }
+        }
+        self.message_for_token(retry_at, filled)
+    }
+
+    pub fn waiting_message(self, state: &task_state::TaskState) -> String {
+        if !state.running() && state.retry_at > logging::now_ms() {
+            if let Some(error) = state.last_error.as_deref().filter(|error| is_rate_limit_error(error)) {
+                return self.describe_error(error, state.retry_at);
+            }
+        }
+        state.waiting_message()
+    }
+}
+
+fn is_rate_limit_error(message: &str) -> bool {
+    [
+        "GitHub 接口限流中",
+        "GitHub 接口处于限流冷却期",
+        "GitHub 接口访问受限",
+        "查询插件更新失败：GitHub 返回 HTTP 403",
+        "查询插件更新失败：GitHub 返回 HTTP 429",
+    ]
+    .iter()
+    .any(|prefix| message.contains(prefix))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -219,54 +288,51 @@ impl Candidate {
     pub fn cooling_message(&self, headers: &[(String, String)]) -> Option<String> {
         let state = task_state::read(&self.rate_key(headers)?).ok()?;
         let until = state.value.as_ref()?.get("retryAt")?.as_i64()?;
-        let seconds = (until - logging::now_ms() + 999) / 1000;
-        (seconds > 0).then(|| format!("GitHub 接口处于限流冷却期，请在 {seconds} 秒后重试"))
+        (until > logging::now_ms()).then(|| GithubSettings::Update.rate_limit_message(until))
     }
 
     pub fn record_rate_limit(&self, headers: &[(String, String)], response: &reqwest::Response) {
         let Some(key) = self.rate_key(headers) else {
             return;
         };
-        let status = response.status().as_u16();
-        let get = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-        };
-        let now = logging::now_ms();
-        let after = get("retry-after")
-            .and_then(|value| {
-                value
-                    .parse::<i64>()
-                    .ok()
-                    .map(|seconds| now.saturating_add(seconds.max(0).saturating_mul(1000)))
-                    .or_else(|| {
-                        chrono::DateTime::parse_from_rfc2822(value)
-                            .ok()
-                            .map(|date| date.timestamp_millis())
-                    })
-            })
-            .unwrap_or(0);
-        let reset = if get("x-ratelimit-remaining") == Some("0") {
-            get("x-ratelimit-reset")
-                .and_then(|value| value.parse::<i64>().ok())
-                .map(|seconds| seconds.saturating_mul(1000).saturating_add(1000))
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let until = after.max(reset).max(if status == 403 || status == 429 {
-            now + 60_000
-        } else {
-            0
-        });
-        if until > now {
+        let until = retry_deadline(response.headers(), response.status().as_u16());
+        if until > logging::now_ms() {
             if let Err(error) = task_state::store_value(&key, json!({ "retryAt": until })) {
                 logging::verbose("[Update]", &error);
             }
         }
     }
+}
+
+pub fn retry_deadline(headers: &reqwest::header::HeaderMap, status: u16) -> i64 {
+    let now = logging::now_ms();
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let after = header("retry-after")
+        .and_then(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .map(|seconds| now.saturating_add(seconds.max(0).saturating_mul(1000)))
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc2822(value)
+                        .ok()
+                        .map(|date| date.timestamp_millis())
+                })
+        })
+        .unwrap_or(0);
+    let reset = if header("x-ratelimit-remaining") == Some("0") {
+        header("x-ratelimit-reset")
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|seconds| seconds.saturating_mul(1000).saturating_add(1000))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    after.max(reset).max(if status == 403 || status == 429 {
+        now + 60_000
+    } else {
+        0
+    })
 }
 
 pub fn should_switch(candidate: &Candidate, status: reqwest::StatusCode) -> bool {

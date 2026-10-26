@@ -89,12 +89,16 @@ pub fn models() -> Vec<String> {
 /// 「我不确定该填什么」，替他回到出厂链比把保活关掉更接近本意
 /// （保活链为空等于国际版日活永远只剩保活失败，那不该是一句配置就能造成的）。
 /// 返回归一化后的清单（写盘失败返回 Err，调用方把原因吐给界面）。
-pub fn set_models(list: &[String]) -> Result<Vec<String>, String> {
+pub fn set_models(list: &[String], api_key_id: Option<Option<String>>) -> Result<Vec<String>, String> {
+    let selected = api_key_id.unwrap_or_else(binding_id);
+    if let Some(id) = selected.as_deref() {
+        access_for_id(id).map_err(|error| error.message)?;
+    }
     let picked = normalize(list);
     let value: Vec<String> = if picked.is_empty() { default_models() } else { picked };
     config::update_raw_field(
         CONFIG_KEY,
-        json!({ "models": value }),
+        json!({ "models": value, "apiKeyId": selected }),
     );
     logging::log(
         "[Checkin]",
@@ -103,11 +107,87 @@ pub fn set_models(list: &[String]) -> Result<Vec<String>, String> {
     Ok(value)
 }
 
+pub fn binding_id() -> Option<String> {
+    config::current().raw().get(CONFIG_KEY).and_then(|value| value.get("apiKeyId"))
+        .and_then(Value::as_str).map(str::trim).filter(|id| !id.is_empty()).map(str::to_string)
+}
+
+fn access_for_id(id: &str) -> Result<(crate::server::core::key_scope::KeyScope, crate::server::request_stats::ApiKeyIdentity), crate::server::errors::GatewayError> {
+    use crate::server::core::{api_keys, key_scope::KeyScope};
+    use crate::server::errors::GatewayError;
+    use crate::server::request_stats::ApiKeyIdentity;
+    if id == "env" && config::parse::env_api_key_value().is_some() {
+        return Ok((KeyScope::default(), ApiKeyIdentity { source: "env".to_string(), ..Default::default() }));
+    }
+    let entry = api_keys::list().into_iter().find(|entry| entry.id == id && entry.is_usable())
+        .ok_or_else(|| GatewayError::with_status(401, "保活 API Key 已停用、删除或不可用，请重新选择"))?;
+    Ok((KeyScope::from_entry(&entry), ApiKeyIdentity { id: entry.id, name: entry.name, source: "key".to_string() }))
+}
+
+pub fn authorized_models() -> Result<(Vec<String>, crate::server::request_stats::ApiKeyIdentity), crate::server::errors::GatewayError> {
+    use crate::server::errors::GatewayError;
+    let id = binding_id().ok_or_else(|| GatewayError::with_status(401, "日活保活会调用模型，请先在「保活模型链」中选择 API Key"))?;
+    let (scope, identity) = access_for_id(&id)?;
+    if !scope.allows_provider("workbuddy-intl") {
+        return Err(GatewayError::with_status(403, "保活 API Key 不允许 WorkBuddy 国际版"));
+    }
+    let models = models();
+    if models.is_empty() && scope.restricts_models() {
+        return Err(GatewayError::with_status(403, "受限 API Key 的保活模型链不能为空，请明确填写获准使用的模型"));
+    }
+    if models.iter().any(|model| !scope.allows_model(model)) {
+        return Err(GatewayError::with_status(403, "保活模型链包含所选 API Key 未授权的模型"));
+    }
+    Ok((models, identity))
+}
+
+static REQUEST_STATS: std::sync::OnceLock<std::sync::Arc<crate::server::request_stats::RequestStats>> = std::sync::OnceLock::new();
+
+pub fn install_stats(stats: std::sync::Arc<crate::server::request_stats::RequestStats>) {
+    let _ = REQUEST_STATS.set(stats);
+}
+
+pub fn record_activity(
+    account_id: &str,
+    started_at: i64,
+    payload: &Value,
+    result: &Result<Value, crate::server::errors::GatewayError>,
+    identity: crate::server::request_stats::ApiKeyIdentity,
+) {
+    use crate::server::request_stats::{NewRequestEntry, RequestSource};
+    let Some(stats) = REQUEST_STATS.get() else { return };
+    let body = result.as_ref().ok();
+    let model = body.and_then(|value| value.pointer("/activity/pokeModel")).and_then(Value::as_str)
+        .or_else(|| body.and_then(|value| value.pointer("/activity/webConversation/model")).and_then(Value::as_str)).unwrap_or("");
+    let success = result.as_ref().ok().is_some_and(|value| {
+        value.pointer("/activity/pokeSucceeded").and_then(Value::as_bool) == Some(true)
+            || value.pointer("/activity/webConversation/succeeded").and_then(Value::as_bool) == Some(true)
+    });
+    let mut entry = NewRequestEntry::new(model, if success { 200 } else { 502 });
+    entry.ts = Some(started_at);
+    entry.id = format!("keepalive-{account_id}-{started_at}");
+    entry.account_id = account_id.to_string();
+    entry.provider = Some("workbuddy-intl".to_string());
+    entry.client_model = payload.get("models").and_then(Value::as_array)
+        .map(|models| models.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、")).unwrap_or_default();
+    entry.upstream_model = model.to_string();
+    entry.duration_ms = logging::now_ms() - started_at;
+    entry.is_test = true;
+    entry.source = RequestSource { client: "checkin_keepalive".to_string(), api_key: identity };
+    if !success {
+        entry.status = result.as_ref().err().map(|error| i64::from(error.http_status().as_u16())).unwrap_or(502);
+        entry.error = Some(result.as_ref().err().map(|error| error.message.clone()).unwrap_or_else(|| "日活模型保活未成功，详情见签到记录".to_string()));
+    }
+    stats.record(entry);
+}
+
 /// 对外状态（签到中心快照的 `keepalive` 段与保存响应共用这一份）：
 /// `models` 是当前生效链，`defaultModels` 给界面提示"清空即恢复这份"。
 pub fn state() -> Value {
     json!({
         "models": models(),
         "defaultModels": default_models(),
+        "apiKeyId": binding_id(),
+        "authError": authorized_models().err().map(|error| error.message),
     })
 }

@@ -42,6 +42,7 @@ const ICONS: Record<string, string> = {
   officeace: 'assets/providers/officeace.png',
   orcaterm: 'assets/providers/orcaterm.png',
   chatglm: 'assets/providers/chatglm.png',
+  'deepseek-web': 'assets/providers/deepseek.png',
   modelscope: 'assets/providers/modelscope.png',
   'modelscope-intl': 'assets/providers/modelscope.png',
   atomcode: 'assets/providers/atomcode.png',

@@ -2778,7 +2778,7 @@ async fn send_with_retry(
             }
         };
         if let Some(kind) = images.filter(|_| response.status().is_success()) {
-            match super::images::collect(response, kind, telemetry).await {
+            match super::images::collect(response, kind, transport, telemetry).await {
                 Ok(body) => return Ok(super::images::ImageResponse::Complete(body)),
                 Err(failure) => {
                     let message = failure.body.get("message").and_then(Value::as_str).unwrap_or("图片生成失败");
@@ -2811,7 +2811,18 @@ async fn send_with_retry(
                 }
             }
         }
-        if !adapter.is_error_response(response.status().as_u16(), response.headers()) {
+        let is_error = adapter.is_error_response_async(
+            response.status().as_u16(), response.headers(),
+        ).await.map_err(|error| OutboundFailure {
+            class: UpstreamErrorClass::Fatal {
+                status: error.status_code as u16,
+                message: error.message.clone(),
+                upstream_code: error.upstream_code,
+            },
+            error,
+            stop: true,
+        })?;
+        if !is_error {
             return Ok(super::images::ImageResponse::Live(response));
         }
         let status = response.status().as_u16();

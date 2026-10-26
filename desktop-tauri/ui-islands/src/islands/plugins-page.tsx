@@ -9,7 +9,7 @@ import { InstalledPluginCard, StorePluginCard } from './plugins-cards'
 import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
-import { api, bridge, pluginName, readBase64, toast } from './plugins-shared'
+import { api, bridge, errorMessage, pluginName, readBase64, toast } from './plugins-shared'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
 import { t } from '../i18n'
 
@@ -62,7 +62,7 @@ function PluginsPage(): React.ReactElement {
           else if (operation.done) toast(t('插件包已安装到 v{version}', { version: operation.version }), 'ok')
         }
       } catch (cause) {
-        if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
+        if (mounted.current) setError(errorMessage(cause))
       }
     })()
     loading.current = request
@@ -210,7 +210,7 @@ function PluginsPage(): React.ReactElement {
         {!storePlugins.length && !packs.length ? <div className='rounded-lg border border-border bg-surface px-4 py-5'>
           <p className='text-[13px] font-medium'>{!payload || catalog?.checking
             ? t('正在读取插件列表…') : t('暂无可安装的插件')}</p>
-          <p className='mt-2 text-[12px] text-subtle'>{catalog?.reason || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</p>
+          <p className='mt-2 text-[12px] text-subtle'>{errorMessage(catalog?.reason) || t('可以点击「刷新」读取插件仓库，或从本地 zip 安装插件。')}</p>
         </div> : null}
         {payload ? <Collapsible className='mt-3 rounded-md border border-hairline bg-surface-2'>
           <CollapsibleTrigger render={<Button variant='ghost' />}
@@ -226,7 +226,7 @@ function PluginsPage(): React.ReactElement {
               <span>{t('插件目录')} <code className='break-all'>{payload.pluginsDir}</code></span>
               <span>{t('当前平台')} <code>{payload.target}</code></span>
               <span>{t('协议版本')} {payload.protocol}</span>
-              {catalog?.reason ? <span className='text-destructive'>{catalog.reason}</span> : null}
+              {catalog?.reason ? <span className='text-destructive'>{errorMessage(catalog.reason)}</span> : null}
               {host?.lastError ? <span className='text-destructive'>{host.lastError}</span> : null}
             </div>
           </CollapsibleContent>

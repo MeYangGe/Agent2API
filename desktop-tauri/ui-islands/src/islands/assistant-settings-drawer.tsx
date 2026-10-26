@@ -60,6 +60,7 @@ type Props = {
   failed: boolean
   status: string
   onSave: (next: AssistantConfig, note?: string) => void
+  apiKeyField: React.ReactNode
 }
 
 /** 一块配置卡 */
@@ -82,7 +83,7 @@ function Section({ title, sub, extra, children }: {
 }
 
 export function AssistantSettingsDrawer({
-  open, onOpenChange, config, models, modelAvailable, modelsReady, modelWarning, onRefreshModels, busy, failed, status, onSave,
+  open, onOpenChange, config, models, modelAvailable, modelsReady, modelWarning, onRefreshModels, busy, failed, status, onSave, apiKeyField,
 }: Props) {
   const [editorOpen, setEditorOpen] = React.useState(false)
   const [editorDraft, setEditorDraft] = React.useState('')
@@ -136,6 +137,7 @@ export function AssistantSettingsDrawer({
 
             {/* ① 默认行为 */}
             <Section title={t('默认行为')} sub={t('新建对话时使用')}>
+              {apiKeyField}
               <div className='asst-field'>
                 <Label>{t('模型')}</Label>
                 {/* 与聊天框里的模型列表同一份数据（父组件透传 names）：两处的

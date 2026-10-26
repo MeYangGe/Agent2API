@@ -266,18 +266,14 @@ function AccountsPage() {
       const to = at + (drop.index === visible.length ? 1 : 0)
       if (to === from) return
       const next = [...rest.slice(0, to), moved, ...rest.slice(to)]
-      // 拼队列用 `queueMembers`（真实转发顺序）而不是 `members`（当前排序规则下的
-      // 显示顺序）：拿显示顺序拼队列，拖一次整组就会把规则排出来的先后写成真实优先级。
-      // 组内行同样（见下面的分支）。
+      // 整组移动不覆盖组内手动兜底；自动消耗规则仍由网关动态执行。
       const queue = next.flatMap(group => group.queueMembers.map(account => account.id))
       void reorderQueue(queue, t('{name} 移到第 {rank} 顺位', { name: moved.label, rank: to + 1 }))
       return
     }
     const group = current.find(item => item.provider === drop.provider)
     if (!group) return
-    // 组内拖动只在「没有排序规则」时才走得通（起拖那一刻已被 isRowLocked 拦下），
-    // 此时 queueMembers 与 members 逐项相同；仍按 queueMembers 取，是为了让
-    // 「拼队列只用真实转发顺序」这条纪律在这个分支上也成立，而不是靠调用时机。
+    // 自动规则开启时不接受组内拖动；关闭后调整的是手动消耗顺序。
     const from = group.queueMembers.findIndex(account => account.id === drop.accountId)
     if (from < 0) return
     const moved = group.queueMembers[from]

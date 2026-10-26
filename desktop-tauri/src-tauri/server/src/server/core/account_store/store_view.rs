@@ -44,7 +44,7 @@ use crate::server::core::proxies::describe_account_proxy;
 /// 自定义提供商的转发**仍在网关里**（`core::upstream::provider_loop` 按
 /// `custom-` 前缀直连，不经插件），它们没有插件可装 —— 按执行体判会把
 /// 用户自己建的 API 全藏起来。所以先看「是不是内置家的 id」。
-pub(super) fn account_visible(provider: &str) -> bool {
+pub(crate) fn account_visible(provider: &str) -> bool {
     if crate::server::core::providers::kind_from_id(provider).is_none() {
         return true;
     }
@@ -344,7 +344,7 @@ impl AccountStore {
             .unwrap_or(Value::Null);
         // 隐藏摘要独立于可见账号数量，混有自定义账号时也必须能解释缺失的部分。
         let hidden = super::hidden_accounts::summary(hidden);
-        json!({
+        let mut snapshot = json!({
             "currentAccountId": global_current,
             "currentAccountIds": Value::Object(current_ids),
             "accounts": visible
@@ -353,7 +353,9 @@ impl AccountStore {
                 .collect::<Vec<_>>(),
             "providers": self.provider_summary(&visible),
             "hiddenAccounts": hidden,
-        })
+        });
+        crate::server::core::account_order::enrich_snapshot(&mut snapshot);
+        snapshot
     }
 
     /// 记录 → 公开形态（**按 provider 分派**）。

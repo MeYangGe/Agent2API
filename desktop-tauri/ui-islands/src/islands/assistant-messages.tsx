@@ -28,6 +28,9 @@ import { Spinner } from '@ui'
 import { AssistantImageResults } from '../../../ui-shared/assistant-image-results'
 import type { ImageAsset } from '../../../ui-shared/assistant-image-tools'
 import { loadAssistantImage } from './assistant-image-api'
+import { AssistantMessageActions } from '../../../ui-shared/assistant-message-actions'
+
+type MessageActions = { disabled?: boolean; onEdit: (id: string, text: string) => Promise<void>; onDelete: (id: string) => Promise<void>; onFork: (id: string) => Promise<void> }
 
 export type ToolCardItem = {
   kind: 'tool'
@@ -43,8 +46,8 @@ export type ToolCardItem = {
 }
 
 export type UiMessage =
-  | { kind: 'user'; text: string; images?: string[] }
-  | { kind: 'bot'; text: string; streaming?: boolean }
+  | { kind: 'user'; id?: string; text: string; images?: string[] }
+  | { kind: 'bot'; id?: string; model?: string; text: string; streaming?: boolean }
   | ToolCardItem
   | { kind: 'notice'; text: string; bad?: boolean }
   | { kind: 'images'; images: ImageAsset[] }
@@ -79,9 +82,10 @@ function timeLabel(): string {
 
 /* ─── 用户消息 ─────────────────────────────────────────────── */
 
-function UserMessage({ text, images }: { text: string; images?: string[] }) {
+function UserMessage({ text, images, children }: { text: string; images?: string[]; children?: React.ReactNode }) {
   return (
     <div className='asst-msg user'>
+      <div className='flex min-w-0 flex-col items-end'>
       <div className='bubble'>
         {images?.length ? (
           <div className='asst-msg-atts'>
@@ -92,33 +96,31 @@ function UserMessage({ text, images }: { text: string; images?: string[] }) {
         ) : null}
         {text ? <p>{text}</p> : null}
       </div>
+      {children}
+      </div>
     </div>
   )
 }
 
 /* ─── 助手消息 ─────────────────────────────────────────────── */
 
-function BotMessage({ text, streaming }: { text: string; streaming?: boolean }) {
-  // 空正文且这一轮已经结束 = 这条消息没有任何可显示的内容（模型没说话、直接
-  // 调工具，这是最常见的一种形态）。早先这里只看 `text`，于是这种消息会永久
-  // 挂着三个点的思考动画 —— 工具卡都执行完了、下一轮回答也出来了，那一行还在
-  // 转，看起来像「加载永远不结束」。
-  // `streaming` 期间仍然显示三个点：那是真的在等上游第一个 token。
-  if (!text && !streaming) return null
+function BotMessage({ text, streaming, model, children }: { text: string; streaming?: boolean; model: string; children?: React.ReactNode }) {
+  if (!text && !streaming && !children) return null
   return (
     <div className='asst-msg bot'>
       <Avatar />
       <div className='body'>
         <div className='who'>
-          <b>{t('助手')}</b>
+          <b>{model}</b>
           <span>{timeLabel()}</span>
         </div>
         {text ? (
           <HtmlContent className='md' html={renderMarkdown(text)} />
-        ) : (
+        ) : streaming ? (
           <Spinner className='text-muted-foreground' aria-label={t('正在思考…')} />
-        )}
+        ) : null}
         {streaming && text ? <span className='asst-caret' /> : null}
+        {children}
       </div>
     </div>
   )
@@ -250,18 +252,26 @@ function planRowCount(plan?: ToolPlan): number {
 
 /* ─── 汇总渲染 ─────────────────────────────────────────────── */
 
-export function MessageList({ messages, onConfirm }: {
+export function MessageList({ messages, onConfirm, model, actions }: {
   messages: UiMessage[]
   onConfirm: (run: boolean) => void
+  model: string
+  actions: MessageActions
 }) {
   return (
     <>
       {messages.map((message, index) => {
         if (message.kind === 'user') {
-          return <UserMessage key={index} text={message.text} images={message.images} />
+          return <UserMessage key={message.id || index} text={message.text} images={message.images}>
+            {message.id ? <AssistantMessageActions text={message.text} t={t} disabled={actions.disabled}
+              onEdit={text => actions.onEdit(message.id!, text)} onDelete={() => actions.onDelete(message.id!)} /> : null}
+          </UserMessage>
         }
         if (message.kind === 'bot') {
-          return <BotMessage key={index} text={message.text} streaming={message.streaming} />
+          return <BotMessage key={message.id || index} text={message.text} streaming={message.streaming} model={message.model || model}>
+            {message.id && !message.streaming ? <AssistantMessageActions text={message.text} t={t} disabled={actions.disabled}
+              onEdit={text => actions.onEdit(message.id!, text)} onDelete={() => actions.onDelete(message.id!)} onFork={() => actions.onFork(message.id!)} /> : null}
+          </BotMessage>
         }
         if (message.kind === 'images') {
           return <AssistantImageResults key={index} images={message.images} load={loadAssistantImage} t={t} />

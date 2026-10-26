@@ -9,14 +9,14 @@ export function imageApiSections(code: ReturnType<typeof apiExampleCode>): ApiSe
       id: 'image-generation', title: t('图片生成与共用参数'), path: 'POST /v1/images/generations',
       description: t('根据文字提示生成图片。请求使用 JSON，生成与编辑均只支持非流式响应。'),
       paragraphs: [
-        t('目前小浣熊、Loomy、Antigravity 已接入图片生成；Loomy 与 Antigravity 同时接入参考图编辑，小浣熊暂不支持编辑。需要当前提供商插件包含对应能力，并且账号、模型和 Key 授权可用。'),
-        t('小浣熊使用 raccoon-image；Loomy 使用目录中的 kind=image 模型；Antigravity 使用目录中的 gemini-*-image 模型。实际 model 值以当前 /v1/models 为准，不要直接复制官方 API 的默认模型名。'),
+        t('目前小浣熊、Loomy、Antigravity、ModelScope 已接入图片生成；Loomy、Antigravity 与 ModelScope 同时接入参考图编辑，小浣熊暂不支持编辑。需要当前提供商插件包含对应能力，并且账号、模型和 Key 授权可用。'),
+        t('小浣熊使用 raccoon-image；Loomy 使用目录中的 kind=image 模型；Antigravity 使用目录中的 gemini-*-image 模型；ModelScope 使用已确认支持的 Qwen-Image、Z-Image 或 Qwen-Image-Edit 型号。实际 model 值以当前 /v1/models 为准，不要直接复制官方 API 的默认模型名。'),
         t('下表是网关接受的参数范围，不是所有提供商都支持的范围。生成与编辑共用这些字段，具体上游可能进一步拒绝数量、质量、风格、背景或尺寸。'),
       ],
       fields: [
         { name: 'prompt', type: 'string', description: t('必填且不能为空，最多 32000 个字符。描述主体、构图、风格和修改目标；当前不支持 mask，编辑范围也应在提示词中说明。') },
         { name: 'model', type: 'string', description: t('建议显式填写图片模型 id。省略时从当前 Key 可用目录中选择支持本次操作的图片模型，不使用对话默认模型；没有对应能力模型时返回 503。') },
-        { name: 'n', type: 'integer', description: t('网关接受 1–10，默认 1；Antigravity 仅支持 n=1。上游返回数量不足时网关报错，不会为了凑数再次调用图片生成。') },
+        { name: 'n', type: 'integer', description: t('网关接受 1–10，默认 1；Antigravity 与 ModelScope 仅支持 n=1。上游返回数量不足时网关报错，不会为了凑数再次调用图片生成。') },
         { name: 'size', type: 'string', description: t('可省略，或使用 auto、WIDTHxHEIGHT，例如 1024x1024。网关校验边长 1–8192，提供商可能进一步限制宽高比与分辨率，不保证精确像素输出。') },
         { name: 'response_format', type: 'b64_json | url', description: t('默认 b64_json，返回可直接解码的图片 base64；url 返回上游签名链接或网关临时下载链接。不是图片文件编码。') },
         { name: 'output_format', type: 'png | jpeg | webp', description: t('网关可将实际图片转换为指定文件编码。省略时保留上游图片格式；需要固定扩展名时建议显式填写。JPEG 无法保留透明通道。') },
@@ -29,6 +29,8 @@ export function imageApiSections(code: ReturnType<typeof apiExampleCode>): ApiSe
         { name: 'stream / partial_images', type: 'false / 0', description: t('仅可省略或设为 stream=false、partial_images=0。当前不支持图片事件流、渐进图片或流式部分结果。未知参数会被拒绝，不会静默忽略。') },
       ],
       points: [
+        t('ModelScope 使用官方异步任务接口，创建后只查询同一任务，不会为了等待结果重新提交。单次 n=1；size 可省略、设为 auto，或指定边长 64–2048 的 WIDTHxHEIGHT，具体型号可能进一步限制。'),
+        t('ModelScope 不支持 style、mask 与 input_fidelity；quality 仅接受省略、auto 或 standard，background 仅接受省略、auto 或 opaque，moderation 仅接受省略或 auto。风格与修改目标请写入 prompt。'),
         t('Antigravity 支持宽高比 1:1、2:3、3:2、3:4、4:3、4:5、5:4、9:16、16:9、21:9，尺寸会映射到原生 1K / 2K / 4K 档。请求最长边 ≤1792 为 1K，1793–3072 为 2K，3073–4096 为 4K；超过 4096 会被该提供商拒绝。'),
         t('Antigravity 的 size=auto 生成使用 1:1、1K；参考图编辑使用 1K 且不强制正方形。模型版本可能有更严格的输出限制；宽高比需接近支持值，不能任意指定像素尺寸。'),
       ],
@@ -46,7 +48,7 @@ export function imageApiSections(code: ReturnType<typeof apiExampleCode>): ApiSe
         { name: 'image / image[]', type: 'multipart file', description: t('单图可用 image=@reference.png，多图重复提交 image[]。也兼容 images、images[] 与 image[0] 这类数字索引字段；普通参数不能重复提交。') },
         { name: 'images[].image_url', type: 'JSON string', description: t('JSON 的 images 是对象数组，每项只能包含 image_url。接受完整 HTTP(S) URL、data:image/...;base64,...，或先前响应返回的完整网关临时图片链接；不接受裸 base64、相对路径、file_id 或本地文件路径。') },
         { name: 'PNG / JPEG / WebP', type: 'image', description: t('只支持这三种可解码图片格式，校验实际文件内容而不是仅看扩展名；单张最多 10 MiB，边长最多 8192。') },
-        { name: 'images', type: 'array · 1–16', description: t('网关最多接受 16 张参考图。Antigravity 的 gemini-2.5-* 模型最多 3 张，其他当前接入的 Antigravity 图片模型最多 14 张；Loomy 还可能受上游模型限制。') },
+        { name: 'images', type: 'array · 1–16', description: t('网关最多接受 16 张参考图。Antigravity 的 gemini-2.5-* 模型最多 3 张，其他当前接入的 Antigravity 图片模型最多 14 张；ModelScope 接受 1–3 张参考图；Loomy 还可能受上游模型限制。') },
         { name: 'multipart / JSON', type: '16 MiB / 14 MiB', description: t('编辑请求上传总大小最多 16 MiB。参考图转为 data URL 后，内联图片与最终 JSON 请求还受 14 MiB 上限；base64 约增加三分之一体积，因此多张各小于 10 MiB 也可能超限。') },
       ],
       points: [

@@ -682,6 +682,10 @@ pub fn snapshot(store: &AccountStore) -> Value {
         limiter_states.insert(id.to_string(), limiter::types::json_of(&limiter::evaluate::states(account, &source_facts, &counts, now)));
         limiter_models.entry(provider.to_string()).or_insert_with(|| Value::Array(limiter::sources::account_models(provider)));
     }
+    let visible_accounts: Vec<Value> = list.into_iter().flatten()
+        .filter(|account| crate::server::core::account_store::store_view::account_visible(
+            crate::server::core::routing::provider_of(account),
+        )).cloned().collect();
     json!({
         "at": at,
         "results": rows,
@@ -691,6 +695,9 @@ pub fn snapshot(store: &AccountStore) -> Value {
         "limiterStates": limiter_states,
         "quotaSources": quota_sources,
         "limiterModels": limiter_models,
+        "sorting": crate::server::core::account_order::sorting(
+            &visible_accounts, now,
+        ),
     })
 }
 

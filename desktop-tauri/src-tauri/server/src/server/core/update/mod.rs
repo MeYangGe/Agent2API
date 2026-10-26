@@ -28,7 +28,7 @@ use crate::server::{config, logging};
 
 pub use version::{
     api_base, assert_downloadable, compare_versions, custom_api_base, desktop_shell,
-    installer_kind, is_prerelease_version, pick_android_apk, pick_asset_by_name, pick_installer, safe_file_name,
+    installer_kind, is_prerelease_version, parse_version, pick_android_apk, pick_asset_by_name, pick_installer, safe_file_name,
     server_bundle_name, set_desktop_shell, UpdateError, DEFAULT_REPO, GITHUB_API,
     MAX_INSTALLER_BYTES, SOURCE_REPO,
 };
@@ -40,14 +40,8 @@ pub use token::{set_token, status_json};
 /// 请求 GitHub 的 UA（Node 版字面量，随项目改名同步）
 const USER_AGENT: &str = "agent2api-local-proxy";
 
-/// 两次「读更新源索引」之间的最小间隔：30 分钟。
-///
-/// 索引只是一行「构建产物在哪个仓库」，几乎不变；而更新检查可能几分钟一轮。
-/// 每轮都读一次 raw.githubusercontent.com 纯属白打（顺带消耗限额）。30 分钟
-/// 意味着「换了构建仓库」最迟半小时内被所有在线用户拿到，代价可接受。
-///
-/// 读失败也等这么久再试：失败多半是网络不通，立刻重试只会连着失败。
-const INDEX_RETRY_MS: i64 = 30 * 60 * 1000;
+/// 强制更新策略独立于用户的普通版本检查开关，每五分钟刷新一次。
+const INDEX_RETRY_MS: i64 = 5 * 60 * 1000;
 
 /// 本应用的当前版本号（编译期取自 Cargo.toml，发布流程与 tauri.conf.json
 /// 同步更新）。壳的 `checkUpdate` 命令用的是运行时 package_info —— 两者常态
@@ -118,6 +112,7 @@ struct Inner {
     /// 上次尝试解析索引的时刻（毫秒，0 = 还没试过）。与 [`INDEX_RETRY_MS`]
     /// 一起做节流。
     index_checked_at: i64,
+    app_index: index::AppIndex,
     download_dir: PathBuf,
     /// 容器内更新已应用、但进程还没重启（只活在内存里，重启即自然清零）。
     ///
@@ -142,7 +137,8 @@ impl UpdateManager {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let repository = explicit.clone().unwrap_or_else(|| DEFAULT_REPO.to_string());
+        let app_index = if explicit.is_some() { index::AppIndex::default() } else { index::cached() };
+        let repository = explicit.clone().unwrap_or_else(|| app_index.repo.clone());
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 task: None,
@@ -152,6 +148,7 @@ impl UpdateManager {
                 repository_explicit: explicit.is_some(),
                 repository_from_index: false,
                 index_checked_at: 0,
+                app_index,
                 download_dir: directory.join("updates"),
                 pending_restart: false,
             })),
@@ -192,43 +189,37 @@ impl UpdateManager {
     /// 注意节流只影响「多久读一次」，不影响「解析后的值」：一旦读到过，就用它
     /// 覆盖 `repository` 并一直用下去（进程重启后重新读）。
     async fn resolve_repository(&self) -> String {
-        let (current, explicit, last_checked) = {
-            let guard = self.lock();
-            (
-                guard.repository.clone(),
-                guard.repository_explicit,
-                guard.index_checked_at,
-            )
-        };
-        // 环境变量显式指定：不读索引，用户说了算
-        if explicit {
-            return current;
-        }
-        // 节流：读成功后这个间隔内不再读；读失败同样等这么久 —— 失败多半是
-        // 网络不通，立刻重试只会连着失败
+        let (current, explicit) = { let guard = self.lock(); (guard.repository.clone(), guard.repository_explicit) };
+        if explicit { return current; }
         let now = logging::now_ms();
-        if last_checked != 0 && now.saturating_sub(last_checked) < INDEX_RETRY_MS {
-            return current;
-        }
-        // 到点：读一次索引（读不到会静默回落内置默认值，见 index 模块头）
-        let resolved = index::resolve_app_repo().await;
-        let from_index = resolved != DEFAULT_REPO;
-        if let Ok(mut guard) = self.inner.lock() {
-            // 「换过地址」说一次就够，不必每轮都记（这是 verbose 档）
-            if guard.repository != resolved {
-                logging::verbose(
-                    "[Update]",
-                    &format!(
-                        "更新源仓库改为 {resolved}（{}）",
-                        if from_index { "来自索引" } else { "内置默认值" }
-                    ),
-                );
-            }
-            guard.repository = resolved.clone();
-            guard.repository_from_index = from_index;
+        {
+            let mut guard = self.lock();
+            if guard.index_checked_at != 0 && now.saturating_sub(guard.index_checked_at) < INDEX_RETRY_MS { return current; }
             guard.index_checked_at = now;
         }
-        resolved
+        let resolved = index::resolve().await;
+        let repository = resolved.repo.clone();
+        let changed = {
+            let mut guard = self.lock();
+            let changed = guard.repository != repository;
+            guard.repository = repository.clone();
+            guard.repository_from_index = true;
+            guard.app_index = resolved;
+            changed
+        };
+        if changed { logging::verbose("[Update]", &format!("更新源仓库改为 {repository}（来自索引）")); }
+        repository
+    }
+
+    pub fn force_update(&self, current: &str) -> Option<Value> {
+        let guard = self.lock();
+        if guard.repository_explicit { return None; }
+        guard.app_index.required(current)
+    }
+
+    pub async fn refresh_policy(&self, current: &str) -> Value {
+        self.resolve_repository().await;
+        json!({ "currentVersion": current, "forceUpdate": self.force_update(current), "repository": self.repository() })
     }
 
     /// 下载目录（`{config_dir}/updates`）—— 与壳侧 `update::download_dir()` 同源
@@ -250,10 +241,11 @@ impl UpdateManager {
             )
         };
         let channels = config::update_channels();
+        let force_update = self.force_update(current_version);
         let latest = latest.filter(|release| {
             let prerelease = release["prerelease"] == true
                 || version::is_prerelease_version(release["tag"].as_str().unwrap_or(""));
-            channels.accepts(prerelease)
+            force_update.is_some() || channels.accepts(prerelease)
         });
         let latest_tag = latest
             .as_ref()
@@ -293,6 +285,7 @@ impl UpdateManager {
             }
         };
         json!({
+            "forceUpdate": force_update,
             "currentVersion": if version.is_empty() { Value::Null } else { Value::String(version) },
             "latestVersion": if latest_tag.is_empty() { Value::Null } else { Value::String(latest_tag.to_string()) },
             // 无法解析版本号时不谎报「有更新」，界面按 null 显示为「无法比较」
@@ -509,8 +502,25 @@ pub fn global_check_key() -> String {
         .unwrap_or_else(|| format!("updateCheck:{DEFAULT_REPO}"))
 }
 
+pub fn required_update() -> Option<Value> {
+    GLOBAL.get().and_then(|manager| manager.force_update(CURRENT_VERSION))
+}
+
 /// 初始化进程级管理器（幂等）
 pub fn init_global(manager: UpdateManager) -> UpdateManager {
-    let _ = GLOBAL.set(manager.clone());
+    let plugins_before = crate::server::core::plugin_host::settings::current();
+    if config::sync_installed_update_channel(CURRENT_VERSION) {
+        manager.invalidate_channel();
+        crate::server::core::plugin_host::settings::notify_changed(plugins_before);
+    }
+    if GLOBAL.set(manager.clone()).is_ok() {
+        let updater = manager.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = updater.refresh_policy(CURRENT_VERSION).await;
+                tokio::time::sleep(std::time::Duration::from_millis(INDEX_RETRY_MS as u64)).await;
+            }
+        });
+    }
     manager
 }
