@@ -515,7 +515,12 @@ pub fn init_global(manager: UpdateManager) -> UpdateManager {
     }
     if GLOBAL.set(manager.clone()).is_ok() {
         let updater = manager.clone();
-        tokio::spawn(async move {
+        // 必须走 `crate::spawn_task`：本函数由 `ServerState::bootstrap` 调用，
+        // 而 headless（容器 / 命令行）的 bootstrap 跑在**建 Tokio 运行时之前**
+        // 的主线程上 —— 裸 `tokio::spawn` 在那里直接 panic，release 是
+        // panic=abort，进程当场退出，restart 策略把它拉起来又是同一次崩溃
+        // （v3.3.0-beta.5 容器内更新后无限重启的根因）。
+        crate::spawn_task(async move {
             loop {
                 let _ = updater.refresh_policy(CURRENT_VERSION).await;
                 tokio::time::sleep(std::time::Duration::from_millis(INDEX_RETRY_MS as u64)).await;
