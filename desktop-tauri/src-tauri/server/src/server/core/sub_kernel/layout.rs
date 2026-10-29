@@ -344,7 +344,7 @@ fn extract_binary(archive: &Path, dest: &Path) -> Result<(), String> {
         let mut output = std::fs::File::create(dest)
             .map_err(|error| format!("创建内核文件失败（{}）: {error}", dest.display()))?;
         use std::io::Read;
-        let written = std::io::copy(&mut decoder.by_ref().take(256 * 1024 * 1024 + 1), &mut output)
+        let written = std::io::copy(&mut Read::by_ref(&mut decoder).take(256 * 1024 * 1024 + 1), &mut output)
             .map_err(|error| format!("解压内核失败（gzip 数据损坏）: {error}"))?;
         if written > 256 * 1024 * 1024 { return Err("内核解压后超过 256 MiB，已拒绝安装".to_string()); }
         output
