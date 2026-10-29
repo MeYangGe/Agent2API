@@ -16,7 +16,7 @@ import { RouteReplayFacts } from './routing-replay'
 import type { ReplayRow, RouteDecision } from './routing-types'
 
 /**
- * 「请求日志」页的**详情弹窗**（请求详情 / 预览对话 / 原始报文 · 三标签）。
+ * 「请求日志」页的**详情弹窗**（请求详情 / 路由回放 / 预览对话 / 原始报文 · 四标签）。
  *
  * 替换 ui/request-detail.js —— 那份用 innerHTML 拼 .modal-mask / .seg /
  * .req-detail-* 那套老类名，弹窗骨架还常驻 index.html 的 #req-detail-modal。
@@ -24,25 +24,30 @@ import type { ReplayRow, RouteDecision } from './routing-types'
  * `.close()`，调用方（requests-panel.js 的「详情」按钮）一行都不用改；结构全由
  * React 渲染，不再读写 #req-detail-modal 一族 id（那段静态 DOM 由集成方删除）。
  *
- * ── 三个标签的数据来源（与旧实现逐条对齐）────────────────────
+ * ── 四个标签的数据来源 ─────────────────────────────────────
  *   ① 请求详情（默认）—— 列表行数据的完整展开：时间 / 状态 / 耗时 / 模型 /
  *      提供商 / 账号 / 令牌 / 错误 / 尝试明细 / 敏感词命中。数据来自**调用方
  *      传进来的行对象** `open(id, row)`（列表当前一屏的数据，不发任何请求）；
  *      row 缺失（列表在弹窗打开前恰好刷新过）时显示「数据已刷新，请重试」。
- *   ② 预览对话 —— 调 `getStatsRequestRaw(id)` 拿下游原文（请求体 + 最终响应），
+ *   ② 路由回放 —— 选路层落库的决策快照（行对象的 `route` 列）：候选顺序 /
+ *      被跳过的账号 / 最终承载，回答「当时为什么这么排」。与「尝试明细」互补
+ *      （那边回答「试了谁、成没成」）。同样只吃 row，不发请求；旧行或转发前
+ *      就失败的请求没有快照时**整个标签隐藏**（与原始报文同一取舍：缺了就别
+ *      留一个空标签）。末尾的「在路由页查看」跳去路由页的请求跟踪视图。
+ *   ③ 预览对话 —— 调 `getStatsRequestRaw(id)` 拿下游原文（请求体 + 最终响应），
  *      解析与气泡渲染全在 conversation-preview.js（纯函数，这里只取数与给空态）。
  *      正文只在**调试模式开启期间**的请求上采集（与上游报文同一个开关，
  *      对齐 OmniProxy 的口径），所以 404 / 双空给空态：最常见的原因是
  *      「请求发生时开关没开」，其次是已被清理 —— 都不是错误。
- *   ③ 原始报文 —— 调试模式保存的**上游**原始报文（`getDebugTraffic` 的四段：
+ *   ④ 原始报文 —— 调试模式保存的**上游**原始报文（`getDebugTraffic` 的四段：
  *      请求头 / 请求体 / 响应头 / 响应体，凭据已脱敏），原样保留为四块竖排。
  *      调试模式没开（或该条已被淘汰出最近 500 条）时**整个标签隐藏** ——
- *      它本来就是可选的排障数据，缺了不该让用户在两个空标签里找内容。
+ *      它本来就是可选的排障数据，缺了不该让用户在空标签里找内容。
  *
  * ── 迁移里最需要保持的三条取舍 ──────────────────────────────
  *   · 两个接口在 open 时**并行**发起，谁到了渲染谁（各自动自己那块与标签条，
  *     互不阻塞）；
- *   · **切换标签不发任何请求**，只切显示 —— 三个 pane 始终挂载、用 hidden 切
+ *   · **切换标签不发任何请求**，只切显示 —— 四个 pane 始终挂载、用 hidden 切
  *     display，pane 里的 DOM（含气泡里 <details> 的展开态）原样保留；滚动位置
  *     另由 scrollTops 记 / 还原（display:none 会把滚动容器的高度塌掉、归零）；
  *   · 快速连点两条详情时**只认最后一次 open**（模块级 seq 作 token），
@@ -62,15 +67,16 @@ import type { ReplayRow, RouteDecision } from './routing-types'
  */
 /* ─── 常量与类型 ─────────────────────────────── */
 
-/** 三个标签。`raw` 的显隐由调试报文的拉取结果决定，所以它不参与「默认选中」 */
-type TabKey = 'detail' | 'preview' | 'raw'
+/** 四个标签。`route` / `raw` 的显隐由各自的数据是否可用决定，所以都不参与「默认选中」 */
+type TabKey = 'detail' | 'route' | 'preview' | 'raw'
 
 const TAB_OPTIONS: readonly SegmentedControlOption<TabKey>[] = [
   { value: 'detail', label: t('请求详情') },
+  { value: 'route', label: t('路由回放') },
   { value: 'preview', label: t('预览对话') },
   { value: 'raw', label: t('原始报文') },
 ]
-/** 默认标签恒为「请求详情」（旧实现同此；`raw` 到达前根本不在选项里） */
+/** 默认标签恒为「请求详情」（旧实现同此；`route` / `raw` 到达前根本不在选项里） */
 const DEFAULT_TAB: TabKey = 'detail'
 
 /** 尝试明细的一行（后端 AttemptDetail 里用得到的字段） */
@@ -283,6 +289,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** 这条请求有没有选路快照（旧行 / 转发前就失败的行是 null）：决定「路由回放」标签是否出现 */
+function hasRoute(row: RequestRow | null | undefined): row is RequestRow & { route: RouteDecision } {
+  return isPlainObject(row?.route)
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -457,20 +468,25 @@ function AttemptsTable({ row }: { row: RequestRow }) {
   )
 }
 /**
- * 路由回放：这条请求转发时，候选账号按当时的策略怎么排、为什么是它先上。
- * 数据是选路层落库的决策快照（`route` 列），与「尝试明细」互补 —— 那边回答
- * 「试了谁、成没成」，这边回答「当时为什么这么排」。旧行 / 转发前就失败的
- * 请求没有快照（null），不渲染这一段。
+ * 标签 ② 的内容：路由回放。这条请求转发时，候选账号按当时的策略怎么排、为什么
+ * 是它先上。数据是选路层落库的决策快照（`route` 列），与「尝试明细」互补 ——
+ * 那边回答「试了谁、成没成」，这边回答「当时为什么这么排」。
+ *
+ * 旧实现是详情表格里的一行（标签 ① 的最后一行），挪成独立标签后队列能占满弹窗
+ * 宽度、不用在 76px 的行标题右侧挤成一条窄列 —— 所以这里**不再传 compact**，
+ * 与路由页请求跟踪里的同一份快照（非紧凑排版）保持同一观感。
+ * 没有快照（旧行 / 转发前就失败）时整个标签不出现，判据是 hasRoute。
  */
-function RouteReplay({ row }: { row: RequestRow }) {
-  if (!row.route || typeof row.route !== 'object' || Array.isArray(row.route)) return null
-  return <>
-    <RouteReplayFacts route={row.route as RouteDecision} compact
-      accountId={String(row.accountId || '')} accountName={String(row.accountName || '')} />
-    <Button variant='outline' size='sm' className='mt-2' onClick={() => {
-      void window.wbRoutingPanel?.openReplay(row as unknown as ReplayRow)
-    }}>{t('在路由页查看')}</Button>
-  </>
+export function RequestRoutePane({ row }: { row: RequestRow & { route: RouteDecision } }) {
+  return (
+    <div className='flex flex-col items-start gap-3'>
+      <RouteReplayFacts route={row.route}
+        accountId={String(row.accountId || '')} accountName={String(row.accountName || '')} />
+      <Button variant='outline' size='sm' onClick={() => {
+        void window.wbRoutingPanel?.openReplay(row as unknown as ReplayRow)
+      }}>{t('在路由页查看')}</Button>
+    </div>
+  )
 }
 
 /* ─── 标签 ①：请求详情（数据全部来自 row）────── */
@@ -515,10 +531,8 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
             total: fmtTokens(row.totalTokens),
             cache: fmtTokens(row.cacheReadTokens),
           })}
-          {/* 生成速度跟在缓存读后面（与列表用量列的落点同一语义）；失败行 token
-              清零，fmtTokensPerSecond 给空串，自动省掉 */}
-          {speed ? <span title={SPEED_TIP}> · {speed}</span> : null}
         </Field>
+        <Field label={t('速度')}><span title={SPEED_TIP}>{isRunning(row) ? '—' : speed || '—'}</span></Field>
         {/* 测试发起的请求**按需多一行**：它是这一条明细的性质（走的是真实转发链路、但不进报表），
             正常转发的行不必为此多读一行「正常转发」 —— 那种字段每个租户都有时等于没有 */}
         {row.isTest ? (
@@ -538,7 +552,6 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
           ) : '—'}
         </Field>
         <Field label={t('尝试明细')}><AttemptsTable row={row} /></Field>
-        {row.route ? <Field label={t('路由回放')}><RouteReplay row={row} /></Field> : null}
         <Field label={t('敏感词')}>
           {/* 命中标签（与列表「敏」标签同一套紫，这里展开写词与次数） */}
           {Array.isArray(row.sensitiveHits) && row.sensitiveHits.length ? (
@@ -577,7 +590,7 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
   const aliveRef = React.useRef(true)
   /** 滚动容器（DialogBody）；切换标签时在这里记 / 还原各 pane 的滚动位置 */
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
-  const scrollTops = React.useRef<Record<TabKey, number>>({ detail: 0, preview: 0, raw: 0 })
+  const scrollTops = React.useRef<Record<TabKey, number>>({ detail: 0, route: 0, preview: 0, raw: 0 })
 
   /** 迟到的响应判定：不是最新一代（或已卸载）就丢弃 */
   const isStale = React.useCallback(() => !aliveRef.current || token !== seq, [token])
@@ -646,6 +659,7 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
   /** 切换标签：只切显示，不发请求、不重建 pane */
   function switchTab(next: TabKey) {
     if (next === 'raw' && !isPlainObject(debug)) return // 标签还没出现，点不到就不用防
+    if (next === 'route' && !hasRoute(row)) return
     if (next === active) return
     const body = bodyRef.current
     if (body) scrollTops.current[active] = body.scrollTop
@@ -688,11 +702,12 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
   }
 
   const showRaw = isPlainObject(debug)
-  // 选项集合只在「原始报文是否可用」翻转时换引用，免得每次渲染都换数组把分段控件的
-  // 测量 effect 打醒
+  const showRoute = hasRoute(row)
+  // 选项集合只在「原始报文 / 路由回放是否可用」翻转时换引用，免得每次渲染都换数组把
+  // 分段控件的测量 effect 打醒
   const tabOptions = React.useMemo(
-    () => (showRaw ? TAB_OPTIONS : TAB_OPTIONS.filter(tab => tab.value !== 'raw')),
-    [showRaw]
+    () => TAB_OPTIONS.filter(tab => (tab.value !== 'raw' || showRaw) && (tab.value !== 'route' || showRoute)),
+    [showRaw, showRoute]
   )
 
   return (
@@ -705,10 +720,13 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
         <DialogBody ref={bodyRef} className='gap-3'>
           <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
             aria-label={t('详情内容')} className='self-start' />
-          {/* 三个 pane 常驻（用 hidden 切显示，不卸载）：切换标签时 pane 的 DOM 与展开态
+          {/* 四个 pane 常驻（用 hidden 切显示，不卸载）：切换标签时 pane 的 DOM 与展开态
               原样保留，滚动位置由上面的 layout effect 还原。pane 不标 role="tabpanel" ——
               分段控件是 radiogroup 语义（不是 tablist），孤立的 tabpanel 是残缺结构 */}
           <section hidden={active !== 'detail'}><RequestDetailPane row={row} /></section>
+          {showRoute ? (
+            <section hidden={active !== 'route'}><RequestRoutePane row={row} /></section>
+          ) : null}
           <section hidden={active !== 'preview'}><PreviewPane state={raw} /></section>
           {showRaw ? (
             <section hidden={active !== 'raw'}>

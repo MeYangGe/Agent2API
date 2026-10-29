@@ -176,6 +176,8 @@ export function RecordsTab(): React.ReactElement {
                         {row.date ? <span className="ck-record-date">{row.date}</span> : null}
                       </TableCell>
                       <TableCell>{row.accountName || row.accountId || '—'}</TableCell>
+                      {/* 后端读侧已把 provider id 换成展示名（`qoder-intl`
+                          → 「Qoder 国际版」），这里直接显示 */}
                       <TableCell className="ck-record-source">{row.provider || '—'}</TableCell>
                       <TableCell>
                         <span>{SOURCE_LABEL[row.source ?? ''] ?? row.source ?? '—'}</span>

@@ -496,7 +496,21 @@ impl AccountStore {
     /// 这类记录在网关侧退化成空 token —— 让上层的「需安装插件」文案去说明原因，
     /// 本函数不制造错误（它是被 CRUD 与选路大量复用的纯取值路径）。
     fn session_from_record(&self, record: &StoredAccount) -> Value {
-        let edition = resolve_edition(record.edition().as_deref());
+        // ── edition 的兜底链（issue #380 / #381）─────────────────────
+        // ① 记录里的 edition（顶层 → pluginPublic → pluginSecret，见
+        //    `StoredAccount::edition` 的回落）；
+        // ② 都没有时按 **provider id** 推：`workbuddy-intl` 必然是国际版。
+        //    少了这一档，旧插件（`account_view` 不输出 edition）落库的账号会
+        //    被 `resolve_edition(None)` 判成国内版 —— 计费侧据此把 provider
+        //    反查成 `workbuddy`，余额 / 签到全报「找不到该账号」。
+        let edition = match record.edition() {
+            Some(explicit) => resolve_edition(Some(&explicit)),
+            None => crate::server::core::providers::workbuddy::Region::from_provider_id(
+                &record.provider(),
+            )
+            .map(|region| region.edition())
+            .unwrap_or_else(|| resolve_edition(None)),
+        };
         let resolution = resolve_account_proxy(Some(&record.proxy()));
         let (proxy, proxy_error) = split_resolution(resolution);
         let proxy_error_value = proxy_error
@@ -707,15 +721,16 @@ pub(crate) fn live_desktop_credentials(_record: &StoredAccount) -> Option<(Strin
 
 /// 这条账号记录所属的 provider **是否能承接推理转发**（`ProviderAdapter::supports_chat`）。
 ///
-/// 全局队首要排除「只有账号管理能力」的家（Qoder 在接上推理协议之前就是）：
-/// 它会被顶栏当成当前登录态显示，而「退出登录」按队首**删除账号**。
-/// 判据问适配器，不写死 id —— 于是某家从「只有账号管理」走到「也能转发」时，
-/// 这里一行都不用改；未知 provider id（手改文件塞进来的）按「能转发」处理 ——
-/// 与 `public_account` 的兜底口径一致，不让一条陌生记录把队首派生整个清空。
+/// 全局队首与公开 `chatSupported` 只认真实插件 / 本体执行体的能力，
+/// 不把旧 MissingPlugin 占位或陌生 ID 当成可转发账号。自定义家走独立直连。
 pub(crate) fn forwards_requests(record: &StoredAccount) -> bool {
-    crate::server::core::providers::kind_from_id(&record.provider())
-        .map(|kind| crate::server::core::providers::adapter::adapter_for(kind).supports_chat())
-        .unwrap_or(true)
+    let provider = record.provider();
+    if provider.starts_with(crate::server::core::custom_providers::ID_PREFIX) {
+        return true;
+    }
+    crate::server::core::providers::is_executable_provider(&provider)
+        && crate::server::core::providers::adapter::adapter_by_id(&provider)
+            .is_some_and(|adapter| adapter.supports_chat())
 }
 
 /// 把解析结果拆成 `(proxy, proxyError)`：失败时 proxy 为 null、

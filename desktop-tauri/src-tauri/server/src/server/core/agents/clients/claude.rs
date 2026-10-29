@@ -58,6 +58,9 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             set(&mut settings, &[key], item.clone())?;
         }
     }
+    if settings.get("env").and_then(Value::as_object).is_some_and(|env| env.is_empty())
+        && settings.get("model").is_none() && settings.get("effortLevel").is_none()
+    { return Ok(Vec::new()); }
     profile.native.settings = settings;
     Ok(vec![profile])
 }

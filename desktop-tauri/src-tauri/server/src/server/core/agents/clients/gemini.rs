@@ -27,6 +27,7 @@ pub fn read(path: &Path, value: &Value) -> Result<Vec<Profile>, String> {
         profile.model = env_value(&text, "GEMINI_MODEL").unwrap_or_default();
     }
     profile.api_key = env_value(&text, "GEMINI_API_KEY").unwrap_or_default();
+    if profile.base_url.is_empty() && profile.model.is_empty() && profile.api_key.is_empty() { return Ok(Vec::new()); }
     profile.native.settings =
         json!({ "model": value.get("model"), "security": value.get("security") });
     profile.native.auth = value
@@ -104,7 +105,7 @@ pub fn env_value(text: &str, key: &str) -> Option<String> {
     None
 }
 
-fn merge_env(original: &str, updates: &[(&str, Option<String>)]) -> Result<String, String> {
+pub(super) fn merge_env(original: &str, updates: &[(&str, Option<String>)]) -> Result<String, String> {
     let mut lines = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for line in original.lines() {

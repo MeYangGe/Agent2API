@@ -8,8 +8,8 @@
 .log-filters #req-provider { max-width: 168px; }
 .log-filters #req-model { max-width: 200px; }
 
-/* 十列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / 用时 / 用量 / 错误 / 详情。
-   时间与用时定宽（等宽数字 + tabular-nums，竖着比对才齐），
+/* 十二列：时间 / 提供商·账号 / 重试 / 状态 / 模型 / 客户端 / API Key / 用时 / 速度 / 用量 / 错误 / 详情。
+   时间、用时与速度定宽（等宽数字 + tabular-nums，竖着比对才齐），
    其余占弹性宽度（都是不定长内容，给固定宽度会互相挤）：
    模型 1.3fr（claude-sonnet-4-5 这类名字要放得下），
    用量 1.6fr（两行读数里 in/out/all 最长），超出由省略号收住、完整值进 title。
@@ -28,7 +28,7 @@
 .req-head {
   display: grid;
   grid-template-columns: var(--req-cols,
-    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
+    92px minmax(0, 1.1fr) 52px 96px minmax(0, 1.3fr) 110px 140px 96px 96px minmax(0, 1.6fr) minmax(0, 1.2fr) 60px);
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -77,8 +77,10 @@
 .req-row:last-child { border-bottom: none; }
 .req-row:hover { background: var(--row-hover); }
 
-/* 表头里用时一格跟数值同侧对齐（数值列是右对齐的） */
+/* 表头里用时一格跟数值同侧对齐（用时是右对齐的数值列；速度默认居中，
+   见下面 .req-speed 的说明） */
 .req-head .req-dur { text-align: right; }
+.req-head .req-speed { text-align: center; }
 
 /* 失败行轻微着色，与事件日志 error 行同一手法（不干扰阅读的淡底） */
 .req-row.failed { background: color-mix(in srgb, var(--danger-soft) 45%, transparent); }
@@ -291,7 +293,23 @@
   font-size: 11px;
 }
 
-/* 用量两行：in / out / all 与 缓存读取 / 命中率（生成速度 tok/s 跟在命中率后，同一行）。
+/* 速度：等宽 + tabular-nums，默认居中（与用时不同 —— 这一格只有一读数，
+   居中后与上下行的数字在同一中轴上，比贴右边留一大块空白更好读）。
+   用户仍可在列设置里改回靠右 / 靠左，那时由 ta-* 类覆盖这里。 */
+.req-row .req-speed {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.req-row .req-speed.req-none { color: var(--text-3); }
+
+/* 用量两行：in / out / all 与 缓存读取 / 命中率。
    等宽 + tabular-nums，超出省略（完整读数在 title 里）。 */
 .req-row .req-usage {
   display: flex;
@@ -346,6 +364,7 @@
   .req-head .req-client,
   .req-head .req-api-key,
   .req-head .req-dur,
+  .req-head .req-speed,
   .req-head .req-usage,
   .req-head .req-error-cell { display: none; }
 
@@ -362,7 +381,8 @@
   /* 第四行：客户端（左，跨到详情按钮之前）+ 详情（贴右）。
      客户端不挤进第二行 —— 那一行右侧已经给了用时，96px 装不下「GitHub Copilot」 */
   .req-row .req-client { grid-row: 4; grid-column: 1 / 4; }
-  .req-row .req-api-key { grid-row: 5; grid-column: 1 / 4; }
+  .req-row .req-api-key { grid-row: 5; grid-column: 1 / 3; }
+  .req-row .req-speed { grid-row: 5; grid-column: 3 / 5; }
   .req-row .req-detail { grid-row: 4; grid-column: 4 / 5; justify-self: end; }
   /* 「-」占位不再独占一行：窄窗口下空行比省略号更难解释 */
   .req-row .req-error-cell { display: none; }

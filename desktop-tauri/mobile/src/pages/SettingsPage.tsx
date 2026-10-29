@@ -375,7 +375,7 @@ export function SettingsPage() {
             </span>
             <div className='m-grow'>
               <div className='m-t1'>{t('社区与支持')}</div>
-              <div className='m-t2'>{t('QQ 群 · Telegram · Discord')}</div>
+              <div className='m-t2'>{t('QQ 群 · Telegram')}</div>
             </div>
             <span className='m-chev'>
               <Icon name='chev' />

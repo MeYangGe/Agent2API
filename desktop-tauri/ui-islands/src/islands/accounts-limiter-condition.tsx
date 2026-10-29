@@ -1,13 +1,15 @@
 import * as React from 'react'
 import {
   Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle,
-  Input, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Input, MetricCard, MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
   Field, FieldGroup, FieldLabel,
 } from '@ui'
 import { t } from '../i18n'
-import type { AccountRecord } from './accounts-shared'
+import { numberText, type AccountRecord } from './accounts-shared'
+import { providerOf } from './accounts-domain'
 import type { LimiterCondition, LimiterMetric, LimiterWindow, QuotaSource } from './accounts-limiter-types'
-import { metricLabel, modelsOf, sourceIdentity, sourcesOf } from './accounts-limiter-model'
+import { metricLabel, modelsOf, sourceIdentity, sourceLabel, sourcesOf } from './accounts-limiter-model'
+import { isCreditUnit, usageUnitLabel } from '../../../ui-shared/usage-readings'
 
 const RESET_OPTIONS: Array<{ value: LimiterWindow['reset']; label: () => string }> = [
   { value: 'fixed', label: () => t('固定周期') },
@@ -42,7 +44,7 @@ function draftOf(condition: LimiterCondition): Draft {
   const unit = condition.metric === 'tokens' && condition.threshold % 100_000_000 === 0 ? 'yi'
     : condition.metric === 'tokens' && condition.threshold % 10_000 === 0 ? 'wan' : 'unit'
   return { condition: { ...structuredClone(condition), window: condition.window || condition.source?.window,
-    sourceId: condition.sourceId || 'account' }, unit,
+    sourceId: condition.sourceId || (condition.metric === 'tokens' || condition.metric === 'requests' ? 'local' : 'account') }, unit,
     threshold: String(condition.threshold / (unit === 'yi' ? 100_000_000 : unit === 'wan' ? 10_000 : 1)),
     period: String(((condition.window || condition.source?.window)?.seconds || 3600) / 3600),
     anchor: dateInput((condition.window || condition.source?.window)?.startsAt),
@@ -75,17 +77,25 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
   const [draft, setDraft] = React.useState(() => draftOf(value))
   const [error, setError] = React.useState('')
   const condition = draft.condition
-  const sources = sourcesOf(account).filter(source => allowBalance || source.id === 'local')
+  const sources = sourcesOf(account).filter(source => (allowBalance || source.id === 'local')
+    && (providerOf(account) !== 'codearts' || source.id === 'account' || isCreditUnit(source.unit || '')))
   if (condition.source && !sources.some(source => source.id === condition.sourceId)) sources.push(condition.source)
   const source = sources.find(source => source.id === condition.sourceId)
+  const aggregate = sources.find(source => source.id === 'account' && isCreditUnit(source.unit || ''))
   const plans = [...new Map(sources.filter(source => source.planId).map(source => [source.planId!, source.planName || source.planId!])).entries()]
   const plan = source?.planId || ''
-  const options = sources.filter(source => plan ? source.planId === plan : !source.planId)
+  const options = sources.filter(source => source.id === 'account' || (plan ? source.planId === plan : !source.planId))
   const local = condition.metric === 'tokens' || condition.metric === 'requests'
+  const convertedThreshold = Number(draft.threshold) * (draft.unit === 'yi' ? 100_000_000 : draft.unit === 'wan' ? 10_000 : 1)
+  const thresholdPreview = condition.metric === 'tokens' && draft.unit !== 'unit' && draft.threshold.trim()
+    && Number.isSafeInteger(convertedThreshold) && convertedThreshold > 0 ? convertedThreshold.toLocaleString('en-US') : ''
+  const aggregateView = aggregate?.unlimited ? t('不限') : aggregate?.remaining == null ? t('暂无读数')
+    : `${numberText(aggregate.remaining)} ${t('积分')}`
   const modelOptions = source?.models?.length
     ? source.models.map(model => ({ value: model, label: model })) : modelsOf(account)
   for (const model of condition.models) if (!modelOptions.some(option => option.value === model)) modelOptions.push({ value: model, label: model })
   const metrics = [...new Set([...metricsFor(source), condition.metric])]
+    .filter(metric => providerOf(account) !== 'codearts' || metric !== 'tokens' && metric !== 'requests')
   const update = (next: Partial<LimiterCondition>) => {
     setError('')
     setDraft(current => ({ ...current, condition: { ...current.condition, ...next } }))
@@ -140,7 +150,7 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
   }
 
   return <Dialog open onOpenChange={next => { if (!next) onClose() }}>
-    <DialogContent className='w-[min(680px,calc(100vw-48px))]' showCloseButton>
+    <DialogContent className='w-[min(680px,calc(100vw-48px))]' showCloseButton overlayForceRender>
       <DialogHeader><DialogTitle>{t('编辑限制条件')}</DialogTitle></DialogHeader>
       <DialogBody className='space-y-3'>
         {plans.length ? <Field orientation='horizontal' className='field-row'>
@@ -159,12 +169,22 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
         <Field orientation='horizontal' className='field-row'>
           <FieldLabel>{t('额度来源')}</FieldLabel>
           <Select value={condition.sourceId || 'account'} onValueChange={id => { if (id) selectSource(id) }}>
-            <SelectTrigger className='min-w-0 flex-1'><SelectValue>{source?.id === 'local' ? t('本地用量保护') : !source || source.id === 'account' ? t('账号主额度') : source.label}</SelectValue></SelectTrigger>
+            <SelectTrigger className='min-w-0 flex-1'><SelectValue>{sourceLabel(source, condition.sourceId || 'account')}</SelectValue></SelectTrigger>
             <SelectContent>{options.map(source => <SelectItem key={source.id} value={source.id}>
-              {source.id === 'account' ? t('账号主额度') : source.id === 'local' ? t('本地用量保护') : source.label}
+              {sourceLabel(source)}
             </SelectItem>)}</SelectContent>
           </Select>
         </Field>
+        {aggregate ? <MetricCard className='space-y-2'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <span className='text-xs text-subtle'>{t('总积分')}</span>
+            <span className='text-[13px] font-semibold tabular-nums'>{aggregateView}</span>
+            <Button variant='outline' size='sm' className='ml-auto'
+              disabled={source?.id === aggregate.id && condition.metric === 'remaining'}
+              onClick={() => selectSource(aggregate.id)}>{t('按总积分设置限制')}</Button>
+          </div>
+          <p className='detail'>{t('总积分是当前可用积分的汇总，与余额列一致；不重复累加汇总行，不包含 Token、次数或其他单位的额度。')}</p>
+        </MetricCard> : null}
         <Field orientation='horizontal' className='field-row'>
           <FieldLabel>{t('模型范围')}</FieldLabel>
           <MultiSelect value={condition.models} options={modelOptions}
@@ -193,8 +213,9 @@ export function LimiterConditionDialog({ account, value, allowBalance = true, on
           {condition.metric === 'tokens' ? <Select value={draft.unit} onValueChange={unit => setDraft({ ...draft, unit: unit as Draft['unit'] })}>
             <SelectTrigger className='w-[84px]' aria-label={t('Token 单位')}><SelectValue>{draft.unit === 'yi' ? t('亿') : draft.unit === 'wan' ? t('万') : t('个')}</SelectValue></SelectTrigger>
             <SelectContent><SelectItem value='yi'>{t('亿')}</SelectItem><SelectItem value='wan'>{t('万')}</SelectItem><SelectItem value='unit'>{t('个')}</SelectItem></SelectContent>
-          </Select> : <span className='detail'>{condition.metric.endsWith('percent') ? '%' : condition.metric === 'requests' ? t('次') : source?.unit || ''}</span>}
+          </Select> : <span className='detail'>{condition.metric.endsWith('percent') ? '%' : condition.metric === 'requests' ? t('次') : usageUnitLabel(source?.unit || '', t)}</span>}
         </FieldGroup>
+        {thresholdPreview ? <p className='detail'>{t('实际阈值：{value} Token', { value: thresholdPreview })}</p> : null}
         {local ? <>
           <Field orientation='horizontal' className='field-row'>
             <FieldLabel>{t('统计周期')}</FieldLabel>

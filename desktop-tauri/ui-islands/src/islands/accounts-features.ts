@@ -69,12 +69,7 @@ export type ProviderFeatures = {
   /**
    * 余额列要不要用「套餐徽标 + 点击明细弹层」的两行形态（只有 CodeArts）。
    *
-   * 本家的余额是**两台网关、两组口径**（订阅统计的积分类计量表 + 福利网关的
-   * token 池，见后端 `providers::codearts::balance` 的模块头），一行「可用 N 积分」
-   * 是各池剩余的加总 —— 两个权益不同的账号（试用版 / 免费版）在列里长得一样，
-   * 构成只有弹层才放得下。别的家的 wallets 形状不同（ZCode 走 usage-pool 两行、
-   * Loomy 双账户一行就够），按能力位开关而不是形状探测：弹层是**交互承诺**
-   * （点开一定有逐项读数），形状探测会让没把握的家也变成可点。
+   * 总积分读数只回答余额，套餐权益与分项积分在弹层展开；按能力位声明这个入口。
    */
   usageDetail?: boolean
   /**
@@ -83,8 +78,7 @@ export type ProviderFeatures = {
    * ZCode 两家、Qoder 两家、Loomy、小浣熊。
    *
    * 与 `usageDetail` 的差别是**动不动排版**：那个会把这格换成「套餐徽标 + 读数
-   * 按钮」的整套两行形态（CodeArts 的余额是两台网关的加总，一行分不出权益差别，
-   * 所以值得换）；这些家的读数本身（单行读数的「可用 N」、主额度桶的套餐名 +
+   * 按钮」的整套两行形态；这些家的读数本身（单行读数的「可用 N」、主额度桶的套餐名 +
    * 进度条 + 剩 x / 共 y）已经回答了用户最常问的那句，明细是**加一层**而不是
    * 换一层 —— 换过去主额度桶那格会丢掉进度条。
    *
@@ -198,9 +192,7 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   zcode: { usage: true, creditDetail: true, claim: true, planChannel: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'] },
   'zcode-intl': { usage: true, creditDetail: true, claim: true, planChannel: true, edition: true, identifier: ['userId'], expiry: ['expiresAt'] },
   // CodeArts（华为云 AI 代码助手）。各位各有出处，别照着别家抄：
-  // `usage: true` —— 余额是**两份账**（订阅统计 + 福利网关，见 providers::codearts::balance），
-  //   界面上「读到 0」与「没读到」必须能分开，后端因此把失败的一侧写进 statisticsError /
-  //   benefitError 而不是整次失败（半次失败的呈现见 accounts-panels 的 usageSummary）。
+  // `usage: true` —— 套餐统计返回总积分与分项积分，读不到时不补零。
   // `usageDetail: true` —— 余额列的明细弹层形态（套餐徽标 + 点击逐项读数）：本家
   //   的计量表一行放不下，「可用 N 积分」是加总，两个权益不同的账号看不出差别。
   // 「领福利」不在能力表里：入口已整体迁到「签到中心」（api::checkin_center 按

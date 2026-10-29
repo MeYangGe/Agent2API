@@ -157,8 +157,58 @@ fn alloc_port(taken: &HashSet<u16>, from: u16, end: u16) -> Option<u16> {
 
 // ─── provider 缓存读取 ─────────────────────────────────────
 
+/// 机场塞进订阅里的「信息节点」判定（是信息节点则返回 true）。
+///
+/// ── 为什么必须按名字识别 ────────────────────────────────────
+/// 这类条目的 `server` / `port` / `password` 往往与某条**真实节点完全相同**，
+/// 只是 `name` 换成了账户信息（实测「魔戒」订阅里 `剩余流量：123.92 GB`、
+/// `套餐到期：长期有效`、`过滤掉10条线路` 与真实节点 `日本JP-HY2` 的连接参数
+/// 逐字段一致）。按连接参数去重会把真节点一起删掉，所以只能认名字。
+///
+/// ── 为什么必须过滤 ──────────────────────────────────────────
+/// 名字里的流量数字每次订阅更新都会变，而池条目按 `providerId + node`（节点名）
+/// 定位 —— 名字一变就是一条新条目，旧条目永远等不到同名节点来更新它，于是
+/// 每更新一次订阅就沉淀一条历史快照（实测累积了 7 条 `剩余流量：X GB`）。
+/// 它们还都是 `vmess` / `hysteria2` 真实协议形状，能测出延迟、能被误选成出口。
+///
+/// 判据只认「整名匹配常见信息模板」，不做模糊包含：`流量` 这类词出现在真实
+/// 节点名里的可能性存在（例如「香港-流量倍率0.5」），宁可漏过滤也不要误删。
+fn is_information_node(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return true;
+    }
+    // 纯文本前缀：机场用它们展示账户状态，后面跟具体数值
+    const PREFIXES: &[&str] = &[
+        "剩余流量",
+        "套餐到期",
+        "套餐剩余",
+        "距离下次重置",
+        "下次重置",
+        "过期时间",
+        "到期时间",
+        "过滤掉",
+        "已用流量",
+        "总流量",
+        "官网",
+        "订阅到期",
+    ];
+    if PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+        return true;
+    }
+    // 「过滤掉14条线路」这类中间夹数字的写法（前缀已覆盖大部分，这里兜
+    // 「共过滤…」「已过滤…」两种变体）
+    if name.starts_with("共过滤") || name.starts_with("已过滤") {
+        return true;
+    }
+    false
+}
+
 /// 读一个 provider 缓存文件里的节点名（缺失 / 解析失败 / 没有 proxies 都给空表
 /// —— 内核启动时会自己拉，拉到后第 ⑤ 步补监听器）。
+///
+/// 机场的信息节点（见 [`is_information_node`]）在这里就剔掉：下游的监听器分配、
+/// 配置内联、池镜像全部以这个清单为准，一处过滤等于处处过滤。
 fn read_provider_nodes(provider_id: &str) -> Vec<String> {
     let path = crate::server::core::sub_kernel::kernel_dir()
         .join("providers")
@@ -175,6 +225,7 @@ fn read_provider_nodes(provider_id: &str) -> Vec<String> {
     items
         .iter()
         .filter_map(|item| item.get("name").and_then(Yaml::as_str).map(str::to_string))
+        .filter(|name| !is_information_node(name))
         .collect()
 }
 
@@ -208,6 +259,11 @@ fn read_provider_definitions(providers: &[ProviderInput]) -> HashMap<String, Val
             let Some(name) = item.get("name").and_then(Yaml::as_str) else {
                 continue;
             };
+            // 信息节点不进定义表：它会被内联进顶层 proxies（见 build_config），
+            // 留着等于给测试组多塞几个永远连不通的假出口
+            if is_information_node(name) {
+                continue;
+            }
             // YAML → JSON：配置是 json! 拼出来再交给 serde_yaml 序列化的，定义也要
             // 走同一形态；带 YAML 特有标量（时间戳等）的条目转不过去，跳过即可
             let Ok(definition) = serde_json::to_value(item) else {
@@ -319,7 +375,9 @@ async fn poll_providers(
                         .map(|items| {
                             items
                                 .iter()
-                                .filter_map(|item| item.get("name").and_then(Value::as_str).map(|name| json!(name)))
+                                .filter_map(|item| item.get("name").and_then(Value::as_str))
+                                .filter(|name| !is_information_node(name))
+                                .map(|name| json!(name))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -858,19 +916,20 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
     .await?;
     log_line(&format!("🔄 已强制刷新订阅「{}」", provider.name));
 
-    // 拉取后的节点清单（给几秒的窗口让 provider 写缓存）
-    let live = poll_providers(controller_port, secret, &[sub_id.to_string()], 8_000).await;
-    let names: Vec<String> = live
-        .get(sub_id)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // 拉取后的节点清单（给几秒的窗口让 provider 写缓存）。
+    //
+    // ── 为什么不能「一拿到非空清单就收手」────────────────────
+    // PUT 只是**发起**拉取，内核异步下载；此刻控制器返回的往往还是上一轮的
+    // 旧清单（非空！）。旧版 `poll_providers` 一见非空就 break，于是拿到旧
+    // 清单 → 与旧缓存比较「没变化」→ 跳过 run_restart，刷新实际什么也没做。
+    // 实测表现：机场新加了 `日本JP-HY2`（hysteria2），线上订阅 34 个节点，
+    // 而池里永远是 30 个旧的 vmess，点多少次「立即更新」都不出现。
+    //
+    // 所以这里轮询到「清单与刷新前不同」才收手：先记下刷新前的清单，等新
+    // 清单出现（或等到超时）。超时仍无变化时按「内容确实没变」处理 ——
+    // 机场没加节点时这就是正确答案，不能报错。
+    let before: HashSet<String> = read_provider_nodes(sub_id).into_iter().collect();
+    let names = poll_provider_change(controller_port, secret, sub_id, &before, 20_000).await;
     let count = names.len();
     record_provider_sync(sub_id, &provider.name, count);
     if count == 0 {
@@ -881,12 +940,52 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
     }
 
     // 节点集合变了 → 重建配置 + 重启（新节点分新端口，消失的摘掉）
-    let current: HashSet<String> = read_provider_nodes(sub_id).into_iter().collect();
     let next: HashSet<String> = names.iter().cloned().collect();
-    if current != next {
+    if before != next {
         run_restart(providers).await?;
     }
     Ok(())
+}
+
+/// 轮询到 provider 的节点清单与 `before` **不同**为止（或超时）。
+///
+/// 返回最新拿到的清单（超时时返回最后一次看到的，可能仍等于 `before`）。
+/// 空清单不算「变化」：拉取中途内核可能短暂报空，那不代表订阅真的空了 ——
+/// 真的空了由调用方按 `count == 0` 报错，不该在这里被当成「已变化」。
+async fn poll_provider_change(
+    port: u16,
+    secret: &str,
+    sub_id: &str,
+    before: &HashSet<String>,
+    wait_ms: u64,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    let mut last: Vec<String> = before.iter().cloned().collect();
+    loop {
+        let live = poll_providers(port, secret, &[sub_id.to_string()], 2_000).await;
+        let names: Vec<String> = live
+            .get(sub_id)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !names.is_empty() {
+            let next: HashSet<String> = names.iter().cloned().collect();
+            if &next != before {
+                return names;
+            }
+            last = names;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    }
 }
 
 /// 启动前的遗留进程清理：状态文件里的 pid 还活着且确实是本内核才杀 ——

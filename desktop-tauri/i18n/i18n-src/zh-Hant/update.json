@@ -1,7 +1,6 @@
 {
   " · 检查于 {time}": "",
   " 已发布（当前 {current}），更新日志如下：": "",
-  "Discord 群": "",
   "GitHub Token 未填写": "",
   "GitHub 令牌": "",
   "GitHub 加速前缀": "",
@@ -12,7 +11,7 @@
   "GitHub 访问方式": "",
   "GitHub 访问设置已保存": "",
   "QQ 群": "",
-  "QQ 群 / Telegram / Discord 都在这里": "",
+  "QQ 群 / Telegram 都在这里": "QQ 群 / Telegram 都在這裡",
   "QQ 群 1": "",
   "QQ 群 2": "",
   "QQ 群 3": "",

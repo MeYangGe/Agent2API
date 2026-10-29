@@ -43,13 +43,21 @@ type RequestsBridge = {
 }
 
 type Align = 'left' | 'center' | 'right'
-type Column = { key: string; label: string; sel: string; track: string; align?: Align }
+type Column = {
+  key: string
+  label: string
+  sel: string
+  track: string
+  align?: Align
+  /** 上一版的默认对齐，只给列设置的归一化分辨「旧存盘里那一档是用户挑的还是旧默认」 */
+  legacyAlign?: Align
+}
 
 type ColSettingsApi = {
   register(spec: {
     id: string
     label?: string
-    columns: { key: string; label?: string; align?: Align }[]
+    columns: { key: string; label?: string; align?: Align; legacyAlign?: Align }[]
     mount?: string | (() => Element | null)
     onChange?: (config: unknown) => void
   }): { apply<C extends { key: string }>(columns: C[]): (C & { align: Align })[] }
@@ -96,6 +104,7 @@ const COLUMNS: Column[] = [
   { key: 'client', label: t('客户端'), sel: '.req-client', track: '110px' },
   { key: 'apiKey', label: t('API Key'), sel: '.req-api-key', track: '140px' },
   { key: 'dur', label: t('用时'), sel: '.req-dur', track: '96px', align: 'right' },
+  { key: 'speed', label: t('速度'), sel: '.req-speed', track: '96px', align: 'center', legacyAlign: 'right' },
   { key: 'usage', label: t('用量'), sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
   { key: 'error', label: t('错误'), sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
   { key: 'detail', label: t('详情'), sel: '.req-detail', track: '60px', align: 'right' },
@@ -300,7 +309,7 @@ function ensureColumns(): void {
   colHandle = api.register({
     id: 'requests',
     label: t('请求日志表'),
-    columns: COLUMNS.map(({ key, label, align }) => ({ key, label, align })),
+    columns: COLUMNS.map(({ key, label, align, legacyAlign }) => ({ key, label, align, legacyAlign })),
     mount: () => document.querySelector('.page[data-page="requests"] .panel-head .head-actions'),
     onChange: () => {
       flushSync(() => handle?.repaint())

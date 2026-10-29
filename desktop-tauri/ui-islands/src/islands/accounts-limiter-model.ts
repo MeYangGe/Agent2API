@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import type { AccountRecord, LimiterRule } from './accounts-shared'
+import { isCreditUnit, usageUnitLabel } from '../../../ui-shared/usage-readings'
 import type { LimiterCondition, LimiterGroup, LimiterGroupState, LimiterReading, LimiterSnapshot, LimiterWindow, QuotaSource } from './accounts-limiter-types'
 
 let snapshot: LimiterSnapshot = {}
@@ -52,6 +53,12 @@ export function limiterHit(account: AccountRecord | null | undefined, metric?: '
       : condition.metric !== 'tokens' && condition.metric !== 'requests')))
 }
 
+export function sourceLabel(source: QuotaSource | null | undefined, id = source?.id || 'account'): string {
+  if (id === 'local') return t('本地用量保护')
+  if (id === 'account' || !id) return isCreditUnit(source?.unit || '') ? t('总积分') : t('账号主额度')
+  return source?.label ? t(source.label) : t('账号主额度')
+}
+
 export function sourceIdentity(source: QuotaSource): QuotaSource {
   const { remaining: _remaining, total: _total, used: _used, remainingPercent: _percent, resetsAt: _reset, ...identity } = source
   return identity
@@ -67,13 +74,15 @@ export function groupHit(conditions: LimiterCondition[], readings: Array<{ hit: 
   return conditions.length > 0 && (any || term)
 }
 
-export function conditionText(condition: LimiterCondition): string {
-  const source = condition.source?.label || (condition.sourceId === 'local' ? t('本地用量保护') : t('账号主额度'))
+export function conditionText(condition: LimiterCondition, account?: AccountRecord): string {
+  const id = condition.sourceId || (condition.metric === 'tokens' || condition.metric === 'requests' ? 'local' : 'account')
+  const current = sourcesOf(account).find(source => source.id === id)
+  const source = sourceLabel(current || condition.source, id)
   const models = condition.models.length ? condition.models.join('、') : t('全部模型')
   const metric = metricLabel(condition.metric)
   const sign = condition.comparison === 'lt' ? '<' : condition.comparison === 'lte' ? '≤' : '≥'
   const unit = condition.metric.endsWith('percent') ? '%' : condition.metric === 'tokens' ? 'Token'
-    : condition.metric === 'requests' ? t('次') : condition.source?.unit || ''
+    : condition.metric === 'requests' ? t('次') : usageUnitLabel(current?.unit || condition.source?.unit || '', t)
   const quota = condition.metric === 'tokens' ? tokenCount(condition.threshold) : String(condition.threshold)
   return `${source} · ${models} · ${metric} ${sign} ${quota} ${unit}`.trim()
 }
@@ -94,11 +103,13 @@ export function tokenCount(value: number): string {
   return api?.formatTokens?.(value) || value.toLocaleString()
 }
 
-export function readingText(reading: LimiterReading | undefined, condition: LimiterCondition): string {
+export function readingText(reading: LimiterReading | undefined, condition: LimiterCondition, account?: AccountRecord): string {
   if (!reading?.known || reading.value === null) return readingReason(reading?.reason)
+  const source = sourcesOf(account).find(source => source.id === (condition.sourceId || 'account'))
+  const unit = usageUnitLabel(source?.unit || condition.source?.unit || '', t)
   const format = (value: number) => condition.metric === 'tokens' ? `${tokenCount(value)} Token`
     : condition.metric.endsWith('percent') ? `${Number(value.toFixed(2))}%`
-    : `${Number(value.toFixed(2))} ${condition.metric === 'requests' ? t('次') : condition.source?.unit || ''}`.trim()
+    : `${Number(value.toFixed(2))} ${condition.metric === 'requests' ? t('次') : unit}`.trim()
   const models = Object.entries(reading.modelValues || {})
   return models.length ? models.map(([model, value]) => `${model}：${format(value)}`).join(' · ') : format(reading.value)
 }
@@ -113,11 +124,11 @@ function readingReason(reason: string | undefined): string {
   }
 }
 
-export function expressionText(conditions: LimiterCondition[]): string {
+export function expressionText(conditions: LimiterCondition[], account?: AccountRecord): string {
   const terms: string[][] = []
   conditions.forEach((condition, index) => {
     if (index === 0 || condition.join === 'or') terms.push([])
-    terms[terms.length - 1].push(conditionText(condition))
+    terms[terms.length - 1].push(conditionText(condition, account))
   })
   return terms.map(term => term.length > 1 ? `（${term.join(` ${t('与')} `)}）` : term[0])
     .join(` ${t('或')} `)

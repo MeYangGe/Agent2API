@@ -1262,7 +1262,7 @@ function UpdatePanel() {
                 type='button'
                 size='sm'
                 variant='outline'
-                title={t('QQ 群 / Telegram / Discord 都在这里')}
+                title={t('QQ 群 / Telegram 都在这里')}
                 onClick={() => setQqGroupOpen(true)}
               >
                 {t('加入交流群')}
@@ -1306,7 +1306,7 @@ function UpdatePanel() {
           }}
         />
       ) : null}
-      {/* 「加入交流群」：QQ 群号（可复制）+ Telegram / Discord 外链 */}
+      {/* 「加入交流群」：QQ 群号（可复制）+ Telegram 外链 */}
       {qqGroupOpen ? <QqGroupDialog open onClose={() => setQqGroupOpen(false)} /> : null}
     </Card>
   )

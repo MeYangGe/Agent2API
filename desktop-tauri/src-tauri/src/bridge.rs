@@ -171,16 +171,23 @@ const BRIDGE_JS: &str = r#"
 
     // ── 会话 ──
     getState: () => call('GET', '/api/session'),
-    startLogin: (edition, mode, provider, socialRestore) =>
+    startLogin: (edition, mode, provider, socialRestore, options) =>
       invoke('start_login', {
         edition: edition || 'cn',
         mode: mode || 'embedded',
         // provider 缺省留给 Rust 侧兜底成 workbuddy：老界面（或将来别处的调用点）
         // 不传它时必须走原来那条链，这里不做猜测式整形
         provider: provider || null,
-        // 第三方登录入口恢复（Google / GitHub / X）。缺省 false 与界面默认不勾选一致：
-        // 不传就照官方登录页的形态走，不额外放宽域名白名单
+        // 第四参仍是第三方入口开关；动态登录 options 只能占第五参，不能挤掉它。
         socialRestore: socialRestore === true,
+        ...(options === undefined ? {} : { options }),
+      }),
+    // URL / 裸 code 都原样交给网关；accepted / pending 不是登录完成，startLogin
+    // 仍须等 /wait 的 done 才返回成功。
+    submitLoginCallback: (state, callbackUrl) =>
+      call('POST', '/api/session/login/callback', {
+        state: String(state ?? ''),
+        callbackUrl: String(callbackUrl ?? ''),
       }),
     getLoginState: () => invoke('login_state'),
     cancelLogin: () => invoke('cancel_login'),
@@ -250,6 +257,8 @@ const BRIDGE_JS: &str = r#"
     pushZcodeCaptchaTokens: tokens =>
       call('POST', '/api/zcode/captcha', { tokens: Array.isArray(tokens) ? tokens : [] }),
     onLoginState: callback => on('login:state', callback),
+    // 动态登录说明与 /wait 的 pending.hint；不含授权地址或用户输入。
+    onLoginProgress: callback => on('login:progress', callback),
     // KukuAI 短信登录的窗口进度（壳侧监视任务推送，见 `start_kuku_sms`）：
     // {status: 'opening'|'filling'|'sending'|'sent'|'captcha'|'timeout'}。
     // 面板提示行据此实时显示，用户不会「点了没反应」。
@@ -490,6 +499,7 @@ const BRIDGE_JS: &str = r#"
     decodeQrImage: payload => call('POST', '/api/subscriptions/decode-qr', payload || {}),
     getKernelStatus: () => call('GET', '/api/subscriptions/kernel'),
     downloadKernel: payload => call('POST', '/api/subscriptions/kernel/download', payload || {}),
+    importKernel: payload => call('POST', '/api/subscriptions/kernel/import', payload || {}),
     cancelKernelDownload: () => call('POST', '/api/subscriptions/kernel/download/cancel', {}),
     restartKernel: () => call('POST', '/api/subscriptions/kernel/restart', {}),
     stopKernel: () => call('POST', '/api/subscriptions/kernel/stop', {}),

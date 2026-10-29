@@ -116,6 +116,10 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
             .get("provider")
             .and_then(Value::as_str)
             .unwrap_or("");
+        if store.needs_relogin(&id) {
+            slots[index] = Some(skipped(&id, provider, "登录授权已失效，需要重新登录该账号"));
+            continue;
+        }
         // 判据只有两条：该家支持刷新 + 这个账号的凭证确实临期。
         // **不按 enabled 过滤**：禁用是「转发别用它」，不是「别维护它」——
         // 账号页对禁用账号同样显示有效期，漏刷会让它一直挂着「已过期」，
@@ -142,19 +146,6 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
             slots[index] = Some(skipped(&id, provider, "凭证未过期或临期"));
             continue;
         }
-        // ── 已被上游注销的账号不再重试（issue #215）──────────────
-        // 上游把会话连同 refresh token 一起作废（12153）之后，再刷多少次都不会
-        // 好。没有这道闸时，凭证维护每轮都会重试、每轮都失败 —— 日志刷屏，
-        // 真正需要关注的失败反而被淹掉。标记由刷新链路落（见
-        // `AuthService::mark_needs_relogin`），用户重新登录时清掉。
-        if store.needs_relogin(&id) {
-            slots[index] = Some(skipped(
-                &id,
-                provider,
-                "refresh token 已被上游作废，需要重新登录该账号",
-            ));
-            continue;
-        }
         pending.push((index, id, provider.to_string(), adapter));
     }
 
@@ -173,6 +164,10 @@ pub async fn refresh_expiring_accounts(store: &AccountStore) -> Vec<Value> {
         &format!("检测到 {} 个临期账号，开始自动刷新凭证…", pending.len()),
     );
     for (index, id, provider, adapter) in pending {
+        if store.needs_relogin(&id) {
+            slots[index] = Some(skipped(&id, &provider, "登录授权已失效，需要重新登录该账号"));
+            continue;
+        }
         // 走适配器而不是别处：这条已经是四家统一的刷新入口
         // （小浣熊 / AutoClaw 会按来源比较-再写回账号记录，workbuddy 走
         //  `AuthService::refresh_account`），这里不需要知道任何一家的协议。

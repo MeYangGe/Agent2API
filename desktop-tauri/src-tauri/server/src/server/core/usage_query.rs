@@ -244,7 +244,7 @@ async fn query_usage_inner(
         Ok(usage) => Ok(usage),
         Err(error) => {
             // 不支持刷新的家直接返回原错误（CatPaw：重试必然失败，见上）
-            if error.status_code != 401 || !adapter.supports_refresh() {
+            if error.status_code != 401 || !adapter.supports_refresh() || store.needs_relogin(id) {
                 return Err(UsageFailure::Request(error.message, error.code));
             }
             if let Err(refresh_error) = adapter.refresh_access_token(store, id).await {
@@ -358,13 +358,21 @@ pub async fn query_all(store: &AccountStore, id: Option<&str>) -> Result<Value, 
         .iter()
         .map(|account| query_usage_for(store, account))
         .collect();
-    let results = futures::future::join_all(futures).await;
+    let mut results = futures::future::join_all(futures).await;
     // 每行结论落记录表 + 跑「余额不足自动禁用」钩子：手动与自动两条路径在
     // 这里汇合（见模块头）。账号对象与结果行按构造顺序一一对齐
     // （`queried` 与 `results` 同源同序），配置就在手上，不必回读账号列表。
-    for (account, row) in queried.iter().zip(results.iter()) {
+    for (account, row) in queried.iter().zip(results.iter_mut()) {
         write_row_record(row);
         enforce_low_balance_disable(store, account, row);
+        if let Some(id) = account.get("id").and_then(Value::as_str) {
+            let record = usage_records::load(id);
+            row["at"] = json!(record.last_attempt_at);
+            row["lastSuccessAt"] = json!(record.last_success_at);
+            if row.get("error").and_then(Value::as_str).is_some() {
+                row["lastUsage"] = json!(record.usage);
+            }
+        }
     }
     Ok(json!({ "results": results, "skipped": skipped }))
 }
@@ -553,6 +561,7 @@ async fn sweep_due(store: &AccountStore) {
     }
     .into_iter()
     .filter(supports_usage)
+    .filter(|account| account.get("needsRelogin").and_then(Value::as_bool) != Some(true))
     .filter_map(|account| {
         let interval = usage_records::query_interval_of(&account)?;
         let id = account.get("id").and_then(Value::as_str)?;
@@ -586,10 +595,9 @@ async fn sweep_due(store: &AccountStore) {
 /// `{at: 0, results: [], skipped: 0}` —— 界面据此显示「还没有查询结果」，
 /// 而不是把空数组当成「一个账号都没有」。
 ///
-/// 形状与手动查询响应兼容（前端 `applyBalances` 同一份解析），每行多带自己的
-/// `at`（这一行的结论时刻）：按账号到期的写法下各行时刻天然不同，失败行的
-/// 时效判定必须按行算，不能再拿一个整轮的 `at` 盖所有人（前端 `applyBalances`
-/// 因此优先取行级 `at`）。
+/// 形状与手动查询响应兼容（前端 `applyBalances` 同一份解析），每行的 `at`
+/// 表示本次尝试时刻，`lastSuccessAt` 表示最近成功时刻。失败保持 `usage: null`，
+/// 历史成功读数另放在 `lastUsage`，不能因历史读数存在就抹掉本次错误。
 ///
 /// ── Token 限制器读数（`tokenAt` / `tokenUsage`）──────────────
 /// 余额读数只在查询到期时变化，`at` 不动就说明整份快照没新东西；Token 周期
@@ -627,32 +635,32 @@ pub fn snapshot(store: &AccountStore) -> Value {
         }
         at = at.max(record.last_attempt_at);
         let name = account.get("name").cloned().unwrap_or(Value::Null);
-        match record.usage.as_ref() {
-            Some(usage) => rows.push(json!({
+        let changed = account
+            .get("updatedAt")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(account.get("addedAt").and_then(Value::as_i64).unwrap_or(0));
+        let error = record.error.as_deref().filter(|_| record.last_attempt_at >= changed);
+        if let Some(error) = error {
+            rows.push(json!({
+                "id": id,
+                "name": name,
+                "usage": Value::Null,
+                "error": error,
+                "code": record.code,
+                "at": record.last_attempt_at,
+                "lastUsage": record.usage,
+                "lastSuccessAt": record.last_success_at,
+            }));
+        } else if let Some(usage) = record.usage.as_ref() {
+            rows.push(json!({
                 "id": id,
                 "name": name,
                 "usage": usage,
                 "error": Value::Null,
                 "at": record.last_attempt_at,
-            })),
-            None => {
-                let Some(error) = record.error.as_deref() else { continue };
-                let changed = account
-                    .get("updatedAt")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0)
-                    .max(account.get("addedAt").and_then(Value::as_i64).unwrap_or(0));
-                if record.last_attempt_at >= changed {
-                    rows.push(json!({
-                        "id": id,
-                        "name": name,
-                        "usage": Value::Null,
-                        "error": error,
-                        "code": record.code,
-                        "at": record.last_attempt_at,
-                    }));
-                }
-            }
+                "lastSuccessAt": record.last_success_at,
+            }));
         }
     }
     // Token 限制器读数：按账号投影内存事实表（没有配 Token 规则的账号不出现，

@@ -18,7 +18,8 @@ import {
 } from '../api/gateway'
 import { accountName, activeLimits, formatExpiry, formatRelative, formatStamp, isRateLimited } from '../lib/format'
 import { expiryOf, hasExpiry, isLongLivedCredential, supportsUsage } from '../lib/providerFacts'
-import { usageIndex, usageText } from '../lib/usage'
+import { mergeUsageRow, usageIndex, usageText } from '../lib/usage'
+import { credentialExpiryRowsOf, credentialExpiryText } from '../../../ui-shared/credential-expiry'
 import { providerLabel } from '../lib/providers'
 import { serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
@@ -103,10 +104,17 @@ export function AccountSheet({
       const payload = await fetchAccountUsage(account.id)
       if (serverIdentity() !== identity) return
       const row = payload.results?.find(item => item.id === account.id)
-      setUsageRow(row)
-      store.toast(row?.error || (row ? t('余额已更新') : t('未返回余额数据')), row?.error || !row ? 'err' : 'ok')
+      if (row?.code === 'refresh_token_expired') onChanged()
+      setUsageRow(previous => mergeUsageRow(row || { id: account.id, error: t('未返回余额数据') }, previous))
+      const view = row ? usageText(row) : null
+      store.toast(!view ? t('未返回余额数据') : view.kind === 'bad' ? view.detail : t('余额已更新'),
+        !view || view.kind === 'bad' ? 'err' : view.kind === 'warn' ? 'warn' : 'ok')
     } catch (error) {
-      if (serverIdentity() === identity) store.toast(error instanceof Error ? error.message : String(error), 'err')
+      if (serverIdentity() === identity) {
+        const message = error instanceof Error ? error.message : String(error)
+        setUsageRow(previous => mergeUsageRow({ id: account.id, error: message }, previous))
+        store.toast(message, 'err')
+      }
     } finally {
       if (serverIdentity() === identity) setBusy('')
     }
@@ -150,6 +158,7 @@ export function AccountSheet({
 
   const limits = account ? activeLimits(account) : []
   const expiresAt = account ? expiryOf(account) : 0
+  const credentialRows = account ? credentialExpiryRowsOf(account, expiresAt) : []
   const usageView = usageText(usageRow)
   const usageColor =
     usageView.kind === 'bad'
@@ -160,6 +169,7 @@ export function AccountSheet({
   const isPrimary = (store.get().session?.routedAccountId || store.get().session?.accounts?.currentAccountId) === account?.id
   const sortActive = (store.get().session?.accounts?.sorting?.rules[String(account?.provider || '')] || []).some(rule => rule.on)
   const canQueryUsage = Boolean(account && supportsUsage(account))
+  const canRefresh = Boolean(account && account.desktop !== true && (account.canRefresh === true || account.hasRefreshToken === true))
 
   return (
     <Sheet open={open} onOpenChange={next => { if (!next) onClose() }}>
@@ -267,19 +277,33 @@ export function AccountSheet({
               </div>
 
               <MetricGrid className='m-kv'>
-                {hasExpiry(account.provider) ? (
+                {credentialRows.length || hasExpiry(account.provider) ? (
                   <MetricCard className='m-kv-cell'>
                     <div className='k'>{t('有效期')}</div>
-                    <div className='v'>
+                    {credentialRows.length ? <div className='flex flex-col gap-1.5'>
+                      {credentialRows.map(row => <div key={row.label} className='flex items-center justify-between gap-2 text-xs'
+                        title={row.expiresAt === null ? undefined : formatStamp(row.expiresAt)}>
+                        <span className='text-subtle' translate='no'>{row.label}</span>
+                        <span className={row.expiresAt !== null && row.expiresAt <= Date.now() ? 'text-destructive' : undefined}>
+                          {credentialExpiryText(row, t)}
+                        </span>
+                      </div>)}
+                    </div> : <div className='v'>
                       {isLongLivedCredential(account.provider) ? t('长期有效') : formatExpiry(expiresAt)}
-                    </div>
+                    </div>}
                   </MetricCard>
                 ) : null}
                 <MetricCard className='m-kv-cell'>
                   <div className='k'>{t('余额')}</div>
-                    <div className='v' title={canQueryUsage ? usageView.detail : undefined} style={{ color: usageColor }}>
-                      {canQueryUsage ? usageView.text : t('不支持查询')}
+                  <div className='v' title={canQueryUsage ? usageView.detail : undefined}
+                    style={{ color: usageView.failureStatus ? 'var(--m-text)' : usageColor }}>
+                    {canQueryUsage ? usageView.text : t('未接入查询')}
+                  </div>
+                  {canQueryUsage && usageView.failureStatus ? (
+                    <div className='text-xs text-destructive mt-1 whitespace-normal leading-snug' title={usageView.failureDetail}>
+                      {usageView.failureStatus}
                     </div>
+                  ) : null}
                 </MetricCard>
                 <MetricCard className='m-kv-cell'>
                   <div className='k'>{t('凭证')}</div>
@@ -330,7 +354,7 @@ export function AccountSheet({
                   <span className='m-v'>{account.enabled ? t('是') : t('否')}</span>
                 </div>
                 {/* 读数之外还有话要说时才占一行（部分失败、钱包明细） */}
-                {usageView.detail && usageView.detail !== usageView.text ? (
+                {canQueryUsage && usageView.detail && usageView.detail !== usageView.text ? (
                   <div className='m-row' style={{ alignItems: 'flex-start' }}>
                     <span className='m-k' style={{ flex: 'none' }}>{t('余额详情')}</span>
                     <span
@@ -342,10 +366,10 @@ export function AccountSheet({
                   </div>
                 ) : null}
                 {account.needsRelogin ? (
-                  <div className='m-row'>
+                  <div className='m-row' style={{ alignItems: 'flex-start' }}>
                     <span className='m-k'>{t('需要重新登录')}</span>
-                    <span className='m-v' style={{ color: 'var(--m-danger)' }}>
-                      {account.needsReloginReason || t('凭证已被上游注销')}
+                    <span className='m-v' style={{ color: 'var(--m-danger)', whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.5 }}>
+                      {account.needsReloginReason || t('登录授权已失效，请重新登录；自动续期无法恢复已过期或已撤销的刷新令牌。')}
                     </span>
                   </div>
                 ) : null}
@@ -400,15 +424,16 @@ export function AccountSheet({
             <Icon name='wallet' />
             {busy === 'usage' ? t('查询中…') : t('查询余额')}
           </Button> : null}
-          <Button size='touch' variant='default'
+          {canRefresh ? <Button size='touch' variant='default'
             type='button'
             className='m-btn w-full'
-            disabled={busy === 'refresh' || !account}
+            disabled={Boolean(busy) || !account || account.needsRelogin === true}
+            title={account?.needsRelogin ? account.needsReloginReason : undefined}
             onClick={() => account && void run('refresh', () => refreshAccount(account.id), t('凭证已刷新'))}
           >
             <Icon name='refresh' />
             {busy === 'refresh' ? t('刷新中…') : t('刷新凭证')}
-          </Button>
+          </Button> : account ? <p className='text-xs text-subtle'>{t('未声明可手动续期；本机引用请在原客户端处理登录态。')}</p> : null}
           <div className='m-btn-row'>
             <Button size='touch' variant='outline'
               type='button'
@@ -445,8 +470,8 @@ export function AccountSheet({
 }
 
 function statusTone(account: Account): 'ok' | 'warn' | 'bad' | 'mute' {
-  if (!account.enabled) return 'mute'
   if (account.needsRelogin) return 'bad'
+  if (!account.enabled) return 'mute'
   if (isRateLimited(account)) return 'warn'
   const expiresAt = expiryOf(account)
   if (expiresAt > 0 && expiresAt <= Date.now()) return 'bad'
@@ -454,8 +479,8 @@ function statusTone(account: Account): 'ok' | 'warn' | 'bad' | 'mute' {
 }
 
 function statusText(account: Account): string {
-  if (!account.enabled) return t('已禁用')
   if (account.needsRelogin) return t('需重登')
+  if (!account.enabled) return t('已禁用')
   if (isRateLimited(account)) return t('限流中')
   const expiresAt = expiryOf(account)
   if (expiresAt > 0 && expiresAt <= Date.now()) return t('已过期')

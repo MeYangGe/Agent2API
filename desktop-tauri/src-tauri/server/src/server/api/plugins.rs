@@ -7,15 +7,19 @@ use serde_json::{json, Value};
 
 use crate::server::core::account_store::plugin_accounts;
 use crate::server::core::plugin_host;
+use crate::server::core::plugin_host::update::MAX_PACK_BYTES;
 use crate::server::errors::management_error;
 use crate::server::http::{ok_json, parse_body};
 
-const MAX_PACK_BYTES: usize = 24 * 1024 * 1024;
+const MAX_PACK_BASE64_BYTES: usize = (MAX_PACK_BYTES + 2) / 3 * 4;
+// 仅插件上传路由使用：96 MiB ZIP 的 base64 为 128 MiB，另留有限的 JSON 开销。
+pub(crate) const MAX_PACK_UPLOAD_BYTES: usize = MAX_PACK_BASE64_BYTES + 1024 * 1024;
 
 pub async fn list() -> Response {
     let mut result = plugin_host::management_snapshot();
     result["target"] = json!(plugin_host::host_target());
     result["protocol"] = json!(agent2api_provider_protocol::PROTOCOL_VERSION);
+    result["maxPackBytes"] = json!(MAX_PACK_BYTES);
     result["pluginsDir"] = json!(plugin_host::plugins_dir_display());
     result["catalog"] = plugin_host::catalog::snapshot();
     result["updates"] = plugin_host::catalog::updates()["updates"].clone();
@@ -39,7 +43,9 @@ pub async fn save_settings(body: Bytes) -> Response {
 }
 
 pub async fn progress() -> Response {
-    ok_json(plugin_host::operations::snapshot())
+    let mut result = plugin_host::operations::snapshot();
+    result["maxPackBytes"] = json!(MAX_PACK_BYTES);
+    ok_json(result)
 }
 
 pub async fn install(body: Bytes) -> Response {
@@ -47,8 +53,8 @@ pub async fn install(body: Bytes) -> Response {
         Ok(bytes) => bytes,
         Err(error) => return management_error(400, error),
     };
-    if bytes.len() > MAX_PACK_BYTES {
-        return management_error(400, "插件包超过 24 MB 上限，请选择插件包 zip");
+    if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
+        return management_error(400, pack_size_error());
     }
     let prepared = match tokio::task::spawn_blocking(move || {
         plugin_host::prepare_pack(&bytes, None, None, false)
@@ -206,12 +212,25 @@ pub async fn release() -> Response {
     }
 }
 
+fn pack_size_error() -> String {
+    format!(
+        "插件包必须为非空且不超过 {} MiB 的 zip",
+        MAX_PACK_BYTES / (1024 * 1024)
+    )
+}
+
 fn pack_bytes(body: &[u8]) -> Result<Vec<u8>, String> {
     if body.is_empty() {
         return Err("请求体是空的：请选择插件包 zip 后重试".to_string());
     }
     if body.starts_with(b"PK") {
+        if body.len() > MAX_PACK_BYTES {
+            return Err(pack_size_error());
+        }
         return Ok(body.to_vec());
+    }
+    if body.len() > MAX_PACK_UPLOAD_BYTES {
+        return Err(pack_size_error());
     }
     let payload = parse_body(body).map_err(|_| "请求体既不是 zip 也不是 JSON".to_string())?;
     let encoded = payload
@@ -223,8 +242,28 @@ fn pack_bytes(body: &[u8]) -> Result<Vec<u8>, String> {
     let encoded = encoded
         .split_once("base64,")
         .map(|(_, text)| text)
-        .unwrap_or(encoded);
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
-        .map_err(|error| format!("插件包内容不是合法 base64：{error}"))
+        .unwrap_or(encoded)
+        .trim();
+    // decode 会先为输出分配内存；按编码长度与 padding 预检，实际字节仍在解码后复核。
+    if encoded.len() > MAX_PACK_BASE64_BYTES {
+        return Err(pack_size_error());
+    }
+    let padding = encoded
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .take(2)
+        .count();
+    let estimated =
+        (encoded.len() / 4 * 3 + encoded.len() % 4 * 3 / 4).saturating_sub(padding);
+    if estimated > MAX_PACK_BYTES {
+        return Err(pack_size_error());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("插件包内容不是合法 base64：{error}"))?;
+    if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
+        return Err(pack_size_error());
+    }
+    Ok(bytes)
 }

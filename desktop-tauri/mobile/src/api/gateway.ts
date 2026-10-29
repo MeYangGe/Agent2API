@@ -19,7 +19,7 @@ export type { CheckinAccount, CheckinCenter, ProviderGroup as CheckinProviderRow
 
 /* ─── 会话 / 账号 ─────────────────────────────── */
 
-export type ProviderSummary = { id?: string; label?: string; count?: number }
+export type ProviderSummary = { id?: string; label?: string; count?: number; category?: 'agent' | 'web'; source?: 'builtin' | 'plugin' }
 
 export type RateLimitInfo = {
   status?: number | string
@@ -44,6 +44,12 @@ export type Account = {
   editionLabel?: string
   tokenExpiresAt?: number
   expiresAt?: number
+  hasAccessToken?: boolean
+  accessTokenExpiresAt?: number | null
+  hasRefreshToken?: boolean
+  refreshTokenLongLived?: boolean
+  refreshExpiresAt?: number | null
+  refreshTokenExpiresAt?: number | null
   needsRelogin?: boolean
   needsReloginReason?: string
   /** 智谱清言：这条账号是不是访客（后端只对本家注入；访客没有积分体系，不查余额） */
@@ -440,16 +446,7 @@ export function restoreAgentClient(clientId: string, token: string): Promise<unk
 
 /* ─── 账号余额 ─────────────────────────────── */
 
-export type UsageRow = {
-  id?: string
-  name?: string | null
-  /** 后端按家给不同形状；前端只读其中几个通用键，故用 Record */
-  usage?: Record<string, unknown> | null
-  error?: string | null
-  code?: string | number | null
-  /** 这一行的结论时刻（毫秒） */
-  at?: number
-}
+export type UsageRow = import('../../../ui-shared/usage-query-state').UsageQueryRow
 
 export type UsageSnapshot = {
   sorting?: AccountSorting

@@ -235,6 +235,32 @@
 }
 .usage-token-sub .hit { color: var(--warn); font-weight: 600; }
 
+.usage-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-top: 5px;
+  text-align: left;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.usage-note {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-note.warn {
+  color: var(--warn);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 /* 隐藏账号提示既用于空态，也用于仍有可见账号的列表。 */
 .acct-hidden-note {
   display: flex;

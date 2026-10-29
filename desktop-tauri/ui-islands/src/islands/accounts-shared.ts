@@ -175,14 +175,14 @@ export type AccountRecord = {
   canClaim?: boolean
   /** ZCode：这一行当前走哪条上游通道（`coding-plan` / `start-plan`，见 accounts-domain 的 ZCODE_PLAN_*） */
   zcodePlan?: string
+  hasAccessToken?: boolean
+  accessTokenExpiresAt?: number | null
   hasRefreshToken?: boolean
-  /**
-   * 后端判定「这个账号的登录态已被上游注销，只能重新登录」（issue #215）。
-   *
-   * 连续多次刷新都收到 `12153:refresh token is invalid` 时由刷新链路落标记。
-   * 这类账号的 refresh token 链已经死了，再刷新不会好，凭证维护也会跳过它 ——
-   * 界面必须说出来，否则用户只会看到「刷新一直失败」而不知道该怎么办。
-   */
+  refreshTokenLongLived?: boolean
+  refreshExpiresAt?: number | null
+  /** 刷新令牌本身的授权截止时间（毫秒），不同于临时访问凭据的 expiresAt。 */
+  refreshTokenExpiresAt?: number | null
+  /** 授权已到期或被撤销，无法继续自动续期；重新登录后清除。 */
   needsRelogin?: boolean
   /** 与 `needsRelogin` 成对：后端给出的原因文案（为空表示没有标记）。 */
   needsReloginReason?: string

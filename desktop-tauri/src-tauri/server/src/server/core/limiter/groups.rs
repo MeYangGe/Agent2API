@@ -7,7 +7,11 @@ pub fn effective_groups_in(fields: &Map<String, Value>) -> Vec<Group> {
     if let Some(value) = fields.get("limiterGroups") {
         return normalize_groups(value).unwrap_or_default();
     }
-    legacy::effective_rules_in(fields).iter().map(|rule| {
+    groups_from_rules(&legacy::effective_rules_in(fields))
+}
+
+pub fn groups_from_rules(rules: &[legacy::LimiterRule]) -> Vec<Group> {
+    rules.iter().map(|rule| {
         let token = rule.kind == LimiterKind::Token;
         Group {
             enabled: rule.enabled,

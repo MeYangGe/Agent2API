@@ -165,6 +165,13 @@ impl BillingService {
     ///
     /// 地区从会话的 `edition` 派生（账号存储写会话时就是从记录抄的），
     /// 再用 `(provider, uid)` 反查记录 id —— `admin.action` 要的是 id。
+    ///
+    /// ── uid 取不到时的退路（issue #380）────────────────────────────
+    /// 会话是 `session_from_record` 写的，那条路径现在会回落
+    /// `pluginPublic` / `pluginSecret`，所以正常情况下这里能拿到 uid。
+    /// 但如果会话来自更早的调用方（已构造好的 JSON），uid 仍可能为空 ——
+    /// 那时按 `user-<uid>` 的记录 id 形态再试一次：WorkBuddy 系的插件落库
+    /// 记录 id 就是那个形态（`accounts::identity_of`）。
     fn account_of(&self, session: &Value) -> Option<(String, String)> {
         let uid = session
             .get("account")
@@ -176,6 +183,7 @@ impl BillingService {
         let store = self.auth.store();
         store
             .account_id_of_identity(provider, uid)
+            .or_else(|| store.account_id_of_user_id_suffix(provider, uid))
             .map(|id| (provider.to_string(), id))
     }
 

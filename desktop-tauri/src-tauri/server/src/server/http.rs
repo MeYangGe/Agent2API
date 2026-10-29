@@ -450,6 +450,11 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/subscriptions/decode-qr", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel", any(api::subscriptions::entry))
         .route("/api/subscriptions/kernel/download", any(api::subscriptions::entry))
+        .merge(
+            Router::new()
+                .route("/api/subscriptions/kernel/import", any(api::subscriptions::entry))
+                .layer(axum::extract::DefaultBodyLimit::max(api::subscriptions::MAX_KERNEL_UPLOAD_BYTES)),
+        )
         // 停止下载是**独立一条路径**（不是 download 上的查询参数）：它是另一个
         // 动作，且必须在下载进行中也能到达 —— 与 download 共用一条路径会让
         // 「按方法区分」的相邻语义（POST=开始）在同一个路径上出现两种含义
@@ -480,6 +485,8 @@ pub fn panel_router(state: ServerState) -> Router {
         // WorkBuddy 国际版日活任务的手动粒度入口（保活 / 领取 / 保活+领取）
         .route("/api/checkin-activity", post(api::billing::run_activity))
         // ── 会话与登录 ──
+        // 只读动态登录元数据也必须走管理面鉴权；不是任意 admin.action 通道。
+        .route("/api/session/login/methods", get(api::session::login_methods))
         .route("/api/session/login/start", post(api::session::login_start))
         .route("/api/session/login/wait", get(api::session::login_wait))
         .route("/api/session/login/cancel", post(api::session::login_cancel))
@@ -635,14 +642,18 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/keys", get(api::keys_api::list_keys).post(api::keys_api::create_key))
         .route("/api/keys/{id}", patch(api::keys_api::update_key).delete(api::keys_api::delete_key))
         // ── 提供商插件包（一级菜单「提供商插件」）──
-        // 各家 provider 的转发与账号实现都在用户安装的插件里。这五条是唯一
-        // 的安装入口，**全部挂 protected**：装插件等于允许本机跑任意代码，
-        // 与 /api/backup/import 同级敏感。安装那条的请求体是 zip 的 base64
-        // （约 7MB），落在管理面 32MB 上限内，不必单独放宽。
+        // 各家 provider 的转发与账号实现都在用户安装的插件里。这些管理接口
+        // **全部挂 protected**：装插件等于允许本机跑任意代码，与备份导入同级敏感。
+        // 安装的 Bytes 提取器读取最终扩展：局部有限上限后写覆盖外层 32 MiB。
         .route("/api/plugins", get(api::plugins::list))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/progress", get(api::plugins::progress))
-        .route("/api/plugins/install", post(api::plugins::install))
+        .route(
+            "/api/plugins/install",
+            post(api::plugins::install).route_layer(axum::extract::DefaultBodyLimit::max(
+                api::plugins::MAX_PACK_UPLOAD_BYTES,
+            )),
+        )
         .route("/api/plugins/uninstall", post(api::plugins::uninstall))
         .route("/api/plugins/enable", post(api::plugins::set_enabled))
         .route("/api/plugins/provider", post(api::plugins::set_provider))

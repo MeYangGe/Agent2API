@@ -763,7 +763,7 @@ function AssistantPage() {
         failed={loadingFailed}
         status={status}
         onSave={saveConfig}
-        apiKeyField={<ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || awaiting}
+        apiKeyField={<ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || awaiting} rememberSelection
           onChange={apiKeyId => { if (config) saveConfig({ ...config, apiKeyId }) }}
           onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} />}
       />

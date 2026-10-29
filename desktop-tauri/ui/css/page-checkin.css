@@ -509,6 +509,27 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-panel-pad { padding: 16px; }
 .ck-sched-name { max-width: 220px; }
 .ck-sched-time-input { max-width: 96px; }
+.ck-sched-num { max-width: 72px; }
+/* ── 逐家时刻（条目编辑器里的一格一行）── */
+.ck-ptimes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ck-ptime-row { display: flex; align-items: center; gap: 8px; }
+.ck-ptime-name {
+  min-width: 150px;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ck-ptime-tag {
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
 .ck-chain-input { max-width: 260px; }
 .ck-travel-times { max-width: 320px; }
 .ck-input-search { flex: 1; min-width: 140px; max-width: 260px; }

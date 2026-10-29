@@ -113,6 +113,43 @@ impl StoredAccount {
         self.fields.get("id").and_then(Value::as_str).unwrap_or("")
     }
 
+    /// 顶层字段优先、回落 `pluginPublic` / `pluginSecret` 的取值（issue #380）。
+    ///
+    /// ── 为什么读侧也要兜一层（写侧已经镜像了）────────────────────
+    /// 镜像只在**新写入**时生效：升级前落库的插件账号顶层仍然是空的，而
+    /// 「回填迁移」不能覆盖所有情况（例如用户从备份恢复了一份旧记录）。
+    /// 读侧兜底让这批记录不必等迁移就能用 —— 迁移只是把字段真正落到盘上，
+    /// 不是正确性的前提。
+    ///
+    /// 顺序：顶层 > `pluginPublic` > `pluginSecret`。`pluginPublic` 在
+    /// `pluginSecret` 之前，因为它是插件 `account_view` 的产出、已经归一过
+    /// （例如 `edition` 被翻成 `cn` / `intl`，而 secret 里可能是 `international`）。
+    pub fn identity_field(&self, key: &str) -> Option<&Value> {
+        if let Some(value) = self.fields.get(key).filter(|value| !value.is_null()) {
+            if !value.as_str().is_some_and(|text| text.trim().is_empty()) {
+                return Some(value);
+            }
+        }
+        for holder in ["pluginPublic", "pluginSecret"] {
+            if let Some(value) = self
+                .fields
+                .get(holder)
+                .and_then(|object| object.get(key))
+                .filter(|value| !value.is_null())
+            {
+                if !value.as_str().is_some_and(|text| text.trim().is_empty()) {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    /// [`Self::identity_field`] 的字符串形态（缺失 / 非字符串给空串）。
+    fn identity_text(&self, key: &str) -> String {
+        self.identity_field(key).map(|value| as_text(Some(value))).unwrap_or_default()
+    }
+
     /// 所属提供商 id（`"workbuddy"` / `"raccoon"`，契约见 `core::providers`）。
     ///
     /// **容错口径**：字段缺失、为空串、或不是字符串时一律回落
@@ -149,16 +186,16 @@ impl StoredAccount {
     }
 
     pub fn uid(&self) -> String {
-        as_text(self.fields.get("uid"))
+        self.identity_text("uid")
     }
 
     pub fn nickname(&self) -> String {
-        as_text(self.fields.get("nickname"))
+        self.identity_text("nickname")
     }
 
     /// 账号类型：缺省视为个人版（对应 Node 版 `type || 'personal'`）
     pub fn account_type(&self) -> String {
-        let value = as_text(self.fields.get("type"));
+        let value = self.identity_text("type");
         if value.is_empty() { "personal".to_string() } else { value }
     }
 
@@ -196,9 +233,14 @@ impl StoredAccount {
 
     // ── 端点与版本 ──────────────────────────────────────────
 
-    /// 记录里显式保存的版本 id；缺失时返回 None（由调用方按默认版本兜底）
+    /// 记录里显式保存的版本 id；缺失时返回 None（由调用方按默认版本兜底）。
+    ///
+    /// 顶层缺失时回落 `pluginPublic` / `pluginSecret`（issue #380）：插件落库
+    /// 只写那两个子对象，顶层 `edition` 是后来才补的镜像字段。缺了它
+    /// `resolve_edition(None)` 会回落 `cn`，国际版账号被当成国内版反查。
     pub fn edition(&self) -> Option<String> {
-        as_optional_text(self.fields.get("edition"))
+        let value = self.identity_text("edition");
+        if value.is_empty() { None } else { Some(value) }
     }
 
     /// 记录里显式保存的 prefixPath。
@@ -207,16 +249,27 @@ impl StoredAccount {
     pub fn prefix_path(&self) -> Option<String> {
         match self.fields.get("prefixPath") {
             Some(Value::String(text)) => Some(text.clone()),
-            _ => None,
+            // 顶层没有这个键（插件落库形态）时回落子对象；空串同样是有效值。
+            _ => ["pluginPublic", "pluginSecret"]
+                .iter()
+                .find_map(|holder| {
+                    self.fields
+                        .get(*holder)
+                        .and_then(|object| object.get("prefixPath"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }),
         }
     }
 
     pub fn endpoint(&self) -> Option<String> {
-        as_optional_text(self.fields.get("endpoint"))
+        let value = self.identity_text("endpoint");
+        if value.is_empty() { None } else { Some(value) }
     }
 
     pub fn platform(&self) -> Option<String> {
-        as_optional_text(self.fields.get("platform"))
+        let value = self.identity_text("platform");
+        if value.is_empty() { None } else { Some(value) }
     }
 
     // ── 运营属性 ────────────────────────────────────────────

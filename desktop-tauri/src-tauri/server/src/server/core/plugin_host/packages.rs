@@ -8,6 +8,9 @@ use agent2api_provider_protocol as proto;
 
 use super::install::{self, InstalledPack, PackRegistry, PackSummary, SignatureState};
 
+// 安装与下载共用有限的 ZIP 硬上限；解压总量与文件数仍由 install 独立限制。
+pub(crate) const MAX_PACK_BYTES: usize = 24 * 1024 * 1024;
+
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct PreparedPack {
@@ -59,8 +62,11 @@ pub fn prepare(
     expected_version: Option<&str>,
     require_signed: bool,
 ) -> Result<PreparedPack, String> {
-    if bytes.is_empty() || bytes.len() > 24 * 1024 * 1024 {
-        return Err("插件包必须为非空且不超过 24 MB 的 zip".to_string());
+    if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
+        return Err(format!(
+            "插件包必须为非空且不超过 {} MiB 的 zip",
+            MAX_PACK_BYTES / (1024 * 1024)
+        ));
     }
     let staging = install::plugins_dir().join(".staging").join(format!(
         "pack-{}-{}-{}",

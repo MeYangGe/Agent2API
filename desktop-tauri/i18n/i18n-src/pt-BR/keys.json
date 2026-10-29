@@ -53,6 +53,7 @@
   "确定删除 Key「<strong>{name}</strong>」？使用它的客户端会立刻无法访问。": "Excluir a Key “<strong>{name}</strong>”? Os clientes que a usam perderão o acesso imediatamente.",
   "确定删除「{name}」？用这把 Key 的客户端会立即失效。": "",
   "网关 Key 表": "Tabela de Keys do gateway",
+  "自动记住本次选择，下次打开继续使用；Key 被停用或删除后需重新选择。": "Sua seleção será lembrada na próxima vez. Selecione outra Key se ela for desativada ou excluída.",
   "请先在上面选择可用提供商": "Selecione primeiro os provedores permitidos acima",
   "读取 Key 列表失败：{reason}": "Falha ao ler a lista de Keys: {reason}",
   "还没有 Key。去桌面端「网关 Key」页新建一把。": "",

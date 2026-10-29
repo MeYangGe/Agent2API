@@ -66,6 +66,7 @@ pub fn read(path: &Path, value: &Value) -> Result<Vec<Profile>, String> {
         profile.enabled = id == &active;
         profile.default = profile.enabled;
         profile.native.entry = entry.clone();
+        profile.native.settings = json!({ "lastUsedProvider": value.get("lastUsedProvider") });
         profile.native.model_entries = models
             .get("providers")
             .and_then(|v| v.get(id))

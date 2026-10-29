@@ -86,7 +86,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
     Ok(out)
 }
 
-fn data_path() -> std::path::PathBuf {
+pub(super) fn data_path() -> std::path::PathBuf {
     if cfg!(windows) {
         std::env::var_os("CRUSH_GLOBAL_DATA")
             .or_else(|| {

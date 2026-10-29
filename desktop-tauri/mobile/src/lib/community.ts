@@ -20,11 +20,10 @@ export const QQ_GROUPS: readonly QqGroup[] = [
   { no: '1108276647', nearlyFull: false },
 ]
 
-export type CommunityLink = { id: 'telegram' | 'discord'; url: string }
+export type CommunityLink = { id: 'telegram'; url: string }
 
 export const COMMUNITY_LINKS: readonly CommunityLink[] = [
   { id: 'telegram', url: 'https://t.me/+9gM8YPvgRL02NGRl' },
-  { id: 'discord', url: 'https://discord.gg/z9GzSJMWp' },
 ]
 
 /**

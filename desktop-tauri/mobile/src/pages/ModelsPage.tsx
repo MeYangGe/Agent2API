@@ -5,6 +5,7 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
+import { providerLabel } from '../lib/providers'
 import { fetchManage, refreshModels, setModelEnabled, type ManageModel } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
@@ -35,6 +36,7 @@ export function ModelsPage() {
   const [query, setQuery] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState('')
+  const [refreshResults, setRefreshResults] = useState<Array<{ provider: string; providerLabel?: string; status: string; message?: string }>>([])
 
   const load = async () => {
     try {
@@ -93,11 +95,21 @@ export function ModelsPage() {
   }
 
   const refresh = async () => {
+    if (busy) return
     setBusy('refresh')
+    setRefreshResults([])
     try {
-      await refreshModels()
+      const result = await refreshModels() as { results?: Array<{ provider: string; providerLabel?: string; status: string; message?: string }> }
+      if (!Array.isArray(result?.results) || result.results.length === 0 || result.results.some(item => !item || typeof item.provider !== 'string'
+        || !item.provider || !['refreshed', 'failed', 'skipped'].includes(item.status))
+        || new Set(result.results.map(item => item.provider)).size !== result.results.length) {
+        throw new Error(t('网关未返回逐家模型目录刷新结果'))
+      }
+      setRefreshResults(result.results)
       await load()
-      store.toast(t('模型清单已刷新'))
+      const done = result.results.filter(item => item.status === 'refreshed').length
+      const failed = result.results.filter(item => item.status === 'failed').length
+      store.toast(t('{total} 家 · 成功 {done} · 失败 {failed}', { total: result.results.length, done, failed }), failed ? 'err' : done ? 'ok' : 'warn')
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
     } finally {
@@ -129,6 +141,14 @@ export function ModelsPage() {
 
       <div className='m-body'>
       {error ? <ErrorNote text={error} /> : null}
+      {refreshResults.length ? <div className='m-section'><Card className='m-card m-card-pad'>
+        <div className='text-xs font-medium'>{t('模型目录刷新结果')}</div>
+        {refreshResults.map(item => <p key={item.provider} className='mt-2 text-xs text-subtle'>
+          {providerLabel(item.provider, item.providerLabel)} · {item.status === 'refreshed' ? t('已刷新')
+            : item.status === 'failed' ? t('失败') : t('跳过')}
+          {item.message ? ` · ${t(item.message)}` : ''}
+        </p>)}
+      </Card></div> : null}
       {!models ? <SkeletonList rows={4} height={70} /> : null}
 
       {models && !groups.length ? (
@@ -163,7 +183,7 @@ export function ModelsPage() {
               }}
             >
               <ProviderLogo id={group.provider} label={group.label} />
-              <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{group.label || group.provider}</span>
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{providerLabel(group.provider, group.label)}</span>
               <span style={{ fontSize: 11, color: 'var(--m-text-3)' }}>{t('{n} 个模型', { n: group.list.length })}</span>
               <Icon
                 name='chev'

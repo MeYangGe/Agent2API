@@ -36,8 +36,26 @@ use crate::server::core::account_store::AccountStore;
 use crate::server::core::task_state::{self, Claim};
 use crate::server::logging;
 
-use super::adapter::{adapter_for, implemented_kinds};
-use super::{catalog, kind_id, meta, ProviderKind};
+use super::adapter::{adapter_by_id, adapter_for, implemented_kinds};
+use super::{catalog, executable_provider_ids, is_executable_provider, kind_id, meta, ProviderKind};
+
+/// 这一家被闸门挡住时给用户看的那句话（两条调用路径共用）。
+///
+/// ── 为什么手动路径不报「冷却中」──────────────────────────────
+/// `manual = true` 的家走的是 [`task_state::ManualBackoff::Bypass`]：冷却**没有**
+/// 挡住它。此时若还按冷却剩余时间写文案，用户看到「冷却中，5 小时后重试」，
+/// 而按钮其实立刻就能再点一次 —— 两边互相矛盾，界面看起来就是坏的。真正挡住
+/// 手动这一轮的只可能是在途占位或一秒的最短间隔，照实说就够。
+///
+/// ── 自动路径照旧按冷却解释 ───────────────────────────────────
+/// 定时 / 被动刷新确实受冷却约束，那时「还要等多久」正是用户想知道的信息。
+fn deferred_message(state: &task_state::TaskState, manual: bool) -> String {
+    if state.retry_at > logging::now_ms() || state.running() {
+        if manual { state.waiting_message_bypassing() } else { state.waiting_message() }
+    } else {
+        "沿用缓存，尚未到刷新时间".to_string()
+    }
+}
 
 /// 逐家刷新一次（闸门见模块头）。返回**每家一行**的结果，形状见
 /// `adapter::refresh_implemented_forced` 的文档注释（前后端契约）。
@@ -52,19 +70,11 @@ pub async fn refresh(
 ) -> Vec<Value> {
     let mut results = Vec::new();
     let mut cline_result: Option<Value> = None;
-    // ── 插件家的目录刷新单独一轮 ────────────────────────────────
-    // 它们的 id 不在 `implemented_kinds()`（那是编译期枚举）。用运行时注册表
-    // 拿到全部已装入的插件 provider，与内置家走同一套「支持才刷」的判据。
-    // 排在最前：内置家的结果顺序是存量契约（前端按它渲染），插件家的行
-    // 追加在后面也不会打乱已有条目 —— 所以实际是**先内置、后插件**，见下面
-    // 那次单独调用。
+    // 旧编译期分支保留其排期契约；插件与本体 runtime ID 在下一轮统一消费。
     for kind in implemented_kinds() {
         let provider = kind_id(kind);
-        // 这一家已被插件接管 → 交给下面的插件循环。
-        // 不跳过会让同一个 provider 在一轮里刷两次（内置实现与插件各打一次
-        // 上游），而且结果行会重复 —— 前端按 provider 匹配，第二行覆盖第一行，
-        // 用户看到的是「刷新了但清单没变」。
-        if crate::server::core::plugin_host::serves_provider(provider) {
+        // 已有真实运行期执行体则留给下一轮，同一 provider 不能刷两次。
+        if is_executable_provider(provider) {
             continue;
         }
         if providers.is_some_and(|allowed| !allowed.iter().any(|id| id == provider)) {
@@ -122,9 +132,7 @@ pub async fn refresh(
             Ok(Claim::Acquired(guard)) => guard,
             Ok(Claim::Deferred(state)) => {
                 item["status"] = json!("skipped");
-                item["message"] = json!(if state.retry_at > logging::now_ms() || state.running() {
-                    state.waiting_message()
-                } else { "沿用缓存，尚未到刷新时间".to_string() });
+                item["message"] = json!(deferred_message(&state, manual));
                 item["retryAt"] = json!(state.retry_at);
                 results.push(item);
                 continue;
@@ -161,15 +169,12 @@ pub async fn refresh(
         if cline { cline_result = Some(item.clone()); }
         results.push(item);
     }
-    // ── 插件家（运行时注册表）─────────────────────────────────
-    // 它们的 id 不在 `implemented_kinds()`（那是编译期枚举）。与内置家同一套
-    // 「支持才刷」的判据，结果**追加在末尾** —— 内置家的行序是存量契约
-    // （前端按 provider 匹配），追加不影响已有条目。
-    for id in crate::server::core::plugin_host::installed_ids() {
+    // 真实插件与本体 runtime ID 的并集，不向旧占位适配器调度。
+    for id in executable_provider_ids() {
         if providers.is_some_and(|allowed| !allowed.iter().any(|allowed_id| allowed_id == &id)) {
             continue;
         }
-        let Some(adapter) = crate::server::core::providers::adapter::adapter_by_id(&id) else {
+        let Some(adapter) = adapter_by_id(&id) else {
             continue;
         };
         let label = adapter.label();
@@ -179,16 +184,6 @@ pub async fn refresh(
             "providerLabel": label,
             "refreshedAt": catalog::refresh_meta_for_provider(&id).1,
         });
-        if adapter.refresh_uses_account() {
-            let used = if requested.is_empty() {
-                store.current_entry_for_provider(&id).map(|entry| entry.id)
-            } else {
-                Some(requested.to_string())
-            };
-            if let Some(account_id) = used {
-                item["accountId"] = json!(account_id);
-            }
-        }
         if !adapter.supports_model_refresh() {
             item["status"] = json!("skipped");
             item["fixed"] = json!(true);
@@ -196,8 +191,52 @@ pub async fn refresh(
             results.push(item);
             continue;
         }
-        let account = accounts.get(&id).and_then(Value::as_str).unwrap_or("");
-        let outcome = adapter.refresh_models(store, account, manual).await;
+        // 需要账号时只从该 provider 的启用凭证账号里选；点名错误不回落队首。
+        // 不读 secret，也不把空账号发给 builtin / 插件执行体。
+        let account_id = if adapter.refresh_uses_account() {
+            let available = store.accounts_for_provider(&id);
+            let selected = available.iter().filter_map(|account| account.get("id").and_then(Value::as_str))
+                .find(|account_id| requested.is_empty() || *account_id == requested);
+            let Some(selected) = selected else {
+                item["status"] = json!("skipped");
+                item["message"] = json!(if requested.is_empty() {
+                    "当前没有可用的目录账号"
+                } else {
+                    "指定账号不属于该提供商、未启用或没有可用凭证"
+                });
+                results.push(item);
+                continue;
+            };
+            item["accountId"] = json!(selected);
+            selected.to_string()
+        } else {
+            requested.to_string()
+        };
+        let plugin = crate::server::core::plugin_host::serves_provider(&id);
+        // 插件自己的排期仍归宿主管理；本体复用网关的持久化刷新闸门。
+        let guard = if plugin {
+            None
+        } else {
+            let interval = config::scheduled_settings().model_refresh.interval * 60_000;
+            let backoff = if manual { task_state::ManualBackoff::Bypass } else { task_state::ManualBackoff::Respect };
+            match task_state::claim(&format!("modelRefresh:{id}"), interval, manual, backoff, 1_000) {
+                Ok(Claim::Acquired(guard)) => Some(guard),
+                Ok(Claim::Deferred(state)) => {
+                    item["status"] = json!("skipped");
+                    item["message"] = json!(deferred_message(&state, manual));
+                    item["retryAt"] = json!(state.retry_at);
+                    results.push(item);
+                    continue;
+                }
+                Err(error) => {
+                    item["status"] = json!("failed");
+                    item["message"] = json!(error);
+                    results.push(item);
+                    continue;
+                }
+            }
+        };
+        let outcome = adapter.refresh_models(store, &account_id, manual).await;
         item["status"] = json!(if outcome.refreshed {
             "refreshed"
         } else if outcome.message.is_some() {
@@ -209,6 +248,15 @@ pub async fn refresh(
         item["refreshedAt"] = json!(catalog::refresh_meta_for_provider(&id).1);
         if let Some(message) = outcome.message {
             item["message"] = json!(message);
+        }
+        if let Some(guard) = guard {
+            let success = item["status"] != "failed";
+            let summary = item.get("message").and_then(Value::as_str).unwrap_or("模型清单已刷新").to_string();
+            let interval = config::scheduled_settings().model_refresh.interval * 60_000;
+            if let Err(error) = guard.finish(success, summary, None, 0, interval) {
+                item["status"] = json!("failed");
+                item["message"] = json!(error);
+            }
         }
         results.push(item);
     }
@@ -226,6 +274,12 @@ pub fn reschedule(interval_ms: i64) -> Result<(), String> {
             "cline"
         } else { kind_id(kind) };
         task_state::reschedule(&format!("modelRefresh:{scope}"), interval_ms)?;
+    }
+    for id in executable_provider_ids() {
+        // 插件有独立排期；这里只同步本体使用的网关闸门。
+        if crate::server::core::plugin_host::serves_provider(&id) { continue; }
+        if !adapter_by_id(&id).is_some_and(|adapter| adapter.supports_model_refresh()) { continue; }
+        task_state::reschedule(&format!("modelRefresh:{id}"), interval_ms)?;
     }
     // models.dev 元数据搭同一条任务、同一个间隔（见 `scheduled_tasks` 的
     // TASK_MODEL_REFRESH 分支）：它的排期键与各家同一命名空间，改间隔时若不

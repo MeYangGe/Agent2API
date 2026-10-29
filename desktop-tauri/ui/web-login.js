@@ -29,6 +29,16 @@
    *  期间任何「顺手取消」（关弹窗时）都必须让路 —— 否则会把一次
    *  刚成功的登录取消掉，界面上表现为「登录成功却提示已取消」。 */
   let flowSettling = false;
+  /** 只记公开说明与进度，不存授权 URL、回调或 inputs。 */
+  let loginInstructions = '';
+  let loginHint = '';
+
+  const plainText = value => typeof value === 'string' ? value : '';
+  const pendingResult = value => value && typeof value === 'object'
+    && (value.pending === true || (value.pending && typeof value.pending === 'object')
+      || value.accepted === true || value.done === false || value.state === 'pending'
+      || ((value.flow || Object.prototype.hasOwnProperty.call(value, 'url')
+        || Object.prototype.hasOwnProperty.call(value, 'authUrl')) && value.done !== true && value.ok !== true));
 
   // 注册名（「AutoClaw 国内版」这类）过一遍词典再进文案，非中文界面才翻得动
   const providerLabel = id => {
@@ -56,6 +66,7 @@
     const hint = () => $(config.hintId);
 
     let starting = false;
+    // 成功路径的取消请求通常由关闭弹窗顺手触发，等待其收尾前不得重入。
     const publish = state => {
       if (config.onStateChange) {
         config.onStateChange(state);
@@ -69,27 +80,32 @@
       const cancel_ = cancelButton();
       if (cancel_) cancel_.hidden = !state.waiting;
       const hint_ = hint();
-      if (hint_) hint_.textContent = state.hint;
+      if (hint_) {
+        hint_.textContent = state.hint;
+        hint_.style.whiteSpace = 'pre-wrap';
+      }
     };
 
     /** 同一时刻只能有一家等待登录，其余入口同步禁用。 */
     const applyState = () => {
       const texts = config.texts ? config.texts() : { button: '', hint: '' };
       const waiting = starting || (loginActive && loginProvider === config.provider);
+      const progress = loginActive && loginProvider === config.provider
+        ? [loginInstructions, loginHint].filter(Boolean).join('\n') : '';
       publish({
         label: waiting ? (config.busyText || wbI18n.t('等待登录完成…')) : (texts.button || ''),
         hint: loginActive && loginProvider !== config.provider
           ? wbI18n.t('正在等待{name}登录完成；完成或取消后才能发起新的登录', {
             name: providerLabel(loginProvider),
           })
-          : (texts.hint || ''),
+          : (progress || texts.hint || ''),
         disabled: waiting || loginActive,
         waiting,
       });
     };
 
     const controller = {
-      provider: config.provider,
+      get provider() { return config.provider; },
       /** 提示与按钮文案随本家的其它控件变化时调用（等待中不覆盖，见 applyState） */
       syncTexts: () => {
         if (!loginActive && !starting) applyState();
@@ -97,7 +113,7 @@
       applyState,
       /** 发起登录；与 takeBusy 同一把锁（弹窗里的按钮互斥） */
       async start() {
-        if (busy || loginActive) return;
+        if (busy || loginActive || starting || flowSettling) return;
         busy = true;
         starting = true;
         applyState();
@@ -109,6 +125,12 @@
             if (!result.silent) toast(wbI18n.t('已取消登录等待'));
             return;
           }
+          // 结果归一由共享 UI bridge 负责；这里只守终态，防止空响应或 accepted
+          // 被旧控制器的 onSuccess 误报成账号已添加，不改桌面 payload/Web session。
+          if (!result || pendingResult(result) || pendingResult(result.payload)) {
+            throw new Error('登录尚未完成，请继续等待网关确认');
+          }
+          if (result.ok === false) throw new Error('登录桥没有确认登录完成');
           flowSettling = true;
           await config.onSuccess(result);
         } catch (error) {
@@ -123,7 +145,7 @@
       },
       /** 取消等待（本家在等待时才发请求） */
       async cancel() {
-        if (!loginActive || loginProvider !== config.provider) {
+        if (flowSettling || !loginActive || loginProvider !== config.provider) {
           applyState();
           return;
         }
@@ -153,10 +175,22 @@
   }
 
   /** 把主进程的登录状态落到所有控制器 */
-  function applyShellState(active, provider) {
-    loginActive = Boolean(active);
-    // 老版本壳不带 provider 字段：那时只有 workbuddy 一家有网页登录
-    loginProvider = loginActive ? (provider || 'workbuddy') : '';
+  function applyShellState(active, provider, progress) {
+    const nextActive = Boolean(active);
+    const nextProvider = nextActive ? (provider || 'workbuddy') : '';
+    if (!nextActive || nextProvider !== loginProvider || !loginActive) {
+      loginInstructions = '';
+      loginHint = '';
+    }
+    loginActive = nextActive;
+    // 老版本壳不带 provider 字段：那时只有 workbuddy 一家有网页登录。
+    loginProvider = nextProvider;
+    if (nextActive && progress) {
+      if (Object.prototype.hasOwnProperty.call(progress, 'instructions')) {
+        loginInstructions = plainText(progress.instructions);
+      }
+      if (Object.prototype.hasOwnProperty.call(progress, 'hint')) loginHint = plainText(progress.hint);
+    }
     for (const controller of controllers) controller.applyState();
   }
 
@@ -167,7 +201,7 @@
   async function syncShellState() {
     try {
       const state = await window.workbuddyDesktop.getLoginState();
-      applyShellState(state?.active, state?.provider);
+      applyShellState(state?.active, state?.provider, state);
     } catch {
       applyShellState(false, '');
     }
@@ -193,5 +227,11 @@
 
   // 登录进行状态由主进程推送：等待结束（成功/失败/取消）后按钮自动复位
   window.workbuddyDesktop.onLoginState?.(payload =>
-    applyShellState(payload?.active, payload?.provider));
+    applyShellState(payload?.active, payload?.provider, payload));
+  // 不改变旧 LoginState 查询形状；独立进度事件只更新仍在等的那一轮。
+  window.workbuddyDesktop.onLoginProgress?.(payload => {
+    if (loginActive && payload?.provider === loginProvider) {
+      applyShellState(true, loginProvider, payload);
+    }
+  });
 })();

@@ -167,7 +167,9 @@ pub fn credential(profile: &Profile) -> Result<Option<String>, String> {
                 return Err("网关未配置可用 API Key，请先在「网关 Key」页创建并启用".into());
             }
             let entries = crate::server::core::api_keys::entries_from(&snapshot.raw());
-            let key = if profile.gateway_key_id.is_empty() {
+            let key = if profile.gateway_key_id == "env" {
+                crate::server::config::parse::env_api_key_value()
+            } else if profile.gateway_key_id.is_empty() {
                 active.first().cloned()
             } else {
                 entries

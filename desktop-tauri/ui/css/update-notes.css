@@ -243,7 +243,6 @@ button.qq-card:focus-visible { box-shadow: var(--ring); }
 /* 品牌底：与 icons.js 里三枚 path 的 fill 取同一组 hex */
 .qq-card-logo[data-brand='qq'] { background: #1EBAFC; }
 .qq-card-logo[data-brand='telegram'] { background: #26A5E4; }
-.qq-card-logo[data-brand='discord'] { background: #5865F2; }
 
 .qq-card-body {
   display: flex;

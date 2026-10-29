@@ -31,9 +31,10 @@ import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
 
 /* ─── 条目编辑表单 ─────────────────────────── */
 
-function EditorForm({ entry, options }: {
+function EditorForm({ entry, options, defaultRetryTime }: {
   entry: ScheduleEntry | null
-  options: { id: string; label: string }[]
+  options: { id: string; label: string; builtinTime?: string | null }[]
+  defaultRetryTime: string
 }): React.ReactElement {
   const isNew = entry === null
   const [label, setLabel] = React.useState(entry?.label ?? '')
@@ -42,6 +43,13 @@ function EditorForm({ entry, options }: {
   const [providers, setProviders] = React.useState<string[]>(
     entry ? [...entry.providers] : options.map(item => item.id),
   )
+  // 逐家时刻覆盖：只存用户真的改过的那些（空串 = 撤销覆盖）
+  const [providerTimes, setProviderTimes] = React.useState<Record<string, string>>(
+    entry ? { ...entry.providerTimes } : {},
+  )
+  const [retryTime, setRetryTime] = React.useState(entry?.retryTime ?? defaultRetryTime)
+  const [retryGap, setRetryGap] = React.useState(String(entry?.retryGapMinutes ?? 10))
+  const [retryLimit, setRetryLimit] = React.useState(String(entry?.retryLimit ?? 3))
 
   const canSave = time.trim() !== '' && providers.length > 0 && !store.saving
 
@@ -51,13 +59,31 @@ function EditorForm({ entry, options }: {
       : prev.filter(item => item !== id)))
   }
 
+  /** 某家的生效时刻（用户覆盖 > 内置专属 > 条目时刻）—— 与后端同一套优先级 */
+  const effectiveTime = (id: string): string => {
+    const override = providerTimes[id]
+    if (override) return override
+    const builtin = options.find(item => item.id === id)?.builtinTime
+    return builtin || time
+  }
+
   const submit = () => {
+    // 只把有值的覆盖传上去：空串在 payload 里表示「撤销覆盖」，与「没改」不同，
+    // 所以这里逐项过滤后再交（后端也认空串，但少传一层更清楚）
+    const overrides: Record<string, string> = {}
+    for (const [id, value] of Object.entries(providerTimes)) {
+      if (value) overrides[id] = value
+    }
     void saveScheduleEntry({
       ...(isNew ? {} : { id: entry.id }),
       label: label.trim(),
       time: time.trim(),
       enabled: entry ? entry.enabled : true,
       providers: options.map(item => item.id).filter(id => providers.includes(id)),
+      providerTimes: overrides,
+      retryTime: retryTime.trim(),
+      retryGapMinutes: Number(retryGap) || 0,
+      retryLimit: Number(retryLimit) || 0,
     })
   }
 
@@ -133,6 +159,99 @@ function EditorForm({ entry, options }: {
         </span>
       </div>
 
+      {/* ── 逐家时刻 ────────────────────────────────────────────
+          上游的每日窗口各不相同（Qoder 10:00、ZCode 19:00），所以每家可以
+          单独定时刻；不填就用内置的专属时刻，再没有就跟「每天时刻」。 */}
+      <div className="ck-set-line ck-set-line-top">
+        <span className="ck-set-k">各家时刻</span>
+        <span className="ck-set-v">
+          <div className="ck-mini-note">
+            上游窗口不同的家各自定时，留空 = 用内置专属时刻（没有就跟上面的「每天时刻」）
+          </div>
+          <div className="ck-ptimes">
+            {options.filter(option => providers.includes(option.id)).map(option => {
+              const override = providerTimes[option.id] ?? ''
+              const builtin = option.builtinTime ?? ''
+              const effective = effectiveTime(option.id)
+              return (
+                <div className="ck-ptime-row" key={option.id}>
+                  <span className="ck-ptime-name" title={option.label}>{option.label}</span>
+                  <Input
+                    type="time"
+                    className="ck-sched-time-input font-mono tabular-nums"
+                    value={override || effective}
+                    disabled={store.saving}
+                    onChange={event => {
+                      const next = event.currentTarget.value
+                      setProviderTimes(prev => ({ ...prev, [option.id]: next }))
+                    }}
+                  />
+                  {override
+                    ? <Button size='default' variant='ghost' className="ck-mini-btn"
+                        disabled={store.saving}
+                        title="撤销自定义，回到内置 / 条目时刻"
+                        onClick={() => setProviderTimes(prev => {
+                          const next = { ...prev }
+                          delete next[option.id]
+                          return next
+                        })}
+                      >撤销</Button>
+                    : <span className="ck-ptime-tag">
+                        {builtin ? `专属 ${builtin}` : '跟随条目'}
+                      </span>}
+                </div>
+              )
+            })}
+          </div>
+        </span>
+      </div>
+
+      {/* ── 补签与重试 ──────────────────────────────────────────
+          补签轮：主轮之后再看一眼「今天还有谁没签上」，只补那几个。
+          重试：中性未领取（上游说窗口没开 / 暂未下发）的账号隔多久再试、试几次。 */}
+      <div className="ck-set-line">
+        <span className="ck-set-k">补签时刻</span>
+        <span className="ck-set-v ck-set-row">
+          <Input
+            type="time"
+            className="ck-sched-time-input font-mono tabular-nums"
+            value={retryTime}
+            disabled={store.saving}
+            onChange={event => setRetryTime(event.currentTarget.value)}
+          />
+          <span className="ck-sub">
+            只补今天还没签上的账号 · 清空 = 关闭补签 · 各家按「主轮时刻 + 上面的重试间隔」顺延
+            （Qoder 10:11、ZCode 19:11）
+          </span>
+        </span>
+      </div>
+
+      <div className="ck-set-line">
+        <span className="ck-set-k">窗口重试</span>
+        <span className="ck-set-v ck-set-row">
+          <Input
+            type="number"
+            min={0}
+            max={120}
+            className="ck-sched-num"
+            value={retryGap}
+            disabled={store.saving}
+            onChange={event => setRetryGap(event.currentTarget.value)}
+          />
+          <span className="ck-sub">分钟后重试 · 最多</span>
+          <Input
+            type="number"
+            min={0}
+            max={20}
+            className="ck-sched-num"
+            value={retryLimit}
+            disabled={store.saving}
+            onChange={event => setRetryLimit(event.currentTarget.value)}
+          />
+          <span className="ck-sub">次 · 填 0 关闭重试（只对「窗口没开 / 暂未下发」的账号生效）</span>
+        </span>
+      </div>
+
       <div className="ck-sched-actions">
         <Button size="sm" variant="outline" disabled={store.saving} onClick={() => patch({ editingId: null })}>
           取消
@@ -169,10 +288,11 @@ function scopeSummary(entry: ScheduleEntry, options: { id: string; label: string
   return names.join('、')
 }
 
-function EntryRow({ entry, options, masterOn }: {
+function EntryRow({ entry, options, masterOn, defaultRetryTime }: {
   entry: ScheduleEntry
-  options: { id: string; label: string }[]
+  options: { id: string; label: string; builtinTime?: string | null }[]
   masterOn: boolean
+  defaultRetryTime: string
 }): React.ReactElement {
   const editing = store.editingId === entry.id
   const running = store.runningScheduleId === entry.id
@@ -184,6 +304,41 @@ function EntryRow({ entry, options, masterOn }: {
   const fullScope = entry.providers
     .map(id => options.find(item => item.id === id)?.label ?? id)
     .join('、') || '未勾选提供商'
+
+  // ── 今天的状态：哪些家跑过了、哪些还没到点 ──────────────────
+  // 改造前这里只有一个「今天已签 / 未签」，看不到「Qoder 要等到 10:01」这类
+  // 事实 —— 而那正是用户最需要知道的一格（设的 00:01，为什么没签）。
+  const rows = entry.providerRows ?? []
+  // 三档状态必须分开说，否则用户分不清「卡住了」与「在等窗口」：
+  //   待执行 = 到点了还没跑；等窗口 = 今天还没到点；其余是今天已跑过。
+  const pending = rows.filter(row => !row.firedToday)
+  const overdue = pending.filter(row => row.overdue === true)
+  const waiting = pending.filter(row => row.overdue !== true)
+  const statusText = rows.length === 0
+    ? '—'
+    : [
+        overdue.length > 0
+          ? `待执行 ${overdue.map(row => `${row.label} ${row.time}`).join('、')}`
+          : '',
+        waiting.length > 0
+          ? `等窗口 ${waiting.map(row => `${row.label} ${row.time}`).join('、')}`
+          : '',
+        pending.length === 0 ? '今天都跑过了' : '',
+      ].filter(Boolean).join(' · ')
+  // 补签时刻（空串 = 关闭）：界面明确说清「几点补、补谁」。
+  // 补签点按各家主轮顺延（Qoder 10:11、ZCode 19:11），所以列出逐家的时刻 ——
+  // 只显示一个 00:10 会让人以为那几家也在 00:10 补。
+  const retryTimes = entry.providerRetryTimes ?? {}
+  const retryDetail = Object.keys(retryTimes).length > 0
+    ? `（${Object.entries(retryTimes)
+        .map(([id, time]) => `${options.find(item => item.id === id)?.label ?? id} ${time}`)
+        .join(' / ')}）`
+    : ''
+  const retryText = entry.retryTime
+    ? `补签 ${retryDetail} 只补今天没签上的`
+    : '补签已关闭'
+  // 等窗口重试的账号数：有值就说明「还会再试」，不是一次失败就结束
+  const retryCount = Number(entry.retryCount) || 0
 
   return (
     <div className={editing ? 'ck-sched-row open' : 'ck-sched-row'}>
@@ -207,7 +362,14 @@ function EntryRow({ entry, options, masterOn }: {
             {entry.enabled ? null : <Badge variant="outline" shape="tag">已停用</Badge>}
           </div>
           <div className="ck-prov-desc ck-sched-scope" title={fullScope}>
-            每天 {entry.time || '—'} · {scopeSummary(entry, options)}
+            基准 {entry.time || '—'} · {scopeSummary(entry, options)}
+            {rows.length > 0
+              ? ` · 各家时刻 ${rows.map(row => `${row.label} ${row.time}`).join(' / ')}`
+              : ''}
+          </div>
+          <div className="ck-prov-desc">
+            {statusText} · {retryText}
+            {retryCount > 0 ? ` · ${retryCount} 个账号等窗口重试` : ''}
           </div>
           <div className="ck-prov-desc">上次执行：{lastResultLine(entry)}</div>
         </div>
@@ -243,7 +405,7 @@ function EntryRow({ entry, options, masterOn }: {
           </Button>
         </div>
       </div>
-      {editing ? <EditorForm entry={entry} options={options} /> : null}
+      {editing ? <EditorForm entry={entry} options={options} defaultRetryTime={defaultRetryTime} /> : null}
     </div>
   )
 }
@@ -370,6 +532,11 @@ function KeepalivePanel({ center }: { center: CheckinCenter }): React.ReactEleme
         <ModelApiKeyField {...keyState} value={current.apiKeyId ?? null} disabled={store.saving}
           onChange={apiKeyId => { void saveKeepaliveModels(models, apiKeyId) }}
           onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} id='keepalive-api-key' />
+        {current.apiKeyDefaulted
+          ? <p className='text-xs leading-[1.6] text-subtle'>
+              {t('默认使用第一把可用 API Key，想换就在上面选一把')}
+            </p>
+          : null}
         {current.authError ? <p role='status' className='text-xs text-destructive'>{current.authError}</p> : null}
         <div className="ck-set-line ck-set-line-top">
           <span className="ck-set-k">模型清单</span>
@@ -551,11 +718,14 @@ function TravelPanel({ center }: { center: CheckinCenter }): React.ReactElement 
 
 const SCHEDULE_TIP = '到点后自动签到勾选提供商的可用账号。各家签到接口都是幂等的，'
   + '重复执行不会重复领取。错过时点开机后会自动补签，不会因为当时没开机而漏掉。'
+  + '上游每日窗口不同的家（Qoder 10:00、ZCode 19:00）按各自的专属时刻签，'
+  + '可以在条目里单独改；补签时刻那一轮只补今天还没签上的账号。'
 
 export function ScheduleTab({ center }: { center: CheckinCenter }): React.ReactElement {
   const auto = center.auto
   const options = auto?.providerOptions ?? []
   const entries = auto?.schedules ?? []
+  const defaultRetryTime = auto?.defaultRetryTime ?? '00:10'
   const panels = new Set(center.adminPanels ?? [])
   const keepalive = panels.has('daily_keepalive') ? <KeepalivePanel center={center} /> : null
   const travel = panels.has('growth_tasks') ? <TravelPanel center={center} /> : null
@@ -567,7 +737,7 @@ export function ScheduleTab({ center }: { center: CheckinCenter }): React.ReactE
         <CardHeader className="panel-head">
           <h2>定时签到</h2>
           <span className="tip-q" data-tip={SCHEDULE_TIP} />
-          <span className="panel-sub">每条条目各有时刻与范围 · 各自当天去重 · 错过时点开机自动补签</span>
+          <span className="panel-sub">每条条目各有时刻与范围 · 各家按自己的窗口时刻签 · 补签轮只补未签到的账号</span>
           <Button
             size="sm"
             variant="outline"
@@ -607,11 +777,12 @@ export function ScheduleTab({ center }: { center: CheckinCenter }): React.ReactE
                   </div>
                 </div>
               </div>
-              <EditorForm entry={null} options={options} />
+              <EditorForm entry={null} options={options} defaultRetryTime={defaultRetryTime} />
             </div>
           ) : null}
           {entries.map(entry => (
-            <EntryRow key={entry.id} entry={entry} options={options} masterOn={auto?.enabled === true} />
+            <EntryRow key={entry.id} entry={entry} options={options}
+              masterOn={auto?.enabled === true} defaultRetryTime={defaultRetryTime} />
           ))}
           {entries.length === 0 && store.editingId !== 'new' ? (
             <Empty className="ck-empty">

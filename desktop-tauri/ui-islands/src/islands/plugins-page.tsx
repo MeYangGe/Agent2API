@@ -13,8 +13,32 @@ import { api, bridge, errorMessage, pluginName, readBase64, toast } from './plug
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
 import { t } from '../i18n'
 
+const MIB = 1024 * 1024
+const LEGACY_MAX_PACK_BYTES = 24 * MIB
+const HARD_MAX_PACK_BYTES = 96 * MIB
+
+function clampMaxPackBytes(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? Math.min(value, HARD_MAX_PACK_BYTES) : LEGACY_MAX_PACK_BYTES
+}
+
+function packSizeLimitMessage(maxPackBytes: number): string {
+  return t('插件包大小不能超过 {n} MiB', { n: maxPackBytes / MIB })
+}
+
+async function readPackBase64(file: File, maxPackBytes: number): Promise<string> {
+  if (file.size > maxPackBytes) throw new Error(packSizeLimitMessage(maxPackBytes))
+  const packB64 = await readBase64(file)
+  // FileReader 输出 ASCII base64；仅上传 packB64，JSON 开销远小于服务端预留的 1 MiB。
+  if (packB64.length > Math.ceil(maxPackBytes / 3) * 4) {
+    throw new Error(packSizeLimitMessage(maxPackBytes))
+  }
+  return packB64
+}
+
 function PluginsPage(): React.ReactElement {
   const [payload, setPayload] = React.useState<PluginsPayload | null>(null)
+  const [maxPackBytes, setMaxPackBytes] = React.useState(LEGACY_MAX_PACK_BYTES)
   const [error, setError] = React.useState('')
   const [syncError, setSyncError] = React.useState('')
   const [busy, setBusy] = React.useState('')
@@ -39,7 +63,7 @@ function PluginsPage(): React.ReactElement {
     if (loading.current) return loading.current
     const request = (async () => {
       try {
-        const next = await api<PluginsPayload>('GET', '/api/plugins')
+        const next = await api<PluginsPayload & { maxPackBytes?: unknown }>('GET', '/api/plugins')
         if (!mounted.current) return
         const signature = JSON.stringify({
           packs: next.packs.map(pack => ({ id: pack.id, version: pack.version, enabled: pack.enabled, providers: pack.providers })),
@@ -47,6 +71,7 @@ function PluginsPage(): React.ReactElement {
         })
         const changed = Boolean(previousSignature.current && previousSignature.current !== signature)
         previousSignature.current = signature
+        setMaxPackBytes(clampMaxPackBytes(next.maxPackBytes))
         setPayload(next)
         setError('')
         void bridge().wbApp?.refreshPluginPages?.(next)
@@ -136,9 +161,9 @@ function PluginsPage(): React.ReactElement {
   async function onFile(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.currentTarget.files?.[0]
     if (!file) return
-    if (file.size > 24 * 1024 * 1024) { toast(t('插件包不能超过 24 MB'), 'err'); return }
+    if (file.size > maxPackBytes) { toast(packSizeLimitMessage(maxPackBytes), 'err'); return }
     await run('file', async () => {
-      const packB64 = await readBase64(file)
+      const packB64 = await readPackBase64(file, maxPackBytes)
       await accept(await api<PluginMutation>('POST', '/api/plugins/install', { packB64 }))
       toast(t('插件包已安装'), 'ok')
     })
@@ -184,6 +209,7 @@ function PluginsPage(): React.ReactElement {
       </CardHeader>
       <div className='p-4'>
         <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
+        <p className='mb-3 text-[12px] text-subtle'>{packSizeLimitMessage(maxPackBytes)}</p>
         {error || syncError ? <p className='mb-3 text-[12px] text-destructive'>{error || syncError}</p> : null}
         {busy === 'file' ? <div className='mb-3 flex flex-col gap-2'>
           <span className='text-[12px] text-subtle'>{t('正在读取、校验并安装插件包…')}</span>
@@ -232,7 +258,7 @@ function PluginsPage(): React.ReactElement {
           </CollapsibleContent>
         </Collapsible> : null}
       </div>
-      <CardFooter className='panel-foot'>{t('插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；但转发与添加账号需要插件在位。')}</CardFooter>
+      <CardFooter className='panel-foot'>{t('插件包与主程序分开安装、分开升级。卸载插件后账号数据仍然保留，重新装回即可继续使用；仅该包提供的转发与添加账号需要插件，本体订阅不受影响。')}</CardFooter>
     </Card>
     <PluginSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onChanged={check} />
     {settingsPack ? <PluginPackSettingsDialog key={settingsPack.id} pack={settingsPack}

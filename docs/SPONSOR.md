@@ -16,8 +16,6 @@
 
 **Telegram 群**：<https://t.me/+9gM8YPvgRL02NGRl>
 
-**Discord 群**：<https://discord.gg/z9GzSJMWp>
-
 **赞助 / 商务合作**：想赞助本项目，或想让你的产品出现在 README 里？发邮件到 [541675139@qq.com](mailto:541675139@qq.com)。
 
 ---
@@ -31,7 +29,5 @@ Other ways to help just as much: ⭐ star the repository · 🐛 file issues or 
 **QQ groups**: Agent2API chat groups — **groups 1 (`1127656296`) and 2 (`1130894674`) are almost full, please join group 3 (`1108276647`) first**; search the number in QQ to join.
 
 **Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
-
-**Discord server**: <https://discord.gg/z9GzSJMWp>
 
 **Sponsorship / business**: want to sponsor the project, or feature your product in the README? Email [541675139@qq.com](mailto:541675139@qq.com).

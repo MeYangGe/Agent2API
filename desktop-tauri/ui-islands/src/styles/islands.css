@@ -7,4 +7,5 @@
 @import '../../../ui-shared/provider-docs.css';
 
 @source '../../../ui-kit/src';
+@source '../../../ui-shared';
 @source '../';

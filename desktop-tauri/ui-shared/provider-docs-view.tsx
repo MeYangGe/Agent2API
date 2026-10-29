@@ -18,6 +18,7 @@ function columns(): Record<ProviderCapabilityKey, string> {
 function statusLabel(status: ProviderCapabilityStatus): string {
   switch (status) {
     case 'supported': return t('支持')
+    case 'implemented_unverified': return t('已实现，待实测')
     case 'unsupported': return t('不支持')
     case 'not_applicable': return t('无此概念')
     default: return t('未声明')
@@ -26,7 +27,7 @@ function statusLabel(status: ProviderCapabilityStatus): string {
 
 function Status({ status }: { status: ProviderCapabilityStatus }) {
   const symbols: Record<ProviderCapabilityStatus, string> = {
-    supported: '✓', unsupported: '✗', not_applicable: '—', undeclared: '?',
+    supported: '✓', implemented_unverified: t('待实测'), unsupported: '✗', not_applicable: '—', undeclared: '?',
   }
   return <span aria-label={statusLabel(status)} title={statusLabel(status)}
     className={status === 'supported' ? 'text-success font-semibold' : 'text-muted-foreground'}>
@@ -43,20 +44,24 @@ function rowNotes(provider: ProviderDocumentation, locale: string, labels: Recor
   return [...new Set(notes)]
 }
 
+function packTitle(pack: PluginProviderDocumentation): string {
+  return pack.id === 'builtin-subscriptions' ? t('本体订阅') : t(pack.name)
+}
+
 export function ProviderDocsTable({ packs }: { packs: PluginProviderDocumentation[] }) {
   const locale = (window as unknown as { wbI18n?: { locale(): string } }).wbI18n?.locale() || 'zh-Hans'
   const labels = columns()
   return <div className='flex min-w-0 flex-col gap-3'>
     {packs.map(pack => <Card key={pack.id}>
       <CardHeader>
-        <CardTitle>{pack.name}</CardTitle>
+        <CardTitle>{packTitle(pack)}</CardTitle>
         <Badge variant='outline'>v{pack.version}</Badge>
         {pack.description ? <CardDescription className='w-full'>
           {documentText(pack.description, locale)}
         </CardDescription> : null}
       </CardHeader>
       <CardContent className='p-0'>
-        <Table className='min-w-[860px]' aria-label={`${pack.name} ${t('提供商能力适配表')}`}>
+        <Table className='min-w-[860px]' aria-label={`${packTitle(pack)} ${t('提供商能力适配表')}`}>
           <TableHeader><TableRow>
             <TableHead className='min-w-[170px]'>{t('提供商')}</TableHead>
             {PROVIDER_CAPABILITY_KEYS.map(key => <TableHead key={key} className='text-center'>
@@ -69,7 +74,7 @@ export function ProviderDocsTable({ packs }: { packs: PluginProviderDocumentatio
             return <TableRow key={provider.id}>
               <TableCell>
                 <div className='flex flex-col items-start gap-1'>
-                  <span className='font-medium'>{provider.label}</span>
+                  <span className='font-medium'>{t(provider.label)}</span>
                   {!provider.enabled ? <Badge variant='outline'>{t('已停用')}</Badge>
                     : !provider.loaded ? <Badge variant='outline'>{t('未加载')}</Badge> : null}
                 </div>
@@ -88,8 +93,9 @@ export function ProviderDocsTable({ packs }: { packs: PluginProviderDocumentatio
       </CardContent>
       <CardFooter className='flex-col items-start gap-1'>
         <span>{t('✓ 支持 · ✗ 不支持 · — 无此概念 · ? 未声明')}</span>
+        <span>{t('已实现，待实测：仅表示代码已接入，尚未通过真实账号验证。')}</span>
         <span>{t('在线模型列表指自动拉取上游目录；仅有静态模型清单不算在线支持。')}</span>
-        <span>{t('未声明表示插件没有提供明确结论，不等于不支持。')}</span>
+        <span>{t('未声明表示网关本体或插件没有提供明确结论，不等于不支持。')}</span>
       </CardFooter>
     </Card>)}
   </div>

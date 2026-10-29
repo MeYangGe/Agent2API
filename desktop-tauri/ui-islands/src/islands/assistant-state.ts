@@ -20,6 +20,7 @@
  */
 
 import { t } from '../i18n'
+import { readModelApiKeySelection, rememberModelApiKeySelection } from '../../../ui-shared/model-api-key-memory'
 import { readAssistantStream, type ChatEvent, type ToolCall } from '../../../ui-shared/assistant-stream'
 import { parseAssistantMessages, type ChatMessage } from '../../../ui-shared/assistant-history'
 export { DEFAULT_TITLE_PROMPT } from '../../../ui-shared/assistant-history'
@@ -329,9 +330,13 @@ export async function loadAssistantConfig(): Promise<AssistantConfig> {
   const model = typeof config.model === 'string'
     ? config.model
     : (config.model as { id?: unknown } | null)?.id
+  const scope = await gatewayBase()
+  const apiKeyId = typeof config.apiKeyId === 'string' && config.apiKeyId.trim() ? config.apiKeyId.trim()
+    : readModelApiKeySelection(scope, 'assistant')
+  if (apiKeyId) rememberModelApiKeySelection(scope, 'assistant', apiKeyId)
   return {
     model: typeof model === 'string' && model.trim() ? model : null,
-    apiKeyId: typeof config.apiKeyId === 'string' && config.apiKeyId.trim() ? config.apiKeyId : null,
+    apiKeyId,
     reasoning: typeof config.reasoning === 'string' && config.reasoning.trim() ? config.reasoning : null,
     titleModel: typeof config.titleModel === 'string' && config.titleModel.trim() ? config.titleModel : null,
     titlePrompt: typeof config.titlePrompt === 'string' ? config.titlePrompt : '',
@@ -343,8 +348,12 @@ export async function loadAssistantConfig(): Promise<AssistantConfig> {
 }
 
 export async function saveAssistantConfig(config: AssistantConfig): Promise<AssistantConfig> {
+  const scope = await gatewayBase()
+  rememberModelApiKeySelection(scope, 'assistant', config.apiKeyId)
   const data = await callJson<{ config?: AssistantConfig }>('PUT', '/api/assistant/config', { config })
-  return data?.config && typeof data.config === 'object' ? data.config : config
+  const saved = data?.config && typeof data.config === 'object' ? data.config : config
+  rememberModelApiKeySelection(scope, 'assistant', saved.apiKeyId)
+  return saved
 }
 
 /* ─── 流式对话 ─────────────────────────────────────────────── */

@@ -18,6 +18,7 @@ enum LocalizedText {
 #[serde(rename_all = "snake_case")]
 enum CapabilityStatus {
     Supported,
+    ImplementedUnverified,
     Unsupported,
     NotApplicable,
     #[default]
@@ -143,7 +144,11 @@ fn provider_documentation(
         "claims",
     ] {
         let declared = notes.and_then(|notes| notes.capabilities.get(key));
-        let status = if runtime.get(key) == Some(&true) {
+        let status = if declared
+            .is_some_and(|cell| matches!(cell.status, CapabilityStatus::ImplementedUnverified))
+        {
+            CapabilityStatus::ImplementedUnverified
+        } else if runtime.get(key) == Some(&true) {
             CapabilityStatus::Supported
         } else {
             // false 只表明运行时能力位未开启，不能据此断言上游没有该能力。
@@ -188,10 +193,8 @@ pub(super) fn snapshot(packs: &[plugin_host::PackSummary]) -> Vec<PackDocumentat
                 .providers
                 .iter()
                 .filter(|provider| {
-                    !notes
-                        .providers
-                        .get(&provider.id)
-                        .is_some_and(|notes| notes.hidden)
+                    !crate::server::core::providers::availability::is_suspended(&provider.id)
+                        && !notes.providers.get(&provider.id).is_some_and(|notes| notes.hidden)
                 })
                 .map(|provider| {
                     let info = infos.iter().find(|info| info.id.as_str() == provider.id);

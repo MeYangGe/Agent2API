@@ -214,6 +214,7 @@ pub fn import_accounts(store: &AccountStore, payload: &Value) -> Result<Value, A
             }
         }
 
+        crate::server::core::account_store::codearts_accounts::migrate_limiters(&mut state.accounts);
         store.save_locked(&state, guard)?;
         let failed = stats.failures.len();
         // errors 顺序：失败 → 跳过 → 定义警告（跳过项带 skipped 标记、定义警告带

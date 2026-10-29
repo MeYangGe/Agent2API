@@ -13,6 +13,7 @@ import { CheckinRow, ProviderLogo } from './checkin-row'
 import { CheckinUmid } from './checkin-umid'
 import { claimOnboarding, onboardingOf, queryOnboarding } from './checkin-onboarding'
 import { t } from '../i18n'
+import { growthTaskCompleted, growthTaskRunnable } from '../../../ui-shared/checkin'
 
 /**
  * 「签到中心」标签页：总览卡 + 每日签到 + 新手福利 + 活动套餐 + 成长任务。
@@ -458,9 +459,8 @@ function PlanRow({ row }: { row: PlanEntry }): React.ReactElement {
 function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
   const cache = growthOf(row.id)
   const tasks = cache.tasks ?? []
-  // 能自动执行的：受支持、非「需真实操作」
-  const runnable = tasks.filter(task => task.supported && !task.unforgeable)
-  const pending = runnable.filter(task => task.status !== 'claimed' && task.current < task.target)
+  const runnable = tasks.filter(task => growthTaskRunnable(task, 'full'))
+  const pending = runnable.filter(task => !growthTaskCompleted(task))
   const loaded = cache.status === 'loaded' && tasks.length > 0
   const [expanded, setExpanded] = React.useState(false)
   const running = cache.running || cache.runningSchool
@@ -528,17 +528,17 @@ function GrowthRow({ row }: { row: GrowthEntry }): React.ReactElement {
             </span>
             {result ? <span className="ck-task-pts">{result.message}</span> : null}
             <span className="ck-task-st">
-              {task.unforgeable
-                ? <Badge variant="outline" shape="tag">需真实操作</Badge>
-                : task.supported
-                  ? task.status === 'claimed'
-                    ? <Badge variant="success" shape="tag">已领取</Badge>
-                    : task.status === 'completed'
-                      ? <Badge variant="brand" shape="tag">可领取</Badge>
+              {task.status === 'claimed'
+                ? <Badge variant="success" shape="tag">已领取</Badge>
+                : growthTaskRunnable(task, 'claim')
+                  ? <Badge variant="brand" shape="tag">可领取</Badge>
+                  : task.unforgeable
+                    ? <Badge variant="outline" shape="tag">需真实操作</Badge>
+                    : !task.supported
+                      ? <Badge variant="outline" shape="tag">不支持</Badge>
                       : task.locked
                         ? <Badge variant="outline" shape="tag">未解锁</Badge>
-                        : <Badge variant="warning" shape="tag">待完成</Badge>
-                  : <Badge variant="outline" shape="tag">不支持</Badge>}
+                        : <Badge variant="warning" shape="tag">待完成</Badge>}
             </span>
           </div>
         )

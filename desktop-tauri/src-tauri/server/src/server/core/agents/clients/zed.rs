@@ -25,6 +25,7 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
                 let mut profile = Profile::new(&format!("{id}-{protocol}"), id, protocol, &base);
                 profile.native.source_id = id.clone();
                 profile.native.entry = entry.clone();
+                profile.native.settings = json!({ "protocol": protocol });
                 profile.enabled = false;
                 profile.default = false;
                 if let Some(models) = entry.get("available_models").and_then(Value::as_array) {
@@ -99,9 +100,9 @@ pub fn write(
         .cloned()
         .unwrap_or_default();
     for model in &profile.models {
-        let index = models
-            .iter()
-            .position(|v| v.get("name").and_then(Value::as_str) == Some(&model.id));
+        let source_protocol = profile.native.settings.get("protocol").and_then(Value::as_str).unwrap_or(&profile.protocol);
+        let index = models.iter().position(|value| value.get("name").and_then(Value::as_str) == Some(&model.id)
+            && (value.pointer("/capabilities/chat_completions").and_then(Value::as_bool) == Some(false)) == (source_protocol == "responses"));
         let mut item = index
             .map(|i| models[i].clone())
             .unwrap_or_else(|| json!({}));

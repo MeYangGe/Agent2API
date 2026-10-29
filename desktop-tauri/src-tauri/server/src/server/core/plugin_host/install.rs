@@ -43,6 +43,7 @@
 //! 入口里的 `..`（见 [`validate_manifest`]）。
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use agent2api_provider_protocol as proto;
@@ -341,6 +342,7 @@ impl PackRegistry {
 
     /// 某个 provider 是否由已启用的包提供。
     pub fn provider_enabled(&self, provider: &str) -> bool {
+        if crate::server::core::providers::availability::is_suspended(provider) { return false; }
         self.packs.iter().any(|pack| {
             pack.enabled
                 && pack
@@ -366,6 +368,9 @@ pub fn validate_manifest(manifest: &proto::PackManifest, host_protocol: u32) -> 
     }
     if manifest.providers.is_empty() {
         return Err("插件包里没有声明任何提供商。".to_string());
+    }
+    if let Some(provider) = manifest.providers.iter().find(|provider| super::ownership::reserved(provider.id.as_str())) {
+        return Err(format!("提供商「{}」是本体保留身份，插件包不得声明，请移除后重新安装。", provider.id.as_str()));
     }
     if manifest.entry.is_empty() {
         return Err("插件包没有声明入口二进制。".to_string());
@@ -431,11 +436,14 @@ pub(super) fn extract_zip(bytes: &[u8], target: &Path) -> Result<(), String> {
         return Err("插件包文件数量超过上限".to_string());
     }
     let mut expanded = 0_u64;
+    let mut actual_expanded = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
             .map_err(|e| format!("读 zip 条目失败: {e}"))?;
-        expanded = expanded.saturating_add(file.size());
+        let declared_size = file.size();
+        expanded = expanded.saturating_add(declared_size);
         if expanded > 128 * 1024 * 1024 {
             return Err("插件包解压后超过 128 MB 上限".to_string());
         }
@@ -454,7 +462,33 @@ pub(super) fn extract_zip(bytes: &[u8], target: &Path) -> Result<(), String> {
         }
         let mut out = std::fs::File::create(&out_path)
             .map_err(|e| format!("写文件失败（{}）: {e}", out_path.display()))?;
-        std::io::copy(&mut file, &mut out).map_err(|e| format!("解包失败: {e}"))?;
+        let mut file_expanded = 0_u64;
+        loop {
+            let remaining = 128 * 1024 * 1024 - actual_expanded;
+            // 额度耗尽后仍读最多 1 字节，既区分真实 EOF，也让 zip 完成 CRC 校验。
+            let read_len = buffer.len().min((remaining + 1) as usize);
+            let count = match file.read(&mut buffer[..read_len]) {
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("解包失败：读取条目或 CRC 校验失败".to_string()),
+            };
+            if count == 0 {
+                break;
+            }
+            if count as u64 > remaining {
+                return Err("插件包解压后超过 128 MB 上限".to_string());
+            }
+            actual_expanded += count as u64;
+            file_expanded += count as u64;
+            if file_expanded > declared_size {
+                return Err("插件包条目实际解压尺寸与声明不一致".to_string());
+            }
+            out.write_all(&buffer[..count])
+                .map_err(|_| "解包失败：写入文件失败".to_string())?;
+        }
+        if file_expanded != declared_size {
+            return Err("插件包条目实际解压尺寸与声明不一致".to_string());
+        }
         // Unix 上要保住可执行位（zip 的 external attributes 高 16 位是 mode）
         #[cfg(unix)]
         {

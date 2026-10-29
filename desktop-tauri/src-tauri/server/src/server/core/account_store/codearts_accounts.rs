@@ -1,8 +1,8 @@
 //! CodeArts 账号的**存量投影**（实现已整体搬到提供商插件）。
 //!
-//! ── 这里只剩两件事 ──────────────────────────────────────────
-//!   1. `CODEARTS_PROVIDER_ID`：落盘契约（`provider` 字段的值），别处比对都用它；
-//!   2. `to_codearts_public_account`：**升级上来的老账号**的公开形态。
+//! ── 存量展示与配置迁移 ──────────────────────────────────────
+//! `CODEARTS_PROVIDER_ID` 保持落盘身份；公开投影服务旧账号，限制器迁移清理已退役
+//! 活动的 Token 条件，不改凭证、账号身份和启用状态。
 //!
 //! ── 为什么投影必须留着 ──────────────────────────────────────
 //! 存量记录的凭证散在顶层字段里（`access_key_id` / `security_token` /
@@ -22,6 +22,8 @@
 
 use serde_json::{json, Value};
 
+use crate::server::core::limiter::{self, LimiterKind, LimiterRule};
+use crate::server::core::limiter::types::Metric;
 use crate::server::core::providers::{kind_id, ProviderKind};
 
 use super::state::StoredAccount;
@@ -29,6 +31,49 @@ use super::state::StoredAccount;
 /// 本家的 provider id（`store_view` 的形状分派与别处比对都要用，
 /// 与其它几家同一命名：`<X>_PROVIDER_ID`）。
 pub const CODEARTS_PROVIDER_ID: &str = kind_id(ProviderKind::CodeArts);
+
+/// 过期活动的 Token 规则不再迁入；已显式清空的限制器保持不限制。
+pub(crate) fn migrate_limiters(accounts: &mut [StoredAccount]) -> usize {
+    let mut changed = 0;
+    for record in accounts {
+        if record.provider() != CODEARTS_PROVIDER_ID { continue; }
+        let mut groups = limiter::effective_groups_in(record.fields());
+        let mut removed = limiter::effective_rules_in(record.fields()).iter().any(|rule| rule.kind == LimiterKind::Token);
+        for group in &mut groups {
+            let before = group.conditions.len();
+            group.conditions.retain(|condition| !matches!(condition.metric, Metric::Tokens | Metric::Requests));
+            removed |= group.conditions.len() != before;
+        }
+        if !removed { continue; }
+        groups.retain(|group| !group.conditions.is_empty());
+        let configured_empty = if let Some(groups) = record.get("limiterGroups").and_then(Value::as_array) {
+            groups.is_empty()
+        } else {
+            record.get("limiters").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        };
+        if groups.is_empty() && !configured_empty {
+            let rule = LimiterRule { kind: LimiterKind::Balance, action: limiter::LimiterAction::Skip,
+                threshold: crate::server::core::usage_records::DEFAULT_LOW_BALANCE_THRESHOLD,
+                period: 0, reset: limiter::LimiterReset::Fixed, enabled: true };
+            groups = limiter::groups::groups_from_rules(&[rule]);
+        }
+        for group in &mut groups {
+            if let Some(condition) = group.conditions.first_mut() {
+                condition.join = limiter::types::Join::Or;
+            }
+        }
+        let rules = limiter::legacy_rules(&groups);
+        record.set("limiterGroups", limiter::types::json_of(&groups));
+        record.set("limiters", limiter::rules_to_json(&rules));
+        let balance = rules.iter().find(|rule| rule.kind == LimiterKind::Balance);
+        record.set("lowBalance", balance.map(|rule| json!({
+            "mode": if rule.action == limiter::LimiterAction::Disable { "disable" } else { "skip" },
+            "threshold": rule.threshold,
+        })).unwrap_or_else(|| json!({ "mode": "off", "threshold": 0 })));
+        changed += 1;
+    }
+    changed
+}
 
 impl super::AccountStore {
     /// 界面用的公开形态（**只服务存量内置记录**）。

@@ -304,6 +304,43 @@ fn normalize_custom_known_fields(
 /// WorkBuddy 的已知字段：端点/版本三件套按 edition 归一，运营字段沿用旧口径。
 ///
 /// 非 WorkBuddy 记录**不会**走到这里（见模块头第 3 条）。
+///
+/// ── `apiBase` 是 `endpoint` 的别名（issue #381）──────────────────
+/// 手工导入时用户手上只有凭证文件里的 `auth.domain`（`www.workbuddy.ai`），
+/// 自然会传 `domain` / `apiHost` / `apiBase` 这类名字。其中只有 `apiBase`
+/// 被实际接受过（社区试出来的），而代码里从来没有认过它 —— 于是「导入成功、
+/// 无任何报错」但账号的 `endpoint` 是空串，插件回落到本地区端点：
+/// 国际版账号打到国内版站点，余额查询稳定 401 → 网关触发续期 → 续期打同一
+/// 个错地址 → 最后报出「登录态已过期或被拒绝」这种把人往凭证方向带的话。
+///
+/// 这里把四个常见名字都收进 `endpoint`（顺序即优先级）：
+///   `apiBase`（实测可用、语义最明确）> `endpoint`（本机导出形态）
+///   > `apiHost` > `domain`（凭证文件里 `auth.domain` 的写法）。
+///
+/// `domain` 放在最后是**有意的**：它在插件侧只喂 `X-Domain` 头，不是端点。
+/// 但当用户只给了它时，按「他说的那个站点」处理远好于让它静默失效 ——
+/// issue #381 里 6 种写法中 5 种失败，最贵的一课就是「导入成功、查询才炸」。
+///
+/// 没写协议时补 `https://`：插件侧 `normalize_endpoint` 拿到没有 scheme 的
+/// 字符串会拼出 `www.workbuddy.ai/v2/...`，reqwest 判为相对地址直接失败。
+fn endpoint_alias_of(item: &Map<String, Value>) -> String {
+    const ALIASES: [&str; 4] = ["apiBase", "endpoint", "apiHost", "domain"];
+    let raw = ALIASES
+        .iter()
+        .map(|key| text_of(item.get(*key)))
+        .find(|text| !text.is_empty())
+        .unwrap_or_default();
+    if raw.is_empty() {
+        return raw;
+    }
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
+}
+
 fn normalize_workbuddy_known_fields(
     record: &mut Map<String, Value>,
     item: &Map<String, Value>,
@@ -323,15 +360,27 @@ fn normalize_workbuddy_known_fields(
                 .unwrap_or_default(),
         ),
     );
-    record.insert(
-        "endpoint".to_string(),
-        Value::String(
-            explicit("endpoint")
-                .map(|value| text_of(Some(value)))
-                .or_else(|| before.and_then(StoredAccount::endpoint))
-                .unwrap_or_default(),
-        ),
-    );
+    // 端点：显式 `endpoint` / `apiBase` / `apiHost` / `domain` > 本机旧值 > 空串。
+    //
+    // ── 空串为什么是安全的（issue #381）──────────────────────────
+    // 插件侧 `Context::make` 在 endpoint 为空时按 **edition** 回落到该地区的
+    // 官方端点（`workbuddy_shared::endpoints`）。所以真正决定「打哪个站点」
+    // 的是下面那行 `edition` —— 它由 provider id 定（`workbuddy-intl` → intl），
+    // 不依赖用户猜对字段名。改造前的问题不是「endpoint 空」，而是导入时
+    // `edition` 被写成 `cn`（`resolve_edition(None)` 的回落），于是国际版账号
+    // 打到了国内版站点。
+    //
+    // 网关侧不重复写端点常量：那套知识在插件里（`EDITION_INTL.endpoint`），
+    // 网关只存用户显式给的值或空串。
+    let endpoint = {
+        let incoming = endpoint_alias_of(item);
+        if !incoming.is_empty() {
+            incoming
+        } else {
+            before.and_then(StoredAccount::endpoint).unwrap_or_default()
+        }
+    };
+    record.insert("endpoint".to_string(), Value::String(endpoint));
     record.insert(
         "platform".to_string(),
         Value::String(

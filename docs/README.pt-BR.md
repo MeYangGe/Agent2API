@@ -20,18 +20,16 @@
 
 O Agent2API é um **gateway de roteamento de IA com gerenciamento de clientes Agent**. Ele conecta provedores personalizados a uma API unificada e centraliza o roteamento de contas, mapeamento de modelos, chaves do gateway e relatórios. Também permite importar, alternar e visualizar previamente as configurações de conexão de clientes Agent locais.
 
-Este repositório contém apenas a infraestrutura do gateway e do gerenciamento de clientes. Login, chamadas de modelos, renovação de credenciais, saldo e check-in específicos dos provedores são fornecidos por plugins opcionais e atualizados separadamente do aplicativo principal.
-
 ## ✨ Principais recursos
 
 - 🔌 **APIs de modelos unificadas** — OpenAI Chat / Responses / Images, Anthropic Messages e catálogo unificado; Raccoon, Loomy, Antigravity e ModelScope geram imagens, e Loomy, Antigravity e ModelScope também editam imagens de referência. Ambos os recursos estão disponíveis como ferramentas do assistente de IA
 - 🧭 **Roteamento de IA** — modelos, prioridade de contas, balanceamento, afinidade de sessão e failover
 - 🤖 **Gerenciamento de clientes Agent** — vários perfis, importação de configurações, prévia de gravação e alternância de serviços
-- 🧩 **Extensões por plugins** — provedores instalados e atualizados separadamente; o gateway funciona sem eles
+- 🧩 **Extensões por plugins** — provedores adicionais instalados e atualizados separadamente; provedores personalizados dispensam plugins
 - 🛡️ **Proxies de saída** — saídas do pool de proxies para contas e tarefas de atualização
 - 🔑 **Segurança do gateway** — chaves com escopo, verificação humana no painel e recusa de modelos sem chave configurada
 - 📊 **Relatórios** — volume, sucesso, tokens, acerto de cache e mapa de calor de 365 dias
-- ⏰ **Manutenção em segundo plano** — modelos, credenciais e atualizações; tarefas específicas vêm de plugins
+- ⏰ **Manutenção em segundo plano** — modelos, credenciais e atualizações; o check-in diário roda no horário de janela de cada provedor (Qoder 10:01, ZCode 19:01, os demais seguem o horário da agenda), com uma rodada de recuperação que só trata contas ainda não confirmadas no dia; tarefas de provedores adicionais vêm de plugins
 - 🖥️ **Três formas de execução** — desktop Windows / macOS / Linux, servidor Windows / Linux e Docker (amd64 / arm64); sem runtime Node, interface em seis idiomas
 
 ## ❤️ Patrocinadores
@@ -51,7 +49,6 @@ Este repositório contém apenas a infraestrutura do gateway e do gerenciamento 
 
 - **Grupos do QQ**: grupos de chat do Agent2API — **os grupos 1 (`1127656296`) e 2 (`1130894674`) estão quase lotados, entre no grupo 3 (`1108276647`)**; pesquise o número no QQ para entrar.
 - **Grupo do Telegram**: <https://t.me/+9gM8YPvgRL02NGRl>
-- **Servidor do Discord**: <https://discord.gg/z9GzSJMWp>
 - **💖 Doação**: se o Agent2API ajuda você, fique à vontade para [pagar um café ao autor](./SPONSOR.md); doações são voluntárias e não desbloqueiam nada.
 - **🤝 Patrocínio / negócios**: quer patrocinar o projeto ou divulgar seu produto aqui? Envie um e-mail para [541675139@qq.com](mailto:541675139@qq.com).
 

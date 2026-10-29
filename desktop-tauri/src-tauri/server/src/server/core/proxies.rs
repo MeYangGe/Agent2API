@@ -109,6 +109,9 @@ pub fn normalize_account_proxy(input: &Value) -> Result<Option<Value>, ProxyConf
     };
 
     let explicit_source = clean_string(object.get("source"), 20).to_lowercase();
+    if explicit_source == "direct" {
+        return Ok(Some(json!({ "source": "direct" })));
+    }
     let has_listener = object
         .get("listenerUid")
         .and_then(Value::as_str)
@@ -432,6 +435,10 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
         .map(|value| js_interpolation(Some(value)))
         .unwrap_or_else(|| "undefined".to_string());
 
+    if source == "direct" {
+        return None;
+    }
+
     // 轮询档：静态取第一条可用（**不动游标**）。逐请求的轮询走
     // `resolve_account_proxy_rotating`；这条留给展示与「一次调用不代表一次转发」
     // 的链路（见模块头）—— 它们问的是「这条配置现在能不能用」，不是「这次该走哪条」。
@@ -589,6 +596,14 @@ pub fn describe_account_proxy(config: Option<&Value>) -> Value {
     let Some(config) = config.filter(|value| !value.is_null()) else {
         return Value::Null;
     };
+    if config.get("source").and_then(Value::as_str) == Some("direct") {
+        return json!({
+            "source": "direct",
+            "config": { "source": "direct" },
+            "label": "直连",
+            "error": Value::Null,
+        });
+    }
     if is_rotate_config(config) {
         return describe_rotate_proxy(config);
     }

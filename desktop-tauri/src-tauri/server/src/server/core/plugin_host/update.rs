@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 mod required;
 pub(super) use required::required_release;
+pub(crate) use super::packages::MAX_PACK_BYTES;
 
 use crate::server::core::update::client::{
     fetch_candidate, fetch_json, fetch_public, github_headers,
@@ -15,7 +16,6 @@ pub const INDEX_REPO: &str = "Agent2plugin/Agent2plugin";
 pub const FALLBACK_REPO: &str = "Agent2Builder/agent2api-providers-releases";
 const GITHUB_API: &str = "https://api.github.com";
 const QUERY_TIMEOUT_MS: u64 = 30_000;
-const MAX_DOWNLOAD_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PackAsset {
@@ -470,13 +470,15 @@ pub async fn release_assets_in(repo: &str, id: &str) -> Result<Option<ReleaseAss
     release_for(repo, id, None, None).await
 }
 
+/// progress 的 total 是已知包大小（未知时为 0），不是硬上限；
+/// 元数据、响应声明与逐块累计均受 MAX_PACK_BYTES 限制。
 pub async fn download(
     asset: &PackAsset,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<Vec<u8>, String> {
     crate::server::core::update::assert_downloadable(&asset.url).map_err(|error| error.message)?;
-    if asset.size > MAX_DOWNLOAD_BYTES as u64 {
-        return Err("插件包超过 24 MB 上限".to_string());
+    if asset.size > MAX_PACK_BYTES as u64 {
+        return Err(format!("插件包超过 {} MiB 上限", MAX_PACK_BYTES / (1024 * 1024)));
     }
     let headers = vec![
         ("User-Agent".to_string(), "agent2api-plugin".to_string()),
@@ -546,8 +548,8 @@ async fn read_download(
 ) -> Result<Vec<u8>, String> {
     let declared = response.content_length().unwrap_or(0);
     let total = if asset.size > 0 { asset.size } else { declared };
-    if total > MAX_DOWNLOAD_BYTES as u64 || declared > MAX_DOWNLOAD_BYTES as u64 {
-        return Err("插件包超过 24 MB 上限".to_string());
+    if total > MAX_PACK_BYTES as u64 || declared > MAX_PACK_BYTES as u64 {
+        return Err(format!("插件包超过 {} MiB 上限", MAX_PACK_BYTES / (1024 * 1024)));
     }
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
@@ -559,8 +561,8 @@ async fn read_download(
             .map_err(|_| "插件下载长时间没有数据".to_string())?;
         let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|error| format!("下载中断：{error}"))?;
-        if buffer.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
-            return Err("插件包超过 24 MB 上限".to_string());
+        if buffer.len().saturating_add(chunk.len()) > MAX_PACK_BYTES {
+            return Err(format!("插件包超过 {} MiB 上限", MAX_PACK_BYTES / (1024 * 1024)));
         }
         buffer.extend_from_slice(&chunk);
         progress(buffer.len() as u64, total);

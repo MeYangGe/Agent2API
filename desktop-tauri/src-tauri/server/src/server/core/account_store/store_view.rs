@@ -27,28 +27,14 @@ use crate::server::core::custom_providers;
 use crate::server::core::endpoints::{resolve_edition, EditionInfo};
 use crate::server::core::proxies::describe_account_proxy;
 
-/// 这条账号所属的家，此刻**该不该出现在管理界面上**。
+/// 这条账号所属的家，此刻是否出现在管理界面上。
 ///
-/// ── 判据（只有这一条，别加别的）─────────────────────────────
-/// 内置注册表里没有这个 id（自定义家 / 手改的未知 id）→ 显示；
-/// 在注册表里 → 看插件是否接管（`serves_provider`），没接管就隐藏。
-///
-/// ── 为什么隐藏而不是保留可见（2026-10 用户决定）───────────────
-/// 各家反代的转发 / 账号 / 签到实现已整体搬进插件。没装插件时那些功能
-/// **一个都不可用**，把它们留在列表里就是「看得见、点什么都没反应」——
-/// 用户明确要的是「插件不在，这家就不存在」。数据不动：记录仍在库里，
-/// 导出直接读库（`account_transfer::export_accounts` 不走本函数），
-/// 装上插件后原样回来。
-///
-/// ── 为什么不能统一按「有没有执行体」判 ───────────────────────
-/// 自定义提供商的转发**仍在网关里**（`core::upstream::provider_loop` 按
-/// `custom-` 前缀直连，不经插件），它们没有插件可装 —— 按执行体判会把
-/// 用户自己建的 API 全藏起来。所以先看「是不是内置家的 id」。
+/// 本体与真实插件有执行体就显示；旧身份缺插件仍隐藏，数据留在库里。
+/// 自定义提供商独立直连，不经插件；其它账号只认真实执行体，缺插件的
+/// 存量记录继续隐藏而不删除。
 pub(crate) fn account_visible(provider: &str) -> bool {
-    if crate::server::core::providers::kind_from_id(provider).is_none() {
-        return true;
-    }
-    crate::server::core::plugin_host::serves_provider(provider)
+    provider.starts_with(custom_providers::ID_PREFIX)
+        || crate::server::core::providers::is_executable_provider(provider)
 }
 
 /// 快照的两种用途：内部逻辑要全部账号，界面只要此刻能用的。
@@ -306,11 +292,8 @@ impl AccountStore {
     /// 导出（`account_transfer::export_accounts`）直接读库、不经这里；
     /// 装上插件后这些账号原样回来。
     ///
-    /// ⚠️ **不能**用「有没有执行体」当统一判据：自定义提供商（`custom-` 前缀）
-    /// 的转发仍在网关里（`core::upstream::provider_loop` 按前缀直连），它们
-    /// 没有插件可装、也不该被隐藏。所以判据只作用于**内置注册表里的 id**：
-    /// 在注册表里且插件没接管 ⇒ 隐藏；注册表外（自定义家 / 手改的未知 id）
-    /// ⇒ 原样显示。
+    /// 自定义提供商独立直连；本体订阅与真实插件按 `account_visible` 的执行体
+    /// 并集判定。旧身份缺插件仍隐藏，记录与导出内容不受展示过滤影响。
     pub(crate) fn snapshot(&self, state: &AccountState, visibility: Visibility) -> Value {
         // 过滤一次、克隆一次（两个队首派生函数都要 `&[StoredAccount]`）
         let mut visible: Vec<StoredAccount> = Vec::with_capacity(state.accounts.len());
@@ -505,6 +488,9 @@ impl AccountStore {
         };
         match shaped {
             Value::Object(mut fields) => {
+                if !record.has_plugin_secret() {
+                    super::plugin_public::credential_fields(record, &mut fields);
+                }
                 fields.insert(
                     "hasCredentials".to_string(),
                     Value::Bool(record.has_credentials()),

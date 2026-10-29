@@ -896,12 +896,20 @@ pub struct SubscriptionNodeTarget {
 ///   · 集合里的节点 upsert（按 `providerId + node` 定位：**已存在的沿用 id**
 ///     —— 账号按 id 引用池条目，重生成 id 会让引用全部悬空）；
 ///   · 订阅侧已消失的（或订阅被删 / 被禁用后不再出现在集合里的）镜像条目摘掉；
+///   · 同一订阅内**本次清单里已不存在**的节点条目也摘掉（见下方 ③）；
 ///   · manual 与 clash 条目从不被碰。
 ///
 /// 返回变更条数（「已是最新」时为 0）。注意目标集合是**全部启用订阅的全部
 /// 节点**：只传一条订阅的节点时，其它订阅的条目会被当作「已消失」摘掉
 /// （调用方要传全量 —— sub_kernel 的同步总是构造全量）。
-pub fn sync_subscription_nodes(targets: &[SubscriptionNodeTarget]) -> Result<usize, String> {
+///
+/// `referenced_ids` 是被账号 / 服务线路引用的池条目 id：③ 的清理会跳过它们
+/// （节点在订阅里没了但账号还挂着 —— 保留条目让用户看见「这条引用失效了」，
+/// 比静默删掉、账号侧变成「代理不存在」更容易排查）。
+pub fn sync_subscription_nodes(
+    targets: &[SubscriptionNodeTarget],
+    referenced_ids: &std::collections::HashSet<String>,
+) -> Result<usize, String> {
     let now = logging::now_ms();
     let mut items = read_items();
     let mut changes = 0usize;
@@ -965,9 +973,20 @@ pub fn sync_subscription_nodes(targets: &[SubscriptionNodeTarget]) -> Result<usi
     // 改名很常见），按名判定会把改名后的节点删了重加（id 变了，账号引用
     // 悬空）。providerId 不在本次集合 = 该订阅被删 / 被禁用 / 已无节点，
     // 它名下的全部条目才真正该走。
+    //
+    // ③ 同一订阅内、本次清单里已经没有的节点条目摘掉 —— 这一段正是「按名
+    // 判定会误删改名节点」的代价兑现处：不改名就没事，一旦改名旧条目就永远
+    // 等不到同名节点来更新它，从此挂在池里（实测「魔戒」订阅的
+    // `剩余流量：X GB` 每更新一次沉淀一条，攒了 7 条）。判据取交集而非并集：
+    // 只有「providerId 还活着」时才进 ③，providerId 整个消失的走 ②。
     let live_providers: std::collections::HashSet<&str> = targets
         .iter()
         .map(|target| target.provider_id.as_str())
+        .collect();
+    // 本次清单里的 (providerId, node) 全集：③ 用它判断某条目是否还该存在
+    let live_nodes: std::collections::HashSet<(&str, &str)> = targets
+        .iter()
+        .map(|target| (target.provider_id.as_str(), target.node.as_str()))
         .collect();
     let before = items.len();
     items.retain(|item| {
@@ -977,7 +996,23 @@ pub fn sync_subscription_nodes(targets: &[SubscriptionNodeTarget]) -> Result<usi
         let Some(provider_id) = item.get("providerId").and_then(Value::as_str) else {
             return false; // 没有引用信息的坏行（手工改库），清掉
         };
-        live_providers.contains(provider_id)
+        if !live_providers.contains(provider_id) {
+            return false; // ②：订阅整个没了
+        }
+        // ③：订阅还在，但这个节点在最新清单里已经不存在
+        let Some(node) = item.get("node").and_then(Value::as_str) else {
+            return false; // 缺节点名的坏行，与上面同理
+        };
+        if live_nodes.contains(&(provider_id, node)) {
+            return true;
+        }
+        // 账号还挂着这条引用：留着，让用户看到「引用失效」而不是让它凭空消失
+        let referenced = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| referenced_ids.contains(id))
+            .unwrap_or(false);
+        referenced
     });
     changes += before - items.len();
 

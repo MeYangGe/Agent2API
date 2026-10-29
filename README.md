@@ -20,18 +20,16 @@
 
 Agent2API is an **AI routing gateway with Agent client takeover**. It exposes a unified model API for custom AI providers and centralizes account routing, model mapping, gateway keys and request reports. It also manages local Agent clients' connection profiles, including importing, switching and previewing configuration changes.
 
-This repository contains only the gateway and client configuration infrastructure. Provider-specific sign-in, model requests, credential maintenance, balances and check-in are supplied by separate, optional plugins and updated independently of the main application.
-
 ## ✨ Key Features
 
 - 🔌 **Unified model APIs** — OpenAI Chat / Responses / Images and Anthropic Messages, with a unified model catalog; Raccoon, Loomy, Antigravity and ModelScope supply image generation, while Loomy, Antigravity and ModelScope also support reference-image editing. Both are available as AI assistant tools
 - 🧭 **AI routing** — model mapping, account priority, load balancing, session affinity and failover in one place
 - 🤖 **Agent client takeover** — manage multiple connection profiles for local clients, import existing settings, preview writes and switch between the gateway and custom services
-- 🧩 **Plugin extensions** — provider implementations are installed and updated separately, not bundled with the application; the routing gateway works without them
+- 🧩 **Plugin extensions** — additional provider implementations are installed and updated separately, not bundled with the application; custom providers do not require them
 - 🛡️ **Egress proxies** — select proxy-pool exits for accounts and update tasks
 - 🔑 **Gateway security** — scoped gateway keys, optional human verification for panel sign-in, and model requests refused by default until a key is configured
 - 📊 **Request reports** — request volume, success rate, token usage, cache hit rate and a 365-day heatmap
-- ⏰ **Background maintenance** — model catalog refresh, credential maintenance and software update checks; provider-specific tasks are supplied by plugins
+- ⏰ **Background maintenance** — model catalog refresh, credential maintenance and software update checks; daily check-in runs per provider on that provider's own window (Qoder 10:01, ZCode 19:01, others follow the schedule time), plus a catch-up round that only touches accounts not yet checked in; additional provider-specific tasks are supplied by plugins
 - 🖥️ **Three deployment forms** — Windows / macOS / Linux desktop apps, headless Windows / Linux servers and Docker (amd64 / arm64); no Node runtime required, with a six-language interface
 
 ## ❤️ Sponsors
@@ -51,7 +49,6 @@ This repository contains only the gateway and client configuration infrastructur
 
 - **QQ groups**: Agent2API chat groups — **group 1 (`1127656296`) and group 2 (`1130894674`) are almost full, please join group 3 (`1108276647`)**; search the number in QQ to join.
 - **Telegram group**: <https://t.me/+9gM8YPvgRL02NGRl>
-- **Discord server**: <https://discord.gg/z9GzSJMWp>
 - **💖 Donate**: if Agent2API helps you, you are welcome to [buy the author a coffee](./docs/SPONSOR.md); donations are voluntary and unlock nothing.
 - **🤝 Sponsorship / business**: want to sponsor the project, or feature your product here? Email [541675139@qq.com](mailto:541675139@qq.com).
 

@@ -61,9 +61,9 @@ export function RoutingPage() {
   const models = state.model && !configured.some(model => model.toLowerCase() === state.model.toLowerCase()) ? [...configured, state.model] : configured
   const reset = async () => {
     const model = state.model
-    if (!await confirmDialog(model ? t('移除此模型的独立路由配置，之后重新继承全局路由。不会删除模型、账号或请求记录。')
+    if (!await confirmDialog(model ? t('确定删除「{model}」的独立路由配置？删除后该模型将使用全局路由。不会删除模型、账号或请求记录。', { model })
       : t('解除全局路由的参与范围限制，继续使用与账号页共用的手动顺序和自动消耗规则；模型独立配置保持不变。'), {
-      title: model ? t('恢复全局继承') : t('恢复默认路由'), confirmText: t('恢复'), destructive: false,
+      title: model ? t('删除独立路由') : t('恢复默认路由'), confirmText: model ? t('删除') : t('恢复'), destructive: Boolean(model),
     })) return
     if (await saveProfile(null, model) && model && snapshot().model === model) await selectModel('')
   }
@@ -110,7 +110,7 @@ export function RoutingPage() {
               <RouteIcon name='settings' /><span>{t('设置')}</span>
             </Button>
             <IconButton name='refresh' title={t('刷新路由')} disabled={state.loading || state.busy} onClick={() => void loadWorkspace()} />
-            <Button variant='ghost' size='sm' disabled={!workspace || state.busy || (!state.model && !workspace?.globalCustomized)} onClick={() => void reset()}>{state.model ? t('恢复继承') : t('恢复默认')}</Button>
+            <Button variant='ghost' size='sm' className={cn(state.model && 'text-destructive')} disabled={!workspace || state.busy || !(state.model ? workspace.customized : workspace.globalCustomized)} onClick={() => void reset()}>{state.model ? t('删除') : t('恢复默认')}</Button>
           </div>
         </div>
         {workspace ? <RoutingCanvas workspace={workspace} search={state.search} zoom={state.zoom} selected={state.selectedProvider}

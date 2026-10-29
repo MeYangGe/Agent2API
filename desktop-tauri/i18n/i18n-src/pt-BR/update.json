@@ -1,7 +1,6 @@
 {
   " · 检查于 {time}": " · verificado em {time}",
   " 已发布（当前 {current}），更新日志如下：": " lançada (atual: {current}); notas de versão abaixo:",
-  "Discord 群": "Servidor do Discord",
   "GitHub Token 未填写": "Token do GitHub não preenchido",
   "GitHub 令牌": "Token do GitHub",
   "GitHub 加速前缀": "Prefixo do acelerador GitHub",
@@ -12,7 +11,7 @@
   "GitHub 访问方式": "Modo de acesso ao GitHub",
   "GitHub 访问设置已保存": "Configurações de acesso ao GitHub salvas",
   "QQ 群": "Grupo do QQ",
-  "QQ 群 / Telegram / Discord 都在这里": "Grupos do QQ, Telegram e Discord estão todos aqui",
+  "QQ 群 / Telegram 都在这里": "Grupos do QQ e Telegram estão todos aqui",
   "QQ 群 1": "Grupo do QQ 1",
   "QQ 群 2": "Grupo do QQ 2",
   "QQ 群 3": "Grupo do QQ 3",

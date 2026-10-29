@@ -81,12 +81,14 @@ use crate::server::config;
 use crate::server::core::custom_providers;
 use crate::server::core::protocol::strip_internal_fields;
 use crate::server::core::providers::adapter::{
-    adapter_for, ProviderAdapter, RetryAdvice, RetryDecision, UpstreamErrorClass,
+    adapter_by_id, ProviderAdapter, RetryAdvice, RetryDecision, UpstreamErrorClass,
 };
 use crate::server::core::providers::custom::forward as custom_forward;
 use crate::server::core::providers::readiness;
 use crate::server::core::providers::router::route_for_forward;
-use crate::server::core::providers::{kind_from_id, kind_id, meta};
+use crate::server::core::providers::{kind_from_id, meta};
+#[cfg(test)]
+use crate::server::core::providers::adapter::adapter_for;
 // `ProviderKind` 只被 `provider_loop/tests.rs` 通过 `super::*` 用到；
 // 生产代码已经不再需要它（分派改成 `adapter_by_id`）。留着这个 re-import
 // 比让测试自己写全路径更贴合既有写法。
@@ -553,7 +555,7 @@ fn filter_by_key_scope(
 /// 按 `is_stateful` 分流（架构文档 §4.2.1）：
 ///   - 无状态（workbuddy / 小浣熊 / AutoClaw）→ 下面这段「构造请求 → 发送 →
 ///     按分类动作」；
-///   - 有状态（CatPaw）→ [`attempt_stateful`]（一次会话式转发，错误一律透传）。
+///   - 有状态（CatPaw）→ [`attempt_stateful`]（一次会话式转发；外层分类记账并顺延）。
 async fn attempt_queue(
     service: &UpstreamService,
     ctx: &ProviderContext<'_>,
@@ -645,6 +647,12 @@ async fn attempt_queue(
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;
+        } else if crate::server::core::providers::is_scoped_runtime_provider(&target.provider)
+            && target.proxy_notice.is_some()
+        {
+            return Err(GatewayError::with_status(400,
+                "指定账号的代理不可用；未回退直连、系统代理或其他账号")
+                .with_code("account_proxy_unavailable"));
         }
         // 决策快照挂进 telemetry（最后一次为准：请求日志的「路由回放」显示
         // 的是最终承载那次选路的完整排序 —— 与 attempts 明细的换号链互补，
@@ -769,27 +777,16 @@ async fn attempt_queue(
                 }
             }
         }
-        // ── 适配器分派：**插件优先**，内置兜底 ────────────────────
-        //
-        // 全部 22 家都已迁到插件，所以正常路径走运行时注册表。内置实现仍然
-        // 保留：卸载 / 停用插件包时 `lookup` 返回 `None`，自然落回它 ——
-        // 这条兜底让「卸载插件」是安全操作，而不是让网关失去转发能力。
-        //
-        // 顺序不能反：内置赢的话，用户装了新版插件包也永远不生效（升级插件
-        // 会变成一个静默无效的动作）。论证见 `providers::adapter::adapter_by_id`。
-        let plugin_adapter = crate::server::core::plugin_host::lookup(&target.provider);
-        let (adapter, provider_id): (&dyn ProviderAdapter, &str) = match plugin_adapter.as_deref() {
-            Some(adapter) => (adapter, adapter.provider_id()),
-            None => match kind_from_id(&target.provider) {
-                Some(kind) => (adapter_for(kind), kind_id(kind)),
-                None => {
-                    return Err(GatewayError::with_status(
-                        503,
-                        format!("账号所属提供商「{}」未知，无法转发", target.provider),
-                    ));
-                }
-            },
-        };
+        // ── 适配器分派：插件 → 本体订阅适配器 → 旧 Kind 占位 ──────────
+        // 统一入口保留插件优先与旧占位兜底；Arc 持有本轮实现，不在 await 后重新查表。
+        let adapter_handle = adapter_by_id(&target.provider).ok_or_else(|| {
+            GatewayError::with_status(
+                503,
+                format!("账号所属提供商「{}」未知，无法转发", target.provider),
+            )
+        })?;
+        let adapter = adapter_handle.as_ref();
+        let provider_id = adapter.provider_id();
         // 没有「按家重置预算」这一步了：两份预算都在循环外开好、整份请求共用
         // （理由见上面的注释）。`provider_id` 仍然要取 —— 下面的发送体缓存、
         // 日志与遥测记账都用它。
@@ -798,6 +795,7 @@ async fn attempt_queue(
             // 它失败了就把它记入已尝试、回到循环挑下一个账号 —— 可能已经换了一家。
             // 没有下一个可用账号时，把这个错误原样透传（它的文案最贴近真实原因）。
             let stateful_account_id = target.account_id.clone();
+            let strict_runtime = crate::server::core::providers::is_scoped_runtime_provider(provider_id);
             match attempt_stateful(
                 service,
                 ctx,
@@ -848,6 +846,11 @@ async fn attempt_queue(
                     // 拆散取值 —— 拆散后「漏带一个字段」编译期与运行期都不报错
                     // （本分支此前就把 `reset_at` 写成死 `None`，见那个函数的说明）。
                     let class = adapter.classify_conversation_error(&error);
+                    // Scoped runtime 的原生 loader 已拥有单次 token 恢复；宿主不再消费
+                    // refresh，也不把 Fatal/权限/WAF/取消/超时改成账号顺延。
+                    if strict_runtime && !matches!(&class, UpstreamErrorClass::QuotaLimited { .. }) {
+                        return Err(error);
+                    }
                     if let (UpstreamErrorClass::QuotaLimited { .. }, Some(account_id)) =
                         (&class, &stateful_account_id)
                     {
@@ -1230,7 +1233,8 @@ async fn attempt_queue(
                         // 转发就是最强的反证。不清的后果是账号被永久钉在
                         // 「需要重新登录」上，用户明明已经重新登录、账号也能用，
                         // 界面却一直红着。
-                        if service.store.needs_relogin(account_id) {
+                        // CodeArts 的临时访问凭据仍可能有效，转发成功不代表刷新授权恢复。
+                        if service.store.needs_relogin(account_id) && adapter.provider_id() != "codearts" {
                             service.store.set_needs_relogin(account_id, None);
                             logging::log(
                                 "[Upstream]",
@@ -2342,7 +2346,8 @@ async fn attempt_custom(
 ///     conversation 在上游仍 running，原实现的动作是 `turn/stop` + 自愈重开
 ///     （本项目的 `conversation::submit_round_with_self_heal`），与换账号无关。
 /// 本函数内部对上游错误**不换账号不重试**（CatPaw 没有轮换信号）；
-/// 「失败后顺延到下一个账号」由调用方的账号循环统一兜底（见 `attempt_queue`）。
+/// 外层按 `classify_conversation_error` 分类（默认 Fatal），限额先记账，
+/// 再按账号队列顺延（见 `attempt_queue`）。
 /// 选路仍然共用 —— 全局队列选到 CatPaw 的账号时才进入本函数。
 ///
 /// ── 在途槽位（去重队列）─────────────────────────────────────
@@ -2377,6 +2382,13 @@ async fn attempt_stateful(
     // 没有刷新机制（§9.1）：`ensure_access_token` 只做存在性校验。
     if let Some(account_id) = target.account_id.clone() {
         if let Err(error) = adapter.ensure_access_token(&service.store, &account_id).await {
+            if crate::server::core::providers::is_scoped_runtime_provider(provider_id) {
+                let name = account_label(target.account.as_ref(), &account_id, &Value::Null);
+                ctx.telemetry.note_attempt(Some(&account_id), &name, provider_id);
+                ctx.telemetry.note_attempt_started(provider_id, &name);
+                ctx.telemetry.finish_last_attempt(Some(i64::from(error.status_code)), Some(&error.message));
+                return Err(error); // FULL CAS/来源/出口失败不能沿用旧凭证再发送。
+            }
             logging::verbose(
                 "[Upstream]",
                 &format!(
@@ -2448,8 +2460,7 @@ async fn attempt_stateful(
         .await
     {
         Ok(outcome) => {
-            // 成功：该账号对该模型的限额标记（如有）已失效，清除。对本路径是
-            // 空操作（不写标记），共用它是为了「将来某家产生标记」时自动获得清理
+            // 成功：清除本次模型已有的限额标记，与外层会话式限额记账配对。
             cap_cleared(
                 service,
                 &target,
@@ -2466,9 +2477,31 @@ async fn attempt_stateful(
             // 状态码由协议层自定，取不到上游 HTTP 码），所以 status 给 None、
             // 不带错误 —— 前端把它渲染成「成功」（无状态码）。
             ctx.telemetry.finish_last_attempt(None, None);
+            // 会话适配器只收到上游真名；客户端别名由外层可信请求体恢复。
+            let outcome = match outcome {
+                ForwardOutcome::Stream { status, stream } if adapter.sse_model_rewrite() => {
+                    return Ok(ForwardOutcome::Stream {
+                        status,
+                        stream: Box::new(super::ForwardStream::from_translated(
+                            Box::pin(stream), slot.take(), connections.handoff(),
+                            ctx.telemetry.clone(),
+                            super::sse::FramePolicy::with_rewrite(Some(super::sse::ModelRewrite {
+                                requested: model,
+                            })),
+                        )),
+                    });
+                }
+                ForwardOutcome::Completion { mut body } if adapter.sse_model_rewrite() => {
+                    if let Some(current) = body.get_mut("model").filter(|value| value.as_str() != Some(model.as_str())) {
+                        *current = Value::String(model);
+                    }
+                    ForwardOutcome::Completion { body }
+                }
+                other => other,
+            };
             Ok(attach_slot(outcome, slot, connections))
         }
-        // 一律透传（Fatal 语义，核对结论见函数头）：不换账号、不冷却、不重试
+        // 内部原样返回错误；分类、限额冷却与换账号由外层 attempt_queue 处理。
         Err(error) => {
             // 只在终端：这条错误会作为 GatewayError 抛回入口，由 `api::chat` /
             // `api::protocol` 记进请求日志（明细的 error 也是同一条文案）。

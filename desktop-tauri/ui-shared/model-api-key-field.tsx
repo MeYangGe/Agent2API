@@ -8,13 +8,14 @@ type Props = {
   loading: boolean
   error: string
   disabled?: boolean
+  rememberSelection?: boolean
   id?: string
   t: (text: string) => string
   onChange: (id: string) => void
   onRefresh: () => void
 }
 
-export function ModelApiKeyField({ keys, value, ready, loading, error, disabled, id = 'model-api-key', t, onChange, onRefresh }: Props) {
+export function ModelApiKeyField({ keys, value, ready, loading, error, disabled, rememberSelection, id = 'model-api-key', t, onChange, onRefresh }: Props) {
   const selected = keys.find(key => key.id === value)
   const label = selected ? modelApiKeyLabel(selected)
     : value ? t('所选 API Key 已不可用') : t('选择 API Key…')
@@ -37,6 +38,7 @@ export function ModelApiKeyField({ keys, value, ready, loading, error, disabled,
         </SelectContent>
       </Select>
       <p className='text-xs leading-[1.6] text-subtle'>{t('模型调用使用所选 Key 的权限，日志记录 Key 名称，不保存密钥值。')}</p>
+      {rememberSelection ? <p className='text-xs leading-[1.6] text-subtle'>{t('自动记住本次选择，下次打开继续使用；Key 被停用或删除后需重新选择。')}</p> : null}
       {warning ? <Alert variant='warning' role='status'>{warning}</Alert> : null}
     </div>
   )

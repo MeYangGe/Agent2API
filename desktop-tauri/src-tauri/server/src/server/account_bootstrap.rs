@@ -87,6 +87,14 @@ pub(crate) fn run(store: &AccountStore) {
     // 已经加密），剩下没被它碰到的历史行由这一步收尾。本身幂等（判据是数据自证，
     // 没有 kv 标记）、失败不阻断启动（密钥不可用时记日志返回，下次启动重试）。
     store.encrypt_legacy_accounts();
+    // 插件账号的身份字段回填（见 store_admin::backfill_plugin_identity）：
+    // 插件落库只写 pluginSecret / pluginPublic，顶层缺 uid / edition，而计费、
+    // 签到、余额几条读路径只认顶层（issue #380）。写侧已经在新写入时镜像了，
+    // 这一步收尾升级前就在库里的那批。幂等（判据是数据自证：顶层缺、子对象有
+    // 才补）、失败不阻断启动（读侧也做了回落，本次功能照常可用）。
+    // 位置在 `migrate_startup` 之后：那一轮可能刚改过 provider（拆家 / 拆池），
+    // 按新的 provider 判定 edition 才对。
+    store.backfill_plugin_identity();
     // 网关 Key 的历史明文加密（见 `core::api_keys::encrypt_legacy_keys`）：
     // `apiKeys` 里每把 Key 的 `key` 从本轮改造起写的是 `enc1:` 密文，而升级前
     // 已在配置里的仍是明文（读侧 `from_value` 兼容明文，所以那期间 Key 照常可用）。

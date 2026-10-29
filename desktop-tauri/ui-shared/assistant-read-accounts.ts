@@ -157,6 +157,8 @@ export function accountReadTools(api: AssistantReadApi, t: Translate): Assistant
           payload.balance = usageRow ? {
             cached: true, at: number(usageRow.at), ...fields(usageRow, ['code']),
             error: diagnosticText(usageRow.error, t), usage: usageRow.usage ? usageSummary(usageRow.usage, t) : null,
+            lastSuccessAt: number(usageRow.lastSuccessAt),
+            lastUsage: usageRow.lastUsage ? usageSummary(usageRow.lastUsage, t) : null,
           } : { cached: true, at: null, usage: null }
           payload.rateLimits = page(rateLimits, 0, 10)
           payload.limiterSummary = {

@@ -1023,20 +1023,27 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
     // watch 置位，两个 serve 各拿一份 receiver；watch 发送端 drop 也会让
     // `wait_for` 返回，停机语义与单 oneshot 一致。
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut stop_requested = stop_rx.clone();
+    let stop_from_signal = stop_tx.clone();
     crate::spawn_task(async move {
-        let _ = shutdown_rx.await;
-        let _ = stop_tx.send(true);
+        tokio::select! {
+            _ = shutdown_rx => {}
+            _ = stop_requested.wait_for(|stop| *stop) => {}
+        }
+        stop_from_signal.send_replace(true);
     });
 
     // 停机收尾要用的统计句柄：先克隆出来再移进任务（`state` 是借用，不能
     // 随 async move 一起走）
     let request_stats = state.request_stats();
     let stop_main = stop_rx.clone();
+    let stop_from_main = stop_tx.clone();
     crate::spawn_task(async move {
         // 运行时上下文在这里必然成立，from_std 不会 panic
         let listener = match tokio::net::TcpListener::from_std(listener) {
             Ok(listener) => listener,
             Err(error) => {
+                stop_from_main.send_replace(true);
                 logging::log("[Server]", &format!("❌ 创建异步监听失败: {error}"));
                 return;
             }
@@ -1054,7 +1061,10 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
             // 已在处理中的请求会跑完再退出
             let _ = stop.wait_for(|stop| *stop).await;
         });
-        match server.await {
+        let result = server.await;
+        // 正常/异常退出均通知同一轮面板停止 accept。
+        stop_from_main.send_replace(true);
+        match result {
             Ok(()) => logging::log("[Server]", "服务已停止"),
             Err(error) => logging::log("[Server]", &format!("❌ 服务异常退出: {error}")),
         }
@@ -1071,10 +1081,12 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
     // 统计收尾只归主 serve（上面那个任务），这里只管转发请求。
     if let Some(listener) = panel_listener {
         let router = panel_router.expect("panel_port 与 panel_router 必须成对");
+        let stop_from_panel = stop_tx;
         crate::spawn_task(async move {
             let listener = match tokio::net::TcpListener::from_std(listener) {
                 Ok(listener) => listener,
                 Err(error) => {
+                    stop_from_panel.send_replace(true);
                     logging::log("[Server]", &format!("❌ 面板监听创建失败: {error}"));
                     return;
                 }
@@ -1087,7 +1099,9 @@ pub fn start(state: &ServerState) -> Result<oneshot::Sender<()>, PortConflict> {
                 let mut stop = stop_rx;
                 let _ = stop.wait_for(|stop| *stop).await;
             });
-            if let Err(error) = server.await {
+            let result = server.await;
+            stop_from_panel.send_replace(true);
+            if let Err(error) = result {
                 logging::log("[Server]", &format!("❌ 面板服务异常退出: {error}"));
             }
         });

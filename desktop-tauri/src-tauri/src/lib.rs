@@ -26,6 +26,7 @@ mod assistant_image;
 mod backend;
 mod bridge;
 mod commands;
+mod doubaowork_login;
 mod gateway;
 mod legacy_install;
 mod login;

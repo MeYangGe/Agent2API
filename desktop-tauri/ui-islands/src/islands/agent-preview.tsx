@@ -30,11 +30,13 @@ export function ApplyDialog({ client, profile, operation, onClose }: {
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [generation, setGeneration] = React.useState(0)
-  const title = operation === 'disconnect' ? t('解除接入本网关') : operation === 'restore' ? t('撤销上次应用') : operation === 'default' ? t('应用并设为默认') : t('应用到客户端')
+  const nativeRevision = React.useRef(client.nativeRevision)
+  const previewClient = operation.startsWith('native-') ? { ...client, nativeRevision:nativeRevision.current } : client
+  const title = operation === 'native-delete' ? t('删除客户端配置') : operation === 'disconnect' ? t('解除接入本网关') : operation === 'restore' ? t('撤销上次应用') : operation === 'default' ? t('应用并设为默认') : t('应用到客户端')
   React.useEffect(() => {
     let alive = true
     setLoading(true); setPreview(null); setError('')
-    void requestPreview(client, profile, operation).then(result => { if (alive) setPreview(result) })
+    void requestPreview(previewClient, profile, operation).then(result => { if (alive) setPreview(result) })
       .catch(error => { if (alive) setError(errorMessage(error)) }).finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [client.id, profile, operation, generation])
@@ -43,7 +45,7 @@ export function ApplyDialog({ client, profile, operation, onClose }: {
     setSaving(true); setError('')
     try {
       if (operation === 'restore' || operation === 'disconnect') await restoreClient(client, operation, preview)
-      else if (profile) await applyProfile(client, profile, operation, preview)
+      else if (profile) await applyProfile(previewClient, profile, operation, preview)
       else throw new Error(t('没有选中配置方案'))
       onClose()
     } catch (error) { setError(errorMessage(error)); setPreview(null); setSaving(false) }
@@ -60,7 +62,7 @@ export function ApplyDialog({ client, profile, operation, onClose }: {
         <Button variant='ghost' size='sm' disabled={saving || loading} onClick={() => setGeneration(value => value+1)}>{t('重新生成预览')}</Button>
         <span className='mr-auto' />
         <Button variant='outline' disabled={saving} onClick={onClose}>{t('取消')}</Button>
-        <Button disabled={!preview || loading || saving || (!preview.hasChanges && !['restore','disconnect'].includes(operation))} onClick={() => void apply()}>{saving ? t('应用中…') : t('确认应用')}</Button>
+        <Button variant={operation === 'native-delete' ? 'destructive' : 'default'} disabled={!preview || loading || saving || (!preview.hasChanges && !['restore','disconnect'].includes(operation))} onClick={() => void apply()}>{saving ? t('应用中…') : operation === 'native-delete' ? t('确认删除') : t('确认应用')}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

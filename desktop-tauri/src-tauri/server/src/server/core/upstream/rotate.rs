@@ -66,15 +66,21 @@ pub(super) async fn session_for(
     account_id: Option<&str>,
 ) -> Result<Value, GatewayError> {
     if let Some(id) = account_id {
-        if let Some(mut entry) = service.store.get_session_by_id(id) {
-            // 账号主键只随转发会话传递，不改管理接口的会话形态。
-            if let Some(session) = entry.session.as_object_mut() {
-                session.insert("id".to_string(), Value::String(entry.id));
-            }
-            return Ok(entry.session);
+        let unavailable = || GatewayError::with_status(
+            401, "指定账号不存在、无可用凭证或不属于当前提供商；未回退到其他账号",
+        );
+        if service.store.account_provider_of(id).as_deref() != Some(provider) {
+            return Err(unavailable());
         }
-        // 指定账号在两次读盘之间被删掉：回落到该 provider 的默认登录态
-        // （对应 Node 的 `?? await requireSession()`）
+        // 读取会话后复核归属，防止两次读盘之间账号迁移；显式 id 绝不落回默认登录态。
+        let mut entry = service.store.get_session_by_id(id)
+            .filter(|_| service.store.account_provider_of(id).as_deref() == Some(provider))
+            .ok_or_else(unavailable)?;
+        // 账号主键只随转发会话传递，不改管理接口的会话形态。
+        if let Some(session) = entry.session.as_object_mut() {
+            session.insert("id".to_string(), Value::String(entry.id));
+        }
+        return Ok(entry.session);
     }
     let session = service
         .auth
@@ -132,6 +138,11 @@ pub(super) async fn select_target_account(
     conv_key: &str,
 ) -> Result<RouteTarget, GatewayError> {
     let accounts = scoped_accounts(service, providers, keys.request_model(), pinned);
+    if pinned.is_some_and(|id| !accounts.iter().any(|account| routing::account_id(account) == Some(id))) {
+        return Err(GatewayError::with_status(401,
+            "指定账号不存在或不属于当前提供商；未回退到队首或默认登录态")
+            .with_code("account_scope_mismatch"));
+    }
     if accounts.is_empty() && pinned.is_none()
         && config::routing_profiles().effective(keys.request_model()).is_some()
     {
@@ -314,6 +325,11 @@ pub(super) async fn select_target_account(
                 ));
             }
         }
+    }
+    if pinned.is_some() {
+        return Err(GatewayError::with_status(401,
+            "指定账号没有可用凭证；未回退到队首或默认登录态")
+            .with_code("account_scope_mismatch"));
     }
     if config::routing_profiles().effective(keys.request_model()).is_some() {
         return Err(GatewayError::with_status(

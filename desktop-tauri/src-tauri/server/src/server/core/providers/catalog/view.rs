@@ -96,14 +96,12 @@ pub fn models_response(store: &AccountStore, scope: Option<&KeyScope>) -> Value 
 /// Key 白名单两条判定，把「没有可用账号」那句更可操作的错误留给转发层 ——
 /// 与改造前的两条例外逐字同源（见 `pipeline::resolve_model` 的说明）。
 ///
-/// 插件家同样算「可用」：只有插件家账号时若这里报 false，入口校验会整段跳过
-/// —— 那意味着任何模型名都被放行到转发层，与「装了插件却像是没装」是同一个
-/// 症状的另一面。
+/// 插件与本体 runtime ID 同样算可用，不能仅因它们没有旧枚举身份而跳过校验。
 pub fn has_available_providers(store: &AccountStore) -> bool {
     if !active_manifests(store).is_empty() {
         return true;
     }
-    crate::server::core::plugin_host::installed_ids()
+    super::super::executable_provider_ids()
         .into_iter()
         .any(|id| !store.accounts_for_provider(&id).is_empty())
 }

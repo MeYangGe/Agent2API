@@ -45,6 +45,9 @@ use crate::server::errors::management_error;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
 
+mod kernel_import;
+pub(crate) use kernel_import::MAX_UPLOAD_BYTES as MAX_KERNEL_UPLOAD_BYTES;
+
 /// 列表响应：`{items, kernel}`。items 的节点数从内核快照注入（订阅存储
 /// 不认识内核，见 `core::subscriptions::list` 的说明）。
 fn build_payload() -> Value {
@@ -144,7 +147,8 @@ pub async fn entry(request: axum::extract::Request) -> Response {
         .unwrap_or("")
         .trim_start_matches('/')
         .to_string();
-    let body = match axum::body::to_bytes(request.into_body(), crate::server::http::MAX_BODY_SIZE)
+    let limit = if rest == "kernel/import" { MAX_KERNEL_UPLOAD_BYTES } else { crate::server::http::MAX_BODY_SIZE };
+    let body = match axum::body::to_bytes(request.into_body(), limit)
         .await
     {
         Ok(bytes) => bytes,
@@ -160,6 +164,7 @@ pub async fn entry(request: axum::extract::Request) -> Response {
         ("GET", "kernel") => ok_json(sub_kernel::status_json()),
         ("POST", "kernel/download") => kernel_download(&body).await,
         ("POST", "kernel/download/cancel") => kernel_download_cancel(),
+        ("POST", "kernel/import") => kernel_import::import(&body).await,
         ("POST", "kernel/restart") => kernel_restart(),
         ("POST", "kernel/stop") => kernel_stop(),
         ("POST", "kernel/remove") => kernel_remove(),
@@ -385,6 +390,10 @@ async fn kernel_download(body: &Bytes) -> Response {
     if downloading() {
         return management_error(400, "内核正在下载中，先停止或等它下完");
     }
+    let permit = match sub_kernel::import::reserve() {
+        Ok(permit) => permit,
+        Err(error) => return management_error(409, error),
+    };
     let payload = match parse_body(body) {
         Ok(value) => value,
         Err(_) => return management_error(400, "请求内容不是有效 JSON"),
@@ -431,7 +440,7 @@ async fn kernel_download(body: &Bytes) -> Response {
         Some(value) => crate::server::config::set_kernel_dir(value),
         None => true,
     };
-    sub_kernel::request_download(subscriptions::enabled_provider_inputs());
+    sub_kernel::request_download(subscriptions::enabled_provider_inputs(), permit);
     logging::log(
         "[Subscription]",
         &format!(
@@ -475,6 +484,7 @@ fn downloading() -> bool {
 
 /// POST /api/subscriptions/kernel/restart（手动启动 / 重启；先落日志便于排障）
 fn kernel_restart() -> Response {
+    if sub_kernel::import::busy() { return management_error(409, "内核正在下载或导入，请等待当前操作完成"); }
     let enabled = subscriptions::enabled_provider_inputs();
     if enabled.is_empty() {
         return management_error(400, "还没有启用的订阅（先添加一条订阅再启动内核）");
@@ -493,6 +503,7 @@ fn kernel_restart() -> Response {
 /// 它已经成立。响应是**投命令前**的快照（命令异步执行）：`running` 由前端轮询
 /// 收敛（与删除 / 重启同一套）。
 fn kernel_stop() -> Response {
+    if sub_kernel::import::busy() { return management_error(409, "内核正在下载或导入，请等待当前操作完成"); }
     let status = sub_kernel::status_json();
     if status.get("running") != Some(&Value::Bool(true)) {
         return ok_json(status);
@@ -511,6 +522,7 @@ fn kernel_stop() -> Response {
 /// 响应是**投命令前**的快照（命令异步执行）：真正的落地状态由前端轮询
 /// `installed` 收敛（与下载 / 重启同一套）。
 fn kernel_remove() -> Response {
+    if sub_kernel::import::busy() { return management_error(409, "内核正在下载或导入，请等待当前操作完成"); }
     let status = sub_kernel::status_json();
     let downloading = status
         .get("download")

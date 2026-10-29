@@ -29,6 +29,7 @@ fn table() -> &'static Mutex<HashMap<String, Arc<dyn ProviderAdapter>>> {
 
 /// 装入一个插件 provider（重复调用会覆盖 —— 重装/升级走这条）。
 pub fn install(id: String, adapter: Arc<RpcAdapter>) {
+    if crate::server::core::providers::availability::is_suspended(&id) { return; }
     if let Ok(mut map) = table().lock() {
         map.insert(id, adapter);
     }
@@ -36,6 +37,7 @@ pub fn install(id: String, adapter: Arc<RpcAdapter>) {
 
 /// 按 id 查（`None` = 这个 id 不由插件提供，或包没装/被停用）。
 pub fn lookup(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
+    if crate::server::core::providers::availability::is_suspended(id) { return None; }
     table().lock().ok()?.get(id).cloned()
 }
 
@@ -49,6 +51,7 @@ pub fn lookup(id: &str) -> Option<Arc<dyn ProviderAdapter>> {
 ///      而不是一句容易看漏的 `lookup(id).is_some()`；
 ///   2. 将来若要加「按配置停用某家的插件实现」，只改这一个函数。
 pub fn serves(id: &str) -> bool {
+    if crate::server::core::providers::availability::is_suspended(id) { return false; }
     match table().lock() {
         Ok(map) => map.contains_key(id),
         Err(_) => false,
@@ -59,7 +62,9 @@ pub fn serves(id: &str) -> bool {
 pub fn installed_ids() -> Vec<String> {
     match table().lock() {
         Ok(map) => {
-            let mut ids: Vec<String> = map.keys().cloned().collect();
+            let mut ids: Vec<String> = map.keys()
+                .filter(|id| !crate::server::core::providers::availability::is_suspended(id))
+                .cloned().collect();
             ids.sort();
             ids
         }

@@ -66,7 +66,7 @@ function DocsPage() {
 
   return <DocumentationBrowser origin={origin} packs={packs} addresses={<ApiAddresses origin={origin} />}
     onCopy={copyExample} notice={error ? <div role='status' className='mb-3 flex flex-wrap items-center gap-2 text-[12px] text-subtle'>
-      <span>{t('读取插件能力表失败：{error}', { error })}</span>
+      <span>{t('读取提供商能力表失败：{error}', { error })}</span>
       <Button variant='outline' size='xs' disabled={loading} onClick={() => void load()}>{t('重试')}</Button>
     </div> : null} />
 }

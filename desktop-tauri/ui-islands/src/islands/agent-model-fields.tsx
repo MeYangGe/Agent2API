@@ -6,8 +6,8 @@ import type { CatalogModel } from './agent-catalog'
 import { AgentSelect, TextField } from './agent-fields'
 import { blankModel } from './agent-model'
 
-export function ModelsFields({ client, draft, update, catalog, disabled }: {
-  client: AgentClient; draft: AgentProfile; update: (patch: Partial<AgentProfile>) => void; catalog: CatalogModel[]; disabled: boolean
+export function ModelsFields({ client, draft, update, catalog, disabled, native = false }: {
+  client: AgentClient; draft: AgentProfile; update: (patch: Partial<AgentProfile>) => void; catalog: CatalogModel[]; disabled: boolean; native?: boolean
 }) {
   const change = (index: number, patch: Partial<AgentModel>) => update({ models: draft.models.map((model, i) => i === index ? { ...model, ...patch } : model) })
   const imported = Boolean(draft.sourceId)
@@ -20,17 +20,21 @@ export function ModelsFields({ client, draft, update, catalog, disabled }: {
   return <>
     <div className='flex items-center gap-2'><b className='text-sm'>{t('模型列表')}</b><span className='mr-auto' />
       <Button variant='outline' size='sm' disabled={disabled} onClick={() => update({ models: [...draft.models, blankModel()] })}>{t('添加模型')}</Button></div>
-    {imported && <p className='text-xs leading-relaxed text-subtle'>{t('导入模型及客户端未知字段会保留；本页删除方案不会删除客户端条目。')}</p>}
+    {imported && !native && <p className='text-xs leading-relaxed text-subtle'>{t('导入模型及客户端未知字段会保留；本页删除方案不会删除客户端条目。')}</p>}
+    {native && <p className='text-xs leading-relaxed text-subtle'>{t('移除模型会写入客户端配置；其它条目和未知字段保留，确认前可查看差异。')}</p>}
     {draft.models.map((model, index) => <Card key={index} className='border-border bg-surface-inset'>
       <CardContent className='flex flex-col gap-3 p-3'>
         <div className='flex items-center gap-2'><span className='text-xs text-subtle'>{t('模型 {n}', { n: index + 1 })}</span><span className='mr-auto' />
-          <Button variant='ghost' size='xs' disabled={disabled || sourceIds.current.has(model.id) || draft.models.length === 1} onClick={() => update({ models: draft.models.filter((_,i) => i !== index) })}>{t('移除')}</Button></div>
+          <Button variant='ghost' size='xs' disabled={disabled || (!native && sourceIds.current.has(model.id)) || draft.models.length === 1} onClick={() => {
+            const models = draft.models.filter((_,i) => i !== index)
+            update({ models, ...(draft.model === model.id ? { model:models[0]?.id || '', effort:'' } : {}) })
+          }}>{t('移除')}</Button></div>
         {draft.kind === 'gateway' && catalog.length > 0 && <Field><FieldLabel>{t('从网关目录选择')}</FieldLabel>
           <AgentSelect label={t('从网关目录选择')} value={model.id} disabled={disabled || sourceIds.current.has(model.id)} options={catalog.map(model => ({ value: model.id, label: model.label }))}
             onChange={id => {
               const selected = catalog.find(model => model.id === id)
               if (selected) {
-                const { label: _, ...selectedModel } = selected
+                const { label: _, provider: __, providers: ___, ...selectedModel } = selected
                 const next = { ...selectedModel, effort: '', reasoningLevels: client.supportsEffort ? selectedModel.reasoningLevels : [] }
                 update({ models: draft.models.map((current,i) => i === index ? next : current),
                   ...(client.supportsDefault && (!draft.model || draft.model === model.id) ? { model: id, effort: '' } : {}) })

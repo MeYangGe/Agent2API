@@ -48,12 +48,6 @@ use agent2api_provider_protocol as proto;
 
 /// Cline 免费池的 provider id（与 `usage_records::CLINE_FREE_PROVIDER` 同源推导）。
 const CLINE_FREE_PROVIDER: &str = kind_id(ProviderKind::ClineFree);
-/// CodeArts 的 provider id：它家的缺省限制按 Token（见 [`default_rules`]）。
-const CODEARTS_PROVIDER: &str = kind_id(ProviderKind::CodeArts);
-
-/// CodeArts 缺省 Token 规则的阈值：**每日** 1000 万 Token（自然日 0 点重置）。
-pub const DEFAULT_DAILY_TOKEN_LIMIT: f64 = 10_000_000.0;
-
 /// Token 规则重置周期的上下限（秒）：30 分钟 ~ 24 小时。与写入侧
 /// （`store_crud::apply_patch`）共用这一对常量 —— 两处各写一份「迟早会漂」。
 /// 下限与查询间隔下限（30 秒）不同：固定窗口按自然时间对齐，窗口太短会让
@@ -205,27 +199,12 @@ fn parse_rules(value: Option<&Value>) -> Option<Vec<LimiterRule>> {
 /// 申报了就照它执行（含「明确声明为空」这一档），没申报才走下面的内置表 ——
 /// 于是没升级的旧插件照旧工作，升级后行为由插件自己说了算。
 ///
-/// 内置表的三条（**只有旧插件会走到**）：
-/// - **CodeArts → Token 自然日 1000 万，跳过**：这一家的余额读数常判不出
-///   （免费版账号的统计里没有积分类计量表、`available` 为 null，额度全在福利
-///   token 池），缺省的余额规则形同虚设；按自然日 Token 消耗判定才兜得住
-///   「别把一个账号打爆」，而「过了 0 点额度就回来」正是它的额度形态。
-/// - **Cline 免费池 → 无规则**：免费池余额贴 0 / 欠费是常态，原「不处理」
-///   缺省的理由不变。
-/// - **其余 provider → 余额 < 1 跳过**（历史缺省不变）。
+/// 未申报时：Cline 免费池无规则，其余 provider 按总余额 < 1 跳过。
 pub fn default_rules(provider: &str) -> Vec<LimiterRule> {
     if let Some(declared) = declared_rules(provider) {
-        return declared;
-    }
-    if provider == CODEARTS_PROVIDER {
-        return vec![LimiterRule {
-            kind: LimiterKind::Token,
-            action: LimiterAction::Skip,
-            threshold: DEFAULT_DAILY_TOKEN_LIMIT,
-            period: 0,
-            reset: LimiterReset::Daily,
-            enabled: true,
-        }];
+        if provider != kind_id(ProviderKind::CodeArts) || declared.iter().all(|rule| rule.kind == LimiterKind::Balance) {
+            return declared;
+        }
     }
     if provider == CLINE_FREE_PROVIDER {
         return Vec::new();
@@ -285,8 +264,7 @@ fn declared_rules(provider: &str) -> Option<Vec<LimiterRule>> {
 }
 
 /// 记录字段上**没有** `limiters` 键时的推导：有显式 `lowBalance`（用户 / 旧版
-/// 配过）就原样尊重；两者都没有时按 provider 给缺省规则（[`default_rules`]）——
-/// CodeArts 从这里拿到的是一条 Token 自然日规则而不是余额规则。
+/// 配过）就原样尊重；两者都没有时按 provider 给缺省规则（[`default_rules`]）。
 fn derive_from_legacy(fields: &serde_json::Map<String, Value>) -> Vec<LimiterRule> {
     let provider = fields
         .get("provider")

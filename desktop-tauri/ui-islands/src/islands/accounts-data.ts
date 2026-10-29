@@ -31,167 +31,32 @@
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
   type AccountRecord, type ClashSnapshot,
-  type TokenReading, type UsageEntry,
+  type UsageEntry,
 } from './accounts-shared'
 import {
-  isDesktopAccount, isEnabled, isLimitedNow, isRateLimited,
-  supportsCreditDetail, supportsUsage,
+  isDesktopAccount, isEnabled, isLimitedNow, isRateLimited, supportsUsage,
 } from './accounts-domain'
 import * as domain from './accounts-domain'
 import { t } from '../i18n'
-import { adoptLimiterSnapshot } from './accounts-limiter-model'
 import {
   allAccounts, bump, findAccount, getStore, isPicked, patch,
 } from './accounts-store'
 import { proxyPoolSnapshot, refreshProxyPool } from './proxy-pool-cache'
 import { installListRefresh, refreshList } from './accounts-refresh'
-import { adoptAccountSorting, refreshAccountSorting, syncAccountSorting } from './accounts-sort'
+import { syncAccountSorting } from './accounts-sort'
 import { confirmBatchResult, refreshSavedAccounts, updateAccountConfirmed } from './accounts-update'
+import {
+  applyBalances, pruneUsageCache, queryAllUsage, queryUsageFor, refreshUsageAfterCheckin,
+  syncBalancesSnapshot, tokenUsageOf, usageEntryOf,
+} from './accounts-usage'
+
+export * from './accounts-usage'
 
 export { refreshList } from './accounts-refresh'
 
 // 状态层原样再导出：视图侧（accounts-page / panels / dialogs）只认本文件这一条路径
 export * from './accounts-store'
 export { saveGroupSortRules as setGroupSortRules } from './accounts-sort'
-
-/**
- * 「未配置查询凭证」的标记（与后端 `providers::adapter::USAGE_NOT_CONFIGURED_CODE` 逐字
- * 一致）—— 这是一个**前后端契约常量**：改一边必须改另一边，不一致的后果是那种情况
- * 退回红色「查询失败」 */
-export const NOT_CONFIGURED_CODE = 'usage_not_configured'
-
-/**
- * 余额的结果缓存：**原地可变**的 Map，改完调 bump() 通知。
- * 为什么不像其余状态那样每次换新对象：写 `null`（「查询中」）这个中间态必须让视图立刻
- * 看到，而它是高频小改动（每次点按钮 / 每轮批量），每次拷贝一份纯属浪费。
- */
-const usageMap = new Map<string, UsageEntry>()
-
-/**
- * 失败结论的**取得时刻**（按账号 id，毫秒）。只有失败条目需要它：失败行是对
- * 「当时那份凭证」的断言，账号记录一变（重新登录 / 重导入 / 刷过 token）就作废
- * —— 判据与读入口见 `usageEntryOf`。成功读数不记时刻：「上次读数」本来就会旧，
- * 界面按读数展示，不作废。
- */
-const usageFailureAt = new Map<string, number>()
-
-/**
- * **原始**缓存（含已过期的失败结论）：余额列的读入口是 [`usageEntryOf`]，它做
- * 时效过滤（见那里的说明）。新加读取点请走 `usageEntryOf` —— 直接读这张表就会
- * 把「重新登录前的旧失败结论」又显示出来，那正是这条过滤要挡的 bug。
- */
-export const usageEntries = (): ReadonlyMap<string, UsageEntry> => usageMap
-
-/**
- * 写一条余额缓存（`at` = 这条结论的取得时刻：快照行用它自己的 `at`，手动查询
- * 用当刻）。失败结论记时刻、其它形态清掉残留 —— 同一行「失败过、后来又成功了」
- * 时必须把旧时刻删掉，否则下一次失败的判定会拿一个更早的戳去比。
- */
-function putUsage(id: string, entry: UsageEntry, at: number): void {
-  usageMap.set(id, entry)
-  if (entry !== null && entry !== undefined && usageFailureOf(entry)) {
-    usageFailureAt.set(id, at)
-  } else {
-    usageFailureAt.delete(id)
-  }
-}
-
-/**
- * 该账号**此刻可用**的余额缓存条目（余额列的唯一读入口）。
- *
- * ── 过期的失败结论在这里作废（返回 undefined = 界面显示「未查询」）──
- * 失败行说的是「这个账号此刻查不到 / 续期不了」，而缓存按账号 id 存：账号重新
- * 登录、重新导入、或 token 被刷新（记录的 `updatedAt` 往前走）之后，那条断言就
- * 不再成立 —— 继续显示只会让人以为账号还是坏的。真实事故：两个小浣熊账号 12:39
- * 重新登录成功、转发与余额都恢复正常，界面上却一直挂着上午的「小浣熊刷新接口
- * 失败（HTTP 401）」。后端在快照出口做同一条判定
- * （`core::usage_query::prune_stale_failures`）；这里管的是**本地缓存**，重新
- * 登录后不必等下一轮查询才纠正。
- *
- * 成功读数不受影响：「可用 5147 积分」是一次读数的事实，凭证换了它也不会变成
- * 假话，界面本来就按「上次读数」展示。
- *
- * 判据用「记录改动时间」而不是凭证指纹：与后端同一取舍 —— 改备注名这类改动也会
- * 让旧失败作废，多作废一条提示比留着过期结论轻（手点一次查询就能拿到新的）。
- */
-export function usageEntryOf(account: AccountRecord): UsageEntry {
-  const entry = usageMap.get(account.id)
-  if (entry === undefined) return undefined
-  // 访客账号不查余额（见 `supportsUsage` 的说明）：它名下**只可能**是历史失败
-  // 结论 —— 升级前的心跳给它排过期、每次查询都稳定失败。留着就会在余额列
-  // 留一格红字，而那一格本该是「—」（这条账号没有可查的东西）。后端快照出口
-  // 已经不再端出这些行，这里管的是**升级前就已经写进本地缓存**的那些。
-  if (account.isGuest === true) return undefined
-  if (!usageFailureOf(entry)) return entry
-  const changedAt = Math.max(Number(account.addedAt) || 0, Number(account.updatedAt) || 0)
-  return (usageFailureAt.get(account.id) || 0) >= changedAt ? entry : undefined
-}
-
-/* ─── Token 限制器的周期消耗读数（快照轮询带来的窗口读数）───
- *
- * 「限制器」的 Token 规则要显示「本周期已用多少 / 什么时候重置」，读数来自
- * 用量快照的 `tokenUsage` 段（后端 `usage_query::snapshot` 从内存事实表投影，
- * 心跳 10 秒刷新 + 请求收尾增量记账，前端 20 秒轮询拿到）。与余额缓存分开存：
- * 余额只在查询到期时变化（`at` 不动 = 没新东西），Token 随每条请求变化，两边
- * 的「应用过了没」各判各的（见 syncBalancesSnapshot）。
- */
-
-/** Token 周期消耗读数缓存（账号 id → 启用中的每个周期一条；没配规则 = 空数组） */
-const tokenUsageMap = new Map<string, TokenReading[]>()
-
-/** 最近一次应用的 `tokenAt`（快照里 Token 读数的计算时刻；0 = 还没应用过） */
-let lastTokenAt = 0
-
-/**
- * Token 周期消耗读数的读入口（状态列 / 余额格 / 弹窗限制器段共用）。
- * 没有读数（还没轮询到 / 后端没有这个段）返回空数组 —— 判定按 0 算（放行）。
- */
-export function tokenUsageOf(account: AccountRecord | null | undefined): TokenReading[] {
-  if (!account) return []
-  return tokenUsageMap.get(account.id) || []
-}
-
-/**
- * 把快照里的 `tokenUsage` 段写进缓存。返回是否有变化（变了才 bump 重绘）。
- * 行的形状由后端保证（`{period, windowStart, used}`），这里只做容错整形 ——
- * 脏行丢弃，不让一条坏数据污染整个账号的读数。
- */
-function applyTokenUsage(
-  snapshot: { tokenAt?: unknown; tokenUsage?: Record<string, unknown> } | null | undefined,
-): boolean {
-  const tokenAt = Number(snapshot?.tokenAt) || 0
-  if (!tokenAt || tokenAt === lastTokenAt) return false
-  const usage = snapshot?.tokenUsage
-  if (!usage || typeof usage !== 'object') return false
-  lastTokenAt = tokenAt
-  const fresh = new Map<string, TokenReading[]>()
-  for (const [id, rows] of Object.entries(usage)) {
-    if (!Array.isArray(rows)) continue
-    const readings: TokenReading[] = []
-    for (const row of rows) {
-      if (!row || typeof row !== 'object') continue
-      const kind = Number((row as Record<string, unknown>).kind)
-      const windowStart = Number((row as Record<string, unknown>).windowStart)
-      const used = Number((row as Record<string, unknown>).used)
-      if (!Number.isFinite(kind) || kind < 0) continue
-      if (!Number.isFinite(windowStart) || windowStart <= 0) continue
-      if (!Number.isFinite(used) || used < 0) continue
-      readings.push({ kind, windowStart, used })
-    }
-    fresh.set(id, readings)
-  }
-  // 引用比较足够：Map 整体替换，账号数量与每行内容有任一变化就会体现在新对象上
-  const changed = fresh.size !== tokenUsageMap.size
-    || [...fresh].some(([id, readings]) => {
-      const current = tokenUsageMap.get(id)
-      return !current || current.length !== readings.length
-        || readings.some((row, index) => row.used !== current[index]?.used
-          || row.windowStart !== current[index]?.windowStart)
-    })
-  tokenUsageMap.clear()
-  for (const [id, readings] of fresh) tokenUsageMap.set(id, readings)
-  return changed
-}
 
 /* ─── Clash 出口缓存（只剩代理表单的「Clash Verge」档在用）─────
  *
@@ -290,11 +155,7 @@ export function openGroupDialog(provider: string): void {
 
 /** 清掉已删除账号的本地缓存（app.js 每次 refresh 后调用） */
 export function refreshCaches(validIds: Set<string>): void {
-  let touched = false
-  for (const id of [...usageMap.keys()]) if (!validIds.has(id)) { usageMap.delete(id); touched = true }
-  // 失败结论的时刻表跟着条目一起清：账号删掉后同 id 可能被「重新添加」复用，
-  // 留着的旧时刻会让那条新记录继承一个本该作废的失败结论
-  for (const id of [...usageFailureAt.keys()]) if (!validIds.has(id)) usageFailureAt.delete(id)
+  let touched = pruneUsageCache(validIds)
   const connections = new Map(getStore().connections)
   for (const id of [...connections.keys()]) if (!validIds.has(id)) { connections.delete(id); touched = true }
   const inflight = new Set(getStore().usageInflight)
@@ -372,347 +233,6 @@ export function startConnectionsPolling(): void {
     if (document.hidden || shared().wbApp?.currentPage !== 'accounts') return
     void syncConnections()
   }, CONNECTIONS_POLL_MS)
-}
-
-/* ─── 余额 / 签到：动作层 ───────────────────── */
-
-/**
- * 批量余额查询的目标集合判据（与后端 `resolve_batch_targets` **逐字一致**）：
- * 「有余额概念 + 凭证完整（`available !== false`）」，**不看启用状态** ——
- * 禁用只表示不参与转发，与「这个账号还剩多少」无关。
- *
- * 工具条「查询余额」、签到 / 领套餐后的自动刷新、以及批量返回后的「未返回」补位
- * 共用这一处；三处各写一份判据，迟早会漂成「界面算的目标集合与后端返回的行对不上」。
- */
-function batchUsageTargets(): AccountRecord[] {
-  return allAccounts().filter(account => supportsUsage(account) && account.available !== false)
-}
-
-/**
- * 缓存条目 → 失败描述的**唯一入口**（余额列的摘要渲染与这里的 toast 播报共用同一份
- * 判据，两处不会一个说红一个说灰）。返回 null 表示这不是失败（还在查询中 / 是结果）。
- *
- * 「未配置」为什么是中性的：CatPaw 的余额接口要一个单独的网页会话凭证（token2），
- * 没配置时后端返回 `code: "usage_not_configured"`。那不是故障：账号本身完全正常、
- * 转发照跑，只是用户还没告诉网关那个凭证长什么样。把它渲染成红色的「查询失败」会让
- * 人去排查一个不存在的故障，所以判据用后端给的 `code` **而不是匹配文案**。
- */
-export function usageFailureOf(entry: UsageEntry): { message: string; notConfigured: boolean } | null {
-  if (entry === undefined || entry === null) return null
-  if (typeof entry === 'string') return { message: entry, notConfigured: false }
-  if (typeof entry !== 'object') return null
-  const error = entry.error
-  if (!error) return null
-  return { message: String(error), notConfigured: entry.code === NOT_CONFIGURED_CODE }
-}
-
-/** 后端结果行 → 缓存条目（成功给 `usage`，失败给 `{error, code?}`）。
- *  失败行的 `code` 必须留住：`usageFailureOf` 按它区分「未配置查询」（中性提示）
- *  与真正的失败（红色）—— 只存 error 字符串会丢掉这个判据。 */
-function cacheEntryOf(row: Record<string, unknown>): UsageEntry {
-  if (row.usage) return row.usage as Record<string, unknown>
-  return { error: row.error ? String(row.error) : t('余额响应为空'), code: row.code }
-}
-
-/**
- * 把一批余额结果写进列表缓存（自动查询快照、批量查询与外部调用共用）。返回写入条数。
- *
- * 行的时间戳取**行上的 `at`**（快照端按账号到期查询，每行各带自己的结论时刻），
- * 没有就按外层的 `at`（手动查询的响应不带 `at`，当刻就是它的结论时刻）。
- * 失败行的时效判定按「这条结论的取得时刻」算，不能拿别人的时刻盖 ——
- * 那正是行级 `at` 存在的原因（见后端 `usage_query::snapshot`）。
- */
-export function applyBalances(
-  balances: { results?: Array<Record<string, unknown>>; at?: unknown } | null | undefined,
-): number {
-  const rows = Array.isArray(balances?.results) ? balances.results : []
-  const at = Number(balances?.at) || Date.now()
-  let applied = 0
-  for (const row of rows) {
-    if (!row?.id) continue
-    putUsage(String(row.id), cacheEntryOf(row), Number(row.at) || at)
-    applied++
-  }
-  if (applied) {
-    bump()
-    // 余额结论会翻转「已限流」归类（余额不足跳过档，isLimitedNow 的口径），顶栏那枚
-    // 计数徽标住在岛外（app.js 渲染）—— 这里顺手重画一次，别让它停在旧数字上
-    // （keys-page 改完自己的徽标也是这么同步顶栏的）
-    shared().wbApp?.renderTopbarStatus?.()
-  }
-  return applied
-}
-
-/**
- * 启动时的一次「形状补齐」：记录表里的读数是**旧版本**写的时，把那一行重新查一遍。
- *
- * ── 为什么需要它 ────────────────────────────────────────────
- * 余额与明细是**同一条**读数（记录表 `account_usage_records.usage` 那一份文档，
- * 见后端 `usage_query::snapshot`），所以明细本来就有缓存、不必每次手点。但缓存的
- * 是**上一次查询那一刻**那份文档：它是旧版本写进去的话，里面就没有明细那一段
- * （旧版 WorkBuddy 只写五键简报，Trae 也没有 `credits[]`），界面上于是只剩余额
- * ——「打开软件只加载余额、要点一下余额才出明细」说的就是这个。旧文档有两个来源，
- * 都不是这一次会话能左右的：
- *   · 升级时后端把旧 kv 快照导进记录表（`usage_records::migrate_legacy_snapshot`），
- *     导进去的就是旧形状；
- *   · 与旧版本实例**共用同一个库**时（桌面壳允许开发版 / 正式版并存），旧实例的
- *     定时查询会把记录写回旧形状。
- * 不补的话，那一行要等到**下一次到期**才刷新 —— 间隔按账号配置，长的能到十几分钟
- * 甚至一天，这就是"每次打开都要手点一下"。
- *
- * ── 为什么在前端做，而不是后端调度 ───────────────────────────
- * 「这家该不该有明细」这个判据（`creditDetail` 能力位）是**插件申报**的
- * （协议里的 `AccountFeatures`，界面侧在 accounts-features 归一），后端不查
- * 这份名单；搬过去等于再写一份、迟早漂。而这边本来就有一切：缓存条目、
- * 能力位、单账号查询的现成动作。
- *
- * ── 三条纪律（都为了"补齐不该把界面弄得更差"）─────────────────
- *   1. **每个会话只做一次**：这是补齐旧文档，不是维持读数新鲜（那是后端心跳的
- *      职责）。一次性的量封住了，也不会因为「上游本来就没有明细」（补齐之后依旧
- *      没有 `credits` 的那些账号）来回空转；
- *   2. **失败不落缓存**：查询没成 / 上游没返回这一行时把原条目放回去 —— 为了补一段
- *      明细把一格好读数换成「查询失败」是本末倒置；
- *   3. **不播报、不摆「查询中」**：走 `queryUsageFor`（行上「余额」按钮那条动作的
- *      执行体），而不是带播报的 `queryUsageOnce`；界面安静地换成新读数。
- */
-let shapeRepairStarted = false
-
-/** 缓存条目缺了本家当前会产出的明细段（= 旧版本写的读数）。 */
-function detailMissing(account: AccountRecord): boolean {
-  if (!supportsCreditDetail(account)) return false
-  const entry = usageEntryOf(account)
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
-  if (usageFailureOf(entry)) return false
-  // 有 `credits` 键就是当前形状（哪怕空数组 = 上游这一轮确实没有可列的包）
-  return !Array.isArray(entry.credits)
-}
-
-async function repairStaleDetail(): Promise<void> {
-  if (shapeRepairStarted) return
-  shapeRepairStarted = true
-  for (const account of allAccounts().filter(detailMissing)) {
-    const before = usageMap.get(account.id)
-    try {
-      await queryUsageFor(account.id)
-    } catch {
-      // 静默（纪律 2）：网络层失败时 `queryUsageFor` 一个键都没写
-    }
-    const after = usageMap.get(account.id)
-    if (before !== undefined && (!after || usageFailureOf(after))) {
-      putUsage(account.id, before, Date.now())
-    }
-    bump()
-  }
-}
-
-/**
- * 拉一次后端的余额快照并写进缓存，返回是否应用了新的一轮。
- *
- * 余额查询按账号各自的间隔在后端自动跑（账号设置里逐账号配置），结论存进
- * 记录表；这份快照接口把它端出来。界面不点按钮时也要跟着它更新 —— 否则自动
- * 查询在后台跑得好好的，用户看到的还是启动那一次的旧余额，那正是「自动查询」
- * 最容易让人觉得「没生效」的地方。`at` 是最近一条结论的时刻，用它判断
- * 「这份快照我应用过了没」：时间戳没变就直接返回，不做无谓的重绘。
- * **失败的行同样会被应用**（后端快照里就带着它们），于是账号页会明确显示
- * 「查询失败」而不是悄悄留着上一个成功的旧值 —— 但后端出口会先丢掉
- * 「账号记录比快照还新」的失败行（见 `usageEntryOf` 的说明），那些行这里也就收不到。
- * 失败静默（不 toast）：它是 20 秒一次的轮询，网关长时间不可用会变成刷屏。
- */
-let lastSnapshotAt = 0
-export async function syncBalancesSnapshot(): Promise<boolean> {
-  try {
-    const data = await shared().workbuddyDesktop?.getBalancesSnapshot?.()
-    // Token 限制器的读数**先于**余额的早退判定应用：余额只在查询到期时变化
-    // （`at` 不动说明没有新结论），而 Token 周期消耗随每条请求变化 —— 先判
-    // 余额的 `at` 就返回会让 Token 读数停在最后一次余额查询那会儿。
-    const limiterApplied = adoptLimiterSnapshot(data)
-    const sortingApplied = !getStore().sortBusy && adoptAccountSorting(data?.sorting)
-    const tokenApplied = applyTokenUsage(data) || limiterApplied || sortingApplied
-    if (tokenApplied) {
-      bump()
-      // Token 结论会翻转「已限流」归类（isLimitedNow 的口径），顶栏那枚计数
-      // 徽标住在岛外（app.js 渲染）—— 与余额结论应用后的同步同一形态
-      shared().wbApp?.renderTopbarStatus?.()
-    }
-    const at = Number(data?.at) || 0
-    // at = 0 表示本进程还没定时查过（刚启动、或任务被关掉）—— 不覆盖已有缓存
-    if (!at || at === lastSnapshotAt) return tokenApplied
-    lastSnapshotAt = at
-    if (!applyBalances(data)) return tokenApplied
-    // 首轮快照落下之后再查有没有「旧版本写的读数」（每个会话只做一次，见上）
-    void repairStaleDetail()
-    return true
-  } catch {
-    // 静默：下一次轮询自然重试；账号页保持上一轮的结果不变
-    return false
-  }
-}
-
-/**
- * 查询余额。`id` 缺省 = 全部（后端批量目标集合）；给了 id 则**带 `?id=` 请求**。
- *
- * 为什么单查要走 `?id=` 而不是「取一批后筛一条」：后端批量路径的目标集合是
- * 「全部**可用**账号」，而用户手点某一行账号的「余额」按钮问的是另一个问题：
- * 「这个账号现在还剩多少」。单查带 id 走后端那条只认 id 的分支（不做范围与
- * 可用性过滤）。两条路径现在都不看启用状态 —— 禁用只表示不参与转发，与余额
- * 能否查无关；批量若按启用状态挡掉，那些行就只能永远停在「未查询」。
- */
-export async function queryUsageFor(id?: string | null): Promise<{ results?: Array<Record<string, unknown>> } | null | undefined> {
-  const data = await shared().workbuddyDesktop?.getAllBalances?.(id || undefined)
-  await refreshAccountSorting()
-  const rows = Array.isArray(data?.results) ? data.results : []
-  // 手动查询的结论就是当刻的（后端这一轮可能顺手刷过 token，那也是「现在」）
-  const at = Date.now()
-  const returned = new Set<string>()
-  for (const row of rows) {
-    if (!row?.id) continue
-    const rowId = String(row.id)
-    if (id && rowId !== id) continue
-    returned.add(rowId)
-    putUsage(rowId, cacheEntryOf(row), at)
-  }
-  if (id) {
-    // 后端返回了 0 行才是真的「没数据」（账号刚被删、或 provider 不认这个 id）
-    if (!returned.has(id)) putUsage(id, t('未返回余额数据'), at)
-    bump()
-    return data
-  }
-  // 只给**批量目标集合内的**账号补「未返回」：后端的目标集合是「可用 + 有余额概念」，
-  // 缺失一行才是异常。不在集合里的账号（不可用、没有余额概念）补它等于把「这行没参与
-  // 本轮查询」说成「上游没给数据」—— 与单查那个 bug 同源。判据走 `batchUsageTargets`，
-  // 与后端 `resolve_batch_targets` 逐字一致。
-  for (const account of batchUsageTargets()) {
-    if (!returned.has(account.id)) putUsage(account.id, t('未返回余额数据'), at)
-  }
-  bump()
-  return data
-}
-
-/**
- * 批量查询全部可查询账号的余额（工具条「查询余额」）。
- * 目标集合见 `batchUsageTargets()`：**有余额概念 + 凭证完整**的全部账号，
- * 不看启用状态（与后端一致）—— 禁用账号后端现在同样会查，界面把它们排除在外，
- * 「查询中」中间态与失败兜底就会与后端返回的行对不上。
- * 每次点击都是一次查询（明细面板已取消，没有「第二次点击收起」那套语义）。
- */
-export async function queryAllUsage(): Promise<void> {
-  if (getStore().usageBusy) return
-  const targets = batchUsageTargets()
-  if (!targets.length) { toast(t('暂无可查询余额的账号'), 'err'); return }
-  patch({ usageBusy: true })
-  // 先写「查询中」再重绘：余额列立刻显示查询中，结果回来了直接换成读数
-  targets.forEach(account => putUsage(account.id, null, Date.now()))
-  bump()
-  try {
-    const rows = (await queryUsageFor(null))?.results || []
-    const ok = rows.filter(row => row.usage).length
-    // 「未配置查询」不算失败：那些账号成功返回了、只是缺一个可选的凭证
-    const skipped = rows.filter(row => row.code === NOT_CONFIGURED_CODE).length
-    const suffix = skipped ? t('（{n} 个未配置查询凭证）', { n: skipped }) : ''
-    const failed = rows.length - ok - skipped
-    toast(ok + skipped === rows.length
-      ? t('✅ 已更新 {n} 个账号的余额{suffix}', { n: ok, suffix })
-      : t('已更新 {ok}/{total} 个账号，{failed} 个失败', { ok, total: rows.length, failed }), failed ? 'err' : 'ok')
-  } catch (error) {
-    const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
-    bump()
-    toast(t('余额查询失败：{message}', { message }), 'err')
-  } finally {
-    patch({ usageBusy: false })
-  }
-}
-
-/**
- * 查询一个账号余额的执行体：在途去重 + 「查询中」中间态。异常**照原样抛给调用方**
- * —— 失败怎么落缓存、要不要播报由调用方定，两个调用点的口径不同：
- *   · 行上「余额」按钮（`queryUsageOnce`）→ 失败落进余额列 + 红色 toast；
- *   · 签到后的自动刷新（`refreshUsageAfterCheckin`）→ 只落缓存，不播报。
- */
-async function runUsageQuery(id: string): Promise<void> {
-  if (getStore().usageInflight.has(id)) return
-  const inflight = new Set(getStore().usageInflight)
-  inflight.add(id)
-  putUsage(id, null, Date.now())
-  patch({ usageInflight: inflight })
-  try {
-    await queryUsageFor(id)
-  } finally {
-    const next = new Set(getStore().usageInflight)
-    next.delete(id)
-    patch({ usageInflight: next })
-  }
-}
-
-/** 行上「余额」按钮：在途去重（同一账号同时发几份一模一样的上游请求，界面上看不出区别） */
-export async function queryUsageOnce(id: string): Promise<void> {
-  if (getStore().usageInflight.has(id)) return
-  try {
-    await runUsageQuery(id)
-    // 缓存的四种形态（见 usageFailureOf）：undefined/null/字符串/对象，对象里再分
-    // 「未配置」与「失败」—— 提示语要跟着这个分叉走
-    const failure = usageFailureOf(usageMap.get(id))
-    if (failure?.notConfigured) toast(failure.message, 'ok')
-    else if (failure) toast(t('余额查询失败：{message}', { message: failure.message }), 'err')
-    else toast(t('✅ 已更新余额'))
-  } catch (error) {
-    putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
-    bump()
-    toast(t('余额查询失败：{message}', { message: errorMessage(error) }), 'err')
-  }
-}
-
-/**
- * 动作之后的余额刷新：**这些动作会改变余额读数**（小浣熊与 AutoClaw 的签到直接
- * 发积分、Qoder 的签到发权益、ZCode 的「领套餐」领到的就是 token 额度），
- * 而余额列读的是缓存里的旧读数 —— 不刷新的话，用户要再点一次「余额」才看得到
- * 刚领到的那笔。所以动作一结束就把读数重新拉一遍。
- *
- * 名字里的 checkin 是历史（这条链最早只服务签到）；领套餐那条也走它，
- * 差别只在「刷哪一行」由调用方给定 `id`。
- *
- * ── 为什么静默（不 toast、也不复用 queryUsageOnce / queryAllUsage 的播报）──
- * toast 是单例，后一条会把前一条**顶掉**：签到结果才是用户刚点那个动作的结果，
- * 不能被一条「已更新余额」挤掉。反馈改由界面自己给 —— 余额列先显示「查询中」、
- * 再落到新读数；批量那条同时把工具条的「查询中…」点亮（`usageBusy`，顺带挡住
- * 用户在刷新期间重复点「查询余额」）。
- *
- * 目标集合：`id` 给定 = 该账号（后端单查路径，与行上那颗「余额」按钮同一条）；
- * 缺省 = 与工具条「查询余额」逐字相同的集合（见 `batchUsageTargets()`：有余额概念
- * + 凭证完整的全部账号，**不看启用状态**），免得自动刷新比手动查询还「多查一批」。
- * 没有余额概念的账号直接跳过 —— 签到范围的几家都有余额概念，这一条是留给将来
- * 新增 provider 的兜底。
- *
- * 失败只写缓存（余额列显示失败原因）、不播报：签到请求成功而余额查询失败时，
- * 用户需要的是「这行为什么没有读数」，而那条原因就在列上。
- */
-export async function refreshUsageAfterCheckin(id?: string): Promise<void> {
-  if (id) {
-    const account = findAccount(id)
-    if (!account || !supportsUsage(account)) return
-    try {
-      await runUsageQuery(id)
-    } catch (error) {
-      putUsage(id, t('查询失败：{message}', { message: errorMessage(error) }), Date.now())
-      bump()
-    }
-    return
-  }
-  if (getStore().usageBusy) return
-  const targets = batchUsageTargets()
-  if (!targets.length) return
-  patch({ usageBusy: true })
-  targets.forEach(account => putUsage(account.id, null, Date.now()))
-  bump()
-  try {
-    await queryUsageFor(null)
-  } catch (error) {
-    const message = errorMessage(error)
-    targets.forEach(account => putUsage(account.id, t('查询失败：{message}', { message }), Date.now()))
-    bump()
-  } finally {
-    patch({ usageBusy: false })
-  }
 }
 
 /* ─── 行内动作（启用 / 顺序 / 限流 / 代理）─────
@@ -893,7 +413,7 @@ export function rowContext(
     seat: seatMap.get(account.id) || { position: 1, total: 1 },
     rank,
     picked: isPicked(account.id),
-    usageEntry: usageMap.get(account.id),
+    usageEntry: usageEntryOf(account),
     connections: connectionsOf(account.id),
   }
 }

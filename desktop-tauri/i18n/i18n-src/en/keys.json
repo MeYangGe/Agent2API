@@ -53,6 +53,7 @@
   "确定删除 Key「<strong>{name}</strong>」？使用它的客户端会立刻无法访问。": "Delete key \"<strong>{name}</strong>\"? Clients using it will lose access immediately.",
   "确定删除「{name}」？用这把 Key 的客户端会立即失效。": "",
   "网关 Key 表": "Gateway key table",
+  "自动记住本次选择，下次打开继续使用；Key 被停用或删除后需重新选择。": "Your selection is remembered for next time. Select another key if it is disabled or deleted.",
   "请先在上面选择可用提供商": "Select available providers above first",
   "读取 Key 列表失败：{reason}": "Failed to load key list: {reason}",
   "还没有 Key。去桌面端「网关 Key」页新建一把。": "",

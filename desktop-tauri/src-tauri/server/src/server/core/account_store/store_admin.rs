@@ -615,6 +615,8 @@ impl AccountStore {
             );
         }
 
+        let codearts_limiters = super::codearts_accounts::migrate_limiters(&mut state.accounts);
+
         if provider_added == 0
             && assignments.is_empty()
             && !scope_migrated
@@ -622,6 +624,7 @@ impl AccountStore {
             && workbuddy_moved == 0
             && qoder_moved == 0
             && chatglm_healed == 0
+            && codearts_limiters == 0
         {
             return json!({
                 "providerAdded": 0,
@@ -641,6 +644,9 @@ impl AccountStore {
                 "priorityChanged": false,
                 "assignments": [],
             });
+        }
+        if codearts_limiters > 0 {
+            logging::log("[Accounts]", &format!("已移除 {codearts_limiters} 个 CodeArts 账号的过期活动 Token 限制；无其他规则时改用总积分保护"));
         }
         if cline_renamed > 0 {
             logging::log(
@@ -736,6 +742,64 @@ impl AccountStore {
                     "[Accounts]",
                     &format!(
                         "⚠️  历史账号凭证加密未完成（下次启动会自动重试，本次账号照常可用）: {error}"
+                    ),
+                );
+            }
+        }
+    }
+
+    /// 把「插件落库但顶层缺身份字段」的账号补齐（幂等，可重复调用）。
+    ///
+    /// ── 它补的是什么（issue #380）──────────────────────────────
+    /// 插件登录 / 插件落库写的是 `pluginSecret` + `pluginPublic`，顶层没有
+    /// `uid` / `edition` / `endpoint` 等字段。而网关的计费、签到、余额几条
+    /// 读路径只认顶层 —— 那批账号「对话正常、签到全报找不到账号记录」。
+    ///
+    /// 写侧（`plugin_identity::mirror_identity`）已经在新写入时镜像了，本函数
+    /// 只收尾**升级前已经在库里**的那批。读侧也做了回落（`StoredAccount::uid`
+    /// 等），所以即使这一步没跑成，功能也是好的 —— 它只是把字段真正落到盘上，
+    /// 让导出的 JSON 与其它按顶层字段工作的地方也一致。
+    ///
+    /// ── 幂等与失败语义 ──────────────────────────────────────────
+    /// 判据是数据自证：只有「顶层缺、子对象里有」时才写，没有 kv 标记。
+    /// 一次读一次写（`migrate_startup` 同款）；没有要补的记录时不写库。
+    pub fn backfill_plugin_identity(&self) {
+        let guard = self.guard();
+        let mut state = self.load_locked(&guard);
+        let mut changed = 0usize;
+        for record in state.accounts.iter_mut() {
+            // 只处理插件落库形态（有 pluginSecret 或 pluginPublic）：内置记录
+            // 的顶层字段本来就是权威，不该被子对象覆盖。
+            let has_plugin_side = record.get("pluginSecret").is_some_and(|value| !value.is_null())
+                || record.get("pluginPublic").is_some_and(|value| !value.is_null());
+            if !has_plugin_side {
+                continue;
+            }
+            let before = record.to_value();
+            let provider = record.provider();
+            super::plugin_identity::mirror_identity(record, &provider);
+            if record.to_value() != before {
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            return;
+        }
+        match self.save_locked(&state, &guard) {
+            Ok(()) => {
+                drop(guard);
+                logging::log(
+                    "[Accounts]",
+                    &format!("🔧 已为 {changed} 个插件账号补齐顶层身份字段（uid / edition 等）"),
+                );
+            }
+            Err(error) => {
+                drop(guard);
+                logging::log(
+                    "[Accounts]",
+                    &format!(
+                        "⚠️  插件账号身份字段回填未完成（下次启动会自动重试，本次账号照常可用）: {}",
+                        error.message
                     ),
                 );
             }

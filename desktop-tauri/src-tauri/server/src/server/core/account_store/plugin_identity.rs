@@ -22,7 +22,92 @@ pub(super) fn incoming(provider: &str, identity: &str, secret: &Value, public: &
     if (kind_from_id(provider).is_none() || super::is_cline_family(provider)) && !identity.trim().is_empty() {
         record.set(IDENTITY_KEY, Value::String(identity.to_string()));
     }
+    mirror_identity(&mut record, provider);
     record
+}
+
+/// 身份 / 端点字段从 `pluginSecret` / `pluginPublic` 镜像到**记录顶层**。
+///
+/// ── 为什么必须镜像（issue #380）──────────────────────────────
+/// 网关有一批读路径只认顶层字段，最典型的是计费侧
+/// （`billing::account_of` → `session_from_record` → `record.uid()`）。
+/// 插件落库时把凭证与展示字段都塞进 `pluginSecret` / `pluginPublic`，
+/// 顶层什么都没有 —— 于是「网页登录新建的账号」对话正常（插件自己从
+/// `pluginSecret` 取凭证）但签到 / 余额全报「找不到该会话对应的账号记录」。
+///
+/// 内置实现的落库路径显式写顶层 `uid`（`store_crud`），插件路径必须遵守
+/// 同一契约。`edition` 也要一起写：缺了它 `resolve_edition(None)` 会回落
+/// `cn`，国际版账号被当成国内版反查，即使补了 uid 也匹配不上。
+///
+/// ── 键集合怎么定 ────────────────────────────────────────────
+/// 取「网关会读、插件会写」的交集：身份（uid / nickname / type / 企业两段）
+/// 与端点四件套（edition / endpoint / prefixPath / platform）。这些都是
+/// **非敏感**字段（`pluginPublic` 里本来就原样下发），镜像不扩大暴露面。
+/// 凭证类（accessToken / refreshToken）不在这里 —— 它们有独立的
+/// `MIRROR_KEYS` 契约（只在记录本来就有该键时写）。
+const MIRRORED_IDENTITY_KEYS: [&str; 9] = [
+    "uid",
+    "nickname",
+    "type",
+    "enterpriseId",
+    "enterpriseName",
+    "edition",
+    "endpoint",
+    "prefixPath",
+    "platform",
+];
+
+/// 从 `pluginPublic`（优先）与 `pluginSecret` 取身份字段写到顶层。
+///
+/// `pluginPublic` 优先：那是插件的 `account_view` 产出，已经做过归一
+/// （例如 `edition` 被翻成 `cn` / `intl` 的稳定 id，而 secret 里可能是
+/// 用户随手填的 `international`）。
+///
+/// ── 只在顶层缺失时才写 ──────────────────────────────────────
+/// 顶层是**网关的权威字段**：用户可以在账号设置里改 `endpoint`（指向
+/// staging / 自建网关），也可以手工修 `uid`。无条件用插件快照覆盖会让
+/// 「重新登录一次」把用户的手工配置洗掉，而症状（打回默认站点）与
+/// 「登录态过期」极像，很难查。
+///
+/// 代价是「插件侧改了值、顶层不跟着变」—— 那种情况由用户显式改账号
+/// 设置来表达，不是本函数该猜的。
+pub(super) fn mirror_identity(record: &mut StoredAccount, provider: &str) {
+    let public = record.get("pluginPublic").cloned().unwrap_or(Value::Null);
+    let secret = record.get("pluginSecret").cloned().unwrap_or(Value::Null);
+    for key in MIRRORED_IDENTITY_KEYS {
+        if has_text_value(record, key) {
+            continue;
+        }
+        let value = public
+            .get(key)
+            .filter(|value| !value.is_null())
+            .or_else(|| secret.get(key).filter(|value| !value.is_null()));
+        let Some(value) = value else { continue };
+        // 空串是「插件没给这个字段」，不是有效值：写进顶层会让 `uid()` 之类的
+        // 读取拿到 `Some("")`，反查照样失败却看不出是缺失。
+        let empty = value.as_str().is_some_and(|text| text.trim().is_empty());
+        if empty {
+            continue;
+        }
+        record.set(key, value.clone());
+    }
+    // WorkBuddy 系：插件没给 edition 时按 provider 补一次。判据是「这家有没有
+    // 地区概念」，不看插件是否实现——缺 edition 会让国际版账号被反查成国内版。
+    if !has_text_value(record, "edition") {
+        if let Some(region) = crate::server::core::providers::workbuddy::Region::from_provider_id(provider) {
+            record.set("edition", Value::String(region.edition().id.to_string()));
+        }
+    }
+}
+
+/// 顶层是否已有一个**非空**的同名字段。
+fn has_text_value(record: &StoredAccount, key: &str) -> bool {
+    record
+        .get(key)
+        .is_some_and(|value| match value.as_str() {
+            Some(text) => !text.trim().is_empty(),
+            None => !value.is_null(),
+        })
 }
 
 const IDENTITY_KEY: &str = "pluginIdentity";

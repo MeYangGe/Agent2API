@@ -51,6 +51,8 @@ export function createBalanceTool(api: BalanceApi, t: Translate): {
           cached: !refresh, queried: Boolean(row), at: row ? number(row.at) : null,
           ...fields(row, ['code']), error: diagnosticText(row?.error, t),
           usage: row?.usage ? usageSummary(object(row.usage), t) : null,
+          lastSuccessAt: row ? number(row.lastSuccessAt) : null,
+          lastUsage: row?.lastUsage ? usageSummary(object(row.lastUsage), t) : null,
         }
       })
       return result({ asOf: Date.now(), accounts: page(entries, offset, limit, selected.length), refreshed: refresh }, t('{n} 个账号', { n: selected.length }))

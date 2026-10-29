@@ -60,6 +60,7 @@ import {
   getSnapshot, toggleSubscription, type SubscriptionItem,
 } from './proxies-sub-state'
 import { KernelDownloadDialog } from './proxies-kernel-dialog'
+import { KernelImportDialog } from './proxies-kernel-import'
 import {
   formatTime, loadSettings,
   // 代理池那份 store 与同步动作（本弹窗底部的「同步 Clash Verge」用；
@@ -92,6 +93,7 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
   const [range, setRange] = React.useState<{ base: number; end: number } | null>(null)
   /** 「下载内核」弹窗（出口 / 存放位置 / 进度 / 停止都在里面，见 proxies-kernel-dialog） */
   const [downloadOpen, setDownloadOpen] = React.useState(false)
+  const [importOpen, setImportOpen] = React.useState(false)
 
   // 端口范围是低频配置：挂载时静默读一次，读不到就不显示这一段（不影响内核状态本身）
   React.useEffect(() => {
@@ -111,6 +113,8 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
   }, [])
 
   const downloading = status?.download.state === 'downloading'
+  const importing = status?.import?.active === true
+  const installBusy = status?.installBusy === true
   const percent =
     downloading && status!.download.total > 0
       ? Math.round((status!.download.received / status!.download.total) * 100)
@@ -152,19 +156,21 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
           </span>
         ) : null}
         <div className='ml-auto flex items-center gap-2'>
+          <Button size='sm' variant='outline' disabled={(snapshot.pending || installBusy) && !importing}
+            onClick={() => setImportOpen(true)}>{importing ? t('正在导入…') : t('手动导入内核')}</Button>
           {!status?.installed ? (
             /* 点它开**下载弹窗**（选出口 / 选目录 / 看进度 / 停下载都在那里）——
                不再直接开始下载：GitHub 直连不通时，「点了没反应」没有任何补救
                余地，而现在第一件事就是选一条线路。
                下载中按钮**保持可点**（打开弹窗看进度、停止）：`pending` 在下载
                全程为 true，若照旧禁用掉，用户把弹窗一关就再也回不到进度界面了 */
-            <Button size='sm' variant='outline' disabled={snapshot.pending && !downloading}
+            <Button size='sm' variant='outline' disabled={(snapshot.pending || installBusy) && !downloading}
               onClick={() => setDownloadOpen(true)}>
               {downloading ? t('下载中…') : t('下载内核')}
             </Button>
           ) : (
             <>
-              <Button size='sm' variant='outline' disabled={snapshot.pending || downloading}
+              <Button size='sm' variant='outline' disabled={snapshot.pending || downloading || installBusy}
                 onClick={() => void restartKernel()}>
                 {status?.running ? t('重启内核') : t('启动内核')}
               </Button>
@@ -173,7 +179,7 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
                   保留，「启动内核」后原位恢复（见 proxies-sub-state 的
                   stopKernel）；与破坏性的「删除内核」是两回事 */}
               {status?.running ? (
-                <Button size='sm' variant='outline' disabled={snapshot.pending || downloading}
+                <Button size='sm' variant='outline' disabled={snapshot.pending || downloading || installBusy}
                   onClick={() => void stopKernel()}>
                   {t('关闭内核')}
                 </Button>
@@ -181,7 +187,7 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
               {/* 删除：装过内核之后才有意义（没装时摆了也只是个永远灰着的按钮），
                   破坏性且低频 —— 摆在启动 / 重启右侧、用危险语义，点开还有一道
                   确认（见 proxies-sub-state 的 removeKernel） */}
-              <Button size='sm' variant='destructive' disabled={snapshot.pending || downloading}
+              <Button size='sm' variant='destructive' disabled={snapshot.pending || downloading || installBusy}
                 onClick={() => void removeKernel()}>
                 {t('删除内核')}
               </Button>
@@ -206,7 +212,10 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
       {status?.lastError ? (
         <span className='text-[12px] text-destructive'>{status.lastError}</span>
       ) : null}
+      {importing ? <div className='flex items-center gap-3'><Progress className='flex-1' value={null} /><span className='text-xs text-subtle'>{t('正在导入…')}</span></div> : null}
+      {status?.import?.state === 'error' && status.import.error ? <span className='text-xs text-destructive'>{status.import.error}</span> : null}
       {downloadOpen ? <KernelDownloadDialog onClose={() => setDownloadOpen(false)} /> : null}
+      {importOpen ? <KernelImportDialog onClose={() => setImportOpen(false)} /> : null}
     </div>
   )
 }

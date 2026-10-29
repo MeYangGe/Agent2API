@@ -6,6 +6,7 @@ mod clients;
 pub mod discover;
 pub mod files;
 mod json_edit;
+pub mod native;
 pub mod paths;
 pub mod preview;
 pub mod registry;
@@ -22,13 +23,20 @@ use serde_json::{json, Value};
 
 pub fn snapshot(port: u16) -> Value {
     let gateway = format!("http://127.0.0.1:{port}");
+    let mut keys = crate::server::core::api_keys::entries_from(&crate::server::config::current().raw())
+        .into_iter().filter(crate::server::core::api_keys::ApiKeyEntry::is_usable)
+        .map(|key| json!({ "id": key.id, "name": key.name, "allowedModels": key.allowed_models, "allowedProviders": key.allowed_providers }))
+        .collect::<Vec<_>>();
+    if crate::server::config::parse::env_api_key_value().is_some() {
+        keys.push(json!({ "id": "env", "name": "环境变量 Key", "allowedModels": [], "allowedProviders": [] }));
+    }
     json!({
         "clients": CLIENTS.iter().map(|def| client_view(def, &gateway)).collect::<Vec<_>>(),
         "gateway": {
             "baseUrl": gateway,
+            "defaultModel": crate::server::config::current().default_model(),
             "requiresKey": true,
-            "keys": crate::server::core::api_keys::entries_from(&crate::server::config::current().raw())
-                .into_iter().filter(crate::server::core::api_keys::ApiKeyEntry::is_usable).map(|key| json!({ "id": key.id, "name": key.name, "allowedModels": key.allowed_models })).collect::<Vec<_>>(),
+            "keys": keys,
         },
         "detectedAt": crate::server::logging::now_ms(),
         "host": { "name": std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default() },
@@ -93,7 +101,13 @@ fn client_view(def: &ClientDef, gateway: &str) -> Value {
         "supportNote": detection.note.as_deref().unwrap_or(def.note),
         "docsUrl": def.docs, "needsRestart": def.needs_restart,
         "resources": resources::capabilities(def),
-        "profiles": views, "live": live.iter().map(Profile::view).collect::<Vec<_>>(),
+        "profiles": views, "live": live.iter().map(|profile| {
+            let mut view = profile.view();
+            view["editable"] = json!(writable && native::editable(def, profile));
+            view["deletable"] = json!(writable);
+            view
+        }).collect::<Vec<_>>(),
+        "nativeRevision": native::revision(&live),
         "profilesAreLive": false, "readError": read_error,
         "storeError": saved.err(), "revision": revision,
         "viaGateway": live.iter().any(|p| p.enabled && is_gateway(&p.base_url, gateway)),

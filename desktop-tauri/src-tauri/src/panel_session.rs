@@ -208,10 +208,9 @@ async fn refresh_pair(expected: TokenPair) -> bool {
         "http://127.0.0.1:{}/api/panel/refresh?auth-mode=body",
         gateway::proxy_port()
     );
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(gateway::REQUEST_TIMEOUT_MS))
-        .build()
-    {
+    let client = match gateway::local_client(std::time::Duration::from_millis(
+        gateway::REQUEST_TIMEOUT_MS,
+    )) {
         Ok(client) => client,
         Err(_) => return false,
     };

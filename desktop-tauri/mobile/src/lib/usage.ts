@@ -12,8 +12,10 @@
  */
 
 import type { UsageRow, UsageSnapshot } from '../api/gateway'
-import { t } from '../i18n'
-import { snapshotReadingsOf, usageUnitLabel } from '../../../ui-shared/usage-readings'
+import { t, locale } from '../i18n'
+import { creditStatisticsWalletsOf, recordReadingsOf, snapshotReadingsOf, usageAggregateOf, usageNumberOrNull, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { formatStamp } from './format'
+import { mergeUsageQueryRow, usageQueryFailureStatus } from '../../../ui-shared/usage-query-state'
 
 export type UsageView = {
   kind: 'ok' | 'warn' | 'bad' | 'muted'
@@ -21,6 +23,8 @@ export type UsageView = {
   text: string
   /** 完整说明（给详情页/长按提示用） */
   detail: string
+  failureStatus?: string
+  failureDetail?: string
 }
 
 /**
@@ -31,15 +35,18 @@ export type UsageView = {
  */
 function compact(value: unknown): string {
   // null / 空串不能被 Number() 悄悄翻成 0：那会把「读不到」显示成「可用 0」
-  if (value === null || value === undefined || value === '') return '—'
-  const num = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(num)) return '—'
+  const num = usageNumberOrNull(value)
+  if (num === null) return '—'
   const abs = Math.abs(num)
   // 「万 / 亿」只保留 1~2 位小数：行内读数要短，精度对余额没有行动价值
-  if (abs >= 1e8) return `${(num / 1e8).toFixed(2)} 亿`
-  if (abs >= 1e4) return `${(num / 1e4).toFixed(1)} 万`
-  if (Number.isInteger(num)) return num.toLocaleString('zh-CN')
-  return num.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+  const chinese = locale().startsWith('zh')
+  if (abs >= 1e8 && chinese) return `${(num / 1e8).toFixed(2)} ${locale() === 'zh-Hant' ? '億' : '亿'}`
+  if (abs >= 1e4 && chinese) return `${(num / 1e4).toFixed(1)} ${locale() === 'zh-Hant' ? '萬' : '万'}`
+  if (!chinese && abs >= 1e6) return `${(num / 1e6).toFixed(1)}M`
+  if (!chinese && abs >= 1e4) return `${(num / 1000).toFixed(1)}k`
+  const language = locale() === 'zh-Hans' ? 'zh-CN' : locale()
+  if (Number.isInteger(num)) return num.toLocaleString(language)
+  return num.toLocaleString(language, { maximumFractionDigits: 2 })
 }
 
 /** usage 里可读的「单位」：缺失时按积分兜底 */
@@ -48,14 +55,11 @@ function unitOf(usage: Record<string, unknown>): string {
   return typeof unit === 'string' && unit.trim() ? usageUnitLabel(unit.trim(), t) : t('积分')
 }
 
-/** 把「部分失败」的两条错误拼成 detail 尾巴（CodeArts 这类两份账的家） */
+/** 补充查询中的部分失败说明。 */
 function partialErrors(usage: Record<string, unknown>): string[] {
-  const parts: string[] = []
+  const parts = usageWarningsOf(usage).map(line => t(line))
   if (usage.statisticsError) {
     parts.push(t('订阅统计未读到：{error}', { error: String(usage.statisticsError) }))
-  }
-  if (usage.benefitError) {
-    parts.push(t('福利网关未读到：{error}', { error: String(usage.benefitError) }))
   }
   return parts
 }
@@ -70,9 +74,17 @@ export function usageText(row?: UsageRow): UsageView {
   // ② 这一行明确失败：「未配置查询凭证」是中性提示，其余才是红色失败
   if (row.error) {
     if (row.code === 'usage_not_configured') {
-      return { kind: 'muted', text: t('未配置'), detail: row.error }
+      return { kind: 'muted', text: t('未配置'), detail: t(row.error) }
     }
-    return { kind: 'bad', text: t('查询失败'), detail: row.error }
+    const status = usageQueryFailureStatus(row, t, formatStamp)
+    const previous = row.lastUsage ? usageText({ usage: row.lastUsage }) : null
+    return {
+      kind: 'bad',
+      text: previous?.text || t('查询失败'),
+      detail: [status?.detail || t(row.error), previous?.detail].filter(Boolean).join(' · '),
+      failureStatus: previous ? status?.text : undefined,
+      failureDetail: previous ? status?.detail : undefined,
+    }
   }
 
   const usage = row.usage
@@ -81,14 +93,33 @@ export function usageText(row?: UsageRow): UsageView {
   }
 
   const data = usage as Record<string, unknown>
+  if (data.error) return { kind: 'bad', text: t('查询失败'), detail: t(String(data.error)) }
   const errors = partialErrors(data)
-  const readings = snapshotReadingsOf(data, t, compact).map(reading => `${reading.name} ${reading.view}`)
+  const aggregate = usageAggregateOf(data, t)
+  const readings = [
+    ...(aggregate ? [`${aggregate.label} ${aggregate.unlimited ? t('不限') : compact(aggregate.remaining)}${aggregate.unit && !aggregate.unlimited ? ` ${aggregate.unit}` : ''}`] : []),
+    ...usageSupplementReadingsOf(data, t, compact),
+    ...snapshotReadingsOf(data, t, compact).map(reading => `${reading.name} ${reading.view}`),
+    ...recordReadingsOf(data, t, compact, formatStamp),
+  ]
   const baseKind: UsageView['kind'] = errors.length ? 'warn' : 'ok'
   const withErrors = (view: UsageView): UsageView => ({
     kind: errors.length ? 'warn' : view.kind,
     text: view.text,
-    detail: [view.detail, ...readings, ...errors].filter(Boolean).join(' · '),
+    detail: [...new Set([view.detail, ...readings, ...errors].filter(Boolean))].join(' · '),
   })
+
+  if (Array.isArray(data.windows) && data.windows.length) {
+    const windows = data.windows.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    const detail = windows.map(window => {
+      const label = usageWindowLabel(window.label, t)
+      const view = usageWindowView(window, t, compact)
+      const reset = typeof window.resetsAt === 'number' && window.resetsAt > 0
+        ? t('重置 {date}', { date: formatStamp(window.resetsAt) }) : ''
+      return [label, view, reset].filter(Boolean).join(' ')
+    }).join(' · ')
+    return withErrors({ kind: baseKind, text: t('分窗口额度'), detail })
+  }
 
   // ④ workbuddy 既有形状：totalLeft / planLeft / bonusLeft
   if (Object.prototype.hasOwnProperty.call(data, 'totalLeft')) {
@@ -124,10 +155,10 @@ export function usageText(row?: UsageRow): UsageView {
 
   // ⑦ 只有钱包明细：取第一个带 balance 的钱包做读数，全部钱包进 detail
   if (Array.isArray(data.wallets)) {
-    const wallets = data.wallets.filter(
+    const wallets = creditStatisticsWalletsOf(data) ?? data.wallets.filter(
       (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object',
     )
-    const lead = wallets.find(item => item.balance !== undefined && item.balance !== null)
+    const lead = wallets.find(item => usageNumberOrNull(item.balance) !== null)
     if (lead) {
       const walletUnit = typeof lead.unit === 'string' && lead.unit.trim() ? usageUnitLabel(lead.unit.trim(), t) : unitOf(data)
       const detail = wallets
@@ -153,8 +184,10 @@ export function usageText(row?: UsageRow): UsageView {
     }
   }
 
+  const supplements = usageSupplementReadingsOf(data, t, compact)
+  if (supplements.length) return withErrors({ kind: 'muted', text: supplements[0], detail: supplements.join(' · ') })
   // ⑧ 形状认不出来
-  return { kind: 'muted', text: t('无数据'), detail: t('未返回可识别的余额数据') }
+  return withErrors({ kind: 'muted', text: t('无数据'), detail: t('未返回可识别的余额数据') })
 }
 
 /** 把快照行按账号 id 索引（没有 id 的行跳过） */
@@ -166,4 +199,8 @@ export function usageIndex(snapshot: UsageSnapshot | null): Map<string, UsageRow
     if (row && typeof row.id === 'string' && row.id) map.set(row.id, row)
   })
   return map
+}
+
+export function mergeUsageRow(row: UsageRow, previous?: UsageRow): UsageRow {
+  return mergeUsageQueryRow({ ...row, at: row.at || Date.now() }, previous)
 }

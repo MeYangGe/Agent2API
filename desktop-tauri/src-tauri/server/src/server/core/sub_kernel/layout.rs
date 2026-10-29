@@ -238,56 +238,90 @@ pub fn migrate_legacy() -> bool {
 
 // ─── 安装 ──────────────────────────────────────────────────
 
-/// 从已校验的压缩包安装，成功返回新安装（指针已切过去）。
-///
-/// 步骤：解到 `versions/.staging-<pid>/` → 校验产物（非空 + 平台魔数）→ 写
-/// `.ok` → 目录改名到 `versions/<版本>/` → 原子切 `current` → 清旧版本。
-/// 任何一步失败都不动 `current`：用户原来那份安装（如果有）照常可用。
+/// 从已校验的压缩包安装，校验失败不改动当前安装。
 pub fn install_from_archive(archive: &Path, version: &str) -> Result<Install, String> {
-    let staging = versions_dir().join(format!(".staging-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
-        .map_err(|error| format!("创建解压目录失败（{}）: {error}", staging.display()))?;
+    let prepared = prepare_install_at(&kernel_dir(), archive, version, true)?;
+    commit_install(prepared)
+}
 
-    let staged_binary = staging.join(kernel_binary_name());
-    if let Err(error) = extract_binary(archive, &staged_binary) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    if let Err(error) = verify_binary(&staged_binary) {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    write_ok_marker(&staging, version)?;
+pub(super) struct PreparedInstall {
+    root: PathBuf,
+    staging: PathBuf,
+    version: String,
+    committed: bool,
+}
 
-    let target = version_dir(version);
-    if target.exists() {
-        // 同版本重装：目标目录还在（上次没清干净）。删不掉说明有进程在用，
-        // 这时不能继续（切指针会指到一个半旧半新的目录）
-        std::fs::remove_dir_all(&target).map_err(|error| {
-            let _ = std::fs::remove_dir_all(&staging);
-            format!(
-                "旧版本目录删不掉（{}，可能仍被进程占用）: {error}",
-                target.display()
-            )
-        })?;
+impl Drop for PreparedInstall {
+    fn drop(&mut self) {
+        if !self.committed { let _ = std::fs::remove_dir_all(&self.staging); }
     }
-    std::fs::rename(&staging, &target).map_err(|error| {
-        let _ = std::fs::remove_dir_all(&staging);
-        format!("安装内核失败（{}）: {error}", target.display())
-    })?;
+}
 
-    if let Err(error) = write_current(version) {
-        let _ = std::fs::remove_dir_all(&target);
-        return Err(error);
+pub(super) fn prepare_install_at(root: &Path, source: &Path, version: &str, archive: bool) -> Result<PreparedInstall, String> {
+    let staging = root.join(VERSIONS_DIR).join(format!(".staging-{}-{}", std::process::id(), crate::server::logging::now_ms()));
+    std::fs::create_dir_all(root.join(VERSIONS_DIR))
+        .map_err(|error| format!("创建内核目录失败（{}）: {error}", root.display()))?;
+    std::fs::create_dir(&staging).map_err(|error| format!("创建解压目录失败: {error}"))?;
+    let prepared = PreparedInstall { root: root.to_path_buf(), staging, version: version.to_string(), committed: false };
+    let binary = prepared.staging.join(kernel_binary_name());
+    if archive {
+        extract_binary(source, &binary)?;
+    } else {
+        std::fs::copy(source, &binary).map_err(|error| format!("复制内核文件失败: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .map_err(|error| format!("设置内核执行权限失败: {error}"))?;
+        }
     }
+    verify_binary(&binary)?;
+    let asset = super::assets::current().ok_or_else(|| "当前平台暂不支持代理内核".to_string())?;
+    if super::import::sha256_file(&binary)? != asset.binary_sha256 {
+        return Err(format!("内核二进制校验失败：请选择当前平台的官方 {version} 内核；未修改现有安装"));
+    }
+    write_ok_marker(&prepared.staging, version)?;
+    Ok(prepared)
+}
 
-    prune_other_versions(version);
+/// 安装切换前保留旧目录，指针写入失败时恢复原目录。
+pub(super) fn commit_install(mut prepared: PreparedInstall) -> Result<Install, String> {
+    let target = prepared.root.join(VERSIONS_DIR).join(&prepared.version);
+    let backup = prepared.root.join(VERSIONS_DIR).join(format!(".rollback-{}-{}", std::process::id(), crate::server::logging::now_ms()));
+    let existed = target.exists();
+    if existed {
+        std::fs::rename(&target, &backup).map_err(|error| format!("现有内核目录无法备份（可能仍被进程占用）: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&prepared.staging, &target) {
+        if existed {
+            std::fs::rename(&backup, &target).map_err(|rollback| format!(
+                "安装内核失败（{error}），恢复原目录也失败（{rollback}）；原文件保留在 {}", backup.display(),
+            ))?;
+        }
+        return Err(format!("安装内核失败: {error}"));
+    }
+    let tmp = prepared.root.join(format!("{CURRENT_FILE}.tmp"));
+    let result = std::fs::write(&tmp, format!("{}\n", prepared.version))
+        .and_then(|_| std::fs::rename(&tmp, prepared.root.join(CURRENT_FILE)));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::remove_dir_all(&target).map_err(|cleanup| format!(
+            "写入内核版本指针失败（{error}），新目录无法清理（{cleanup}）；原文件保留在 {}", backup.display(),
+        ))?;
+        if existed {
+            std::fs::rename(&backup, &target).map_err(|rollback| format!(
+                "写入内核版本指针失败（{error}），恢复原目录也失败（{rollback}）；原文件保留在 {}", backup.display(),
+            ))?;
+        }
+        return Err(format!("写入内核版本指针失败，未切换安装: {error}"));
+    }
+    prepared.committed = true;
+    if existed && std::fs::remove_dir_all(&backup).is_err() {
+        let trash = prepared.root.join(VERSIONS_DIR).join(format!(".trash-{}-{}", std::process::id(), crate::server::logging::now_ms()));
+        let _ = std::fs::rename(&backup, trash);
+    }
     Ok(Install {
-        version: version.to_string(),
-        binary: target.join(kernel_binary_name()),
-        dir: target,
-        legacy: false,
+        version: prepared.version.clone(), binary: target.join(kernel_binary_name()), dir: target, legacy: false,
     })
 }
 
@@ -309,8 +343,10 @@ fn extract_binary(archive: &Path, dest: &Path) -> Result<(), String> {
         let mut decoder = flate2::read::GzDecoder::new(source);
         let mut output = std::fs::File::create(dest)
             .map_err(|error| format!("创建内核文件失败（{}）: {error}", dest.display()))?;
-        std::io::copy(&mut decoder, &mut output)
+        use std::io::Read;
+        let written = std::io::copy(&mut decoder.by_ref().take(256 * 1024 * 1024 + 1), &mut output)
             .map_err(|error| format!("解压内核失败（gzip 数据损坏）: {error}"))?;
+        if written > 256 * 1024 * 1024 { return Err("内核解压后超过 256 MiB，已拒绝安装".to_string()); }
         output
             .flush()
             .map_err(|error| format!("写入内核文件失败: {error}"))?;
@@ -358,20 +394,6 @@ fn verify_binary(path: &Path) -> Result<(), String> {
         return Err("解压结果不是当前平台的可执行文件（下载到的可能不是内核包）".to_string());
     }
     Ok(())
-}
-
-/// 切指针之后清掉其它版本目录（best-effort：删不掉就留着，下次启动再清）
-fn prune_other_versions(current: &str) {
-    let Ok(entries) = std::fs::read_dir(versions_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == current || name.starts_with(".trash-") || name.starts_with(".staging-") {
-            continue;
-        }
-        let _ = std::fs::remove_dir_all(entry.path());
-    }
 }
 
 // ─── 卸载 ──────────────────────────────────────────────────
@@ -530,7 +552,7 @@ pub fn cleanup_residue() {
             let disposable = name.starts_with(".trash-")
                 || name.starts_with(".staging-")
                 || name.ends_with(".tmp")
-                || (current.is_some() && !is_current);
+                || (current.is_some() && !is_current && !name.starts_with(".rollback-"));
             if disposable {
                 let _ = std::fs::remove_dir_all(entry.path());
             }

@@ -9,10 +9,10 @@ import {
 import type { CheckinAction } from '../CheckinPage'
 import { store } from '../../state/store'
 import { t } from '../../i18n'
+import { growthTaskRunnable } from '../../../../ui-shared/checkin'
 
 function canRun(task: GrowthTask, mode: 'full' | 'claim'): boolean {
-  if (!task.supported || task.unforgeable || task.locked || task.status === 'claimed') return false
-  return mode === 'full' || task.status === 'completed' || Number(task.current) >= Number(task.target || 1)
+  return growthTaskRunnable(task, mode)
 }
 
 export function CheckinGrowth({ row, busy, action }: { row: GrowthEntry; busy: string; action: CheckinAction }) {
@@ -93,8 +93,8 @@ export function CheckinGrowth({ row, busy, action }: { row: GrowthEntry; busy: s
           {results.find(result => result.code === task.code)?.message ? <div className='m-ck-note'>{results.find(result => result.code === task.code)?.message}</div> : null}
         </div>
         <Badge tone={task.status === 'claimed' ? 'ok' : !task.supported || task.unforgeable || task.locked ? 'mute' : 'warn'}>
-          {task.unforgeable ? t('需真实操作') : !task.supported ? t('不支持') : task.locked ? t('未解锁')
-            : task.status === 'claimed' ? t('已领取') : canRun(task, 'claim') ? t('可领取') : t('待完成')}
+          {task.status === 'claimed' ? t('已领取') : canRun(task, 'claim') ? t('可领取')
+            : task.unforgeable ? t('需真实操作') : !task.supported ? t('不支持') : task.locked ? t('未解锁') : t('待完成')}
         </Badge>
       </div>)}
       {data ? <div className='m-ck-actions'>

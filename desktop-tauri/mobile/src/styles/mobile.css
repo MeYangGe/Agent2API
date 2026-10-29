@@ -15,6 +15,7 @@
 
 /* 组件库源码：Sheet / Button / Switch 的类名都在 ui-kit/src 的 tsx 里 */
 @source '../../../ui-kit/src';
+@source '../../../ui-shared';
 /* 本工程源码 */
 @source '../';
 

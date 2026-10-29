@@ -18,6 +18,9 @@ import { t } from '../i18n'
 import { hasProxyUsage, proxyServiceLabels } from '../../../ui-shared/proxy-usage'
 import { Card, Button } from '@ui'
 import { Switch as UiSwitch } from '@ui'
+import { getKernelStatus, type KernelStatus } from '../api/kernel'
+import { KernelImportSheet } from './KernelImportSheet'
+import { serverIdentity } from '../lib/servers'
 
 /**
  * 网络代理。
@@ -33,10 +36,15 @@ export function ProxiesPage() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [tested, setTested] = useState<Record<string, { ok: boolean; text: string }>>({})
+  const [kernel, setKernel] = useState<KernelStatus | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [kernelError, setKernelError] = useState('')
+  const identity = serverIdentity()
 
   const load = async () => {
     try {
       const next = await fetchProxyPool()
+      if (serverIdentity() !== identity) return
       setData(next)
       setError('')
     } catch (failure) {
@@ -44,9 +52,22 @@ export function ProxiesPage() {
     }
   }
 
-  usePolling(load, 120_000)
+  const loadKernel = async () => {
+    try {
+      const next = await getKernelStatus()
+      if (serverIdentity() !== identity) return
+      setKernel(next)
+      setKernelError('')
+    } catch (cause) {
+      if (serverIdentity() === identity) setKernelError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
 
-  const pull = usePullToRefresh({ onRefresh: load })
+  usePolling(load, 120_000)
+  usePolling(loadKernel, kernel?.installBusy ? 1500 : 15_000)
+
+  const refresh = async () => { await Promise.all([load(), loadKernel()]) }
+  const pull = usePullToRefresh({ onRefresh: refresh })
 
   const items = data?.items || []
   const enabled = items.filter(item => item.enabled).length
@@ -107,7 +128,7 @@ export function ProxiesPage() {
   return (
     <div className='m-page' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
-      <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />}
+      <PageIntro actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void refresh()} />}
       />
 
       <div className='m-section' style={{ marginTop: 0 }}>
@@ -128,6 +149,19 @@ export function ProxiesPage() {
           </Button>
         </Card>
       </div>
+
+      {kernel ? <div className='m-section' style={{ marginTop: 0 }}>
+        <Card className='m-card m-card-pad'>
+          <div className='m-t1'>{t('代理内核')} · {kernel.running ? t('内核运行中') : kernel.installed ? t('内核已停止') : t('内核未安装')}</div>
+          <p className='m-t2 m-mono break-all'>{kernel.platform} / {kernel.arch} · {kernel.installedVersion || kernel.version}</p>
+          <p className='m-t2 break-all'>{kernel.kernelDir}</p>
+          {kernel.import?.active ? <p className='m-t2'>{t('正在导入…')}</p> : null}
+          {kernel.import?.error ? <p className='m-t2 text-destructive'>{kernel.import.error}</p> : null}
+          <Button className='mt-3' variant='outline' disabled={kernel.installBusy && !kernel.import?.active} onClick={() => setImportOpen(true)}>{t('手动导入内核')}</Button>
+        </Card>
+      </div> : null}
+      {kernelError ? <ErrorNote text={kernelError} /> : null}
+      {importOpen && kernel ? <KernelImportSheet status={kernel} onClose={() => setImportOpen(false)} onChanged={refresh} /> : null}
 
       {error ? <ErrorNote text={error} /> : null}
       {!data ? <SkeletonList rows={3} height={104} /> : null}

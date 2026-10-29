@@ -109,7 +109,7 @@ export function ProviderRoutingDialog({ provider, workspace, onSort, onClose }: 
           <div className='flex items-center justify-between gap-3'><h3 className='text-sm font-semibold'>{t('消耗顺序')}</h3>
             <Button variant='outline' size='sm' disabled={busy} onClick={onSort}>{t('调整全局消耗规则')}</Button></div>
           <p className='text-xs text-muted-foreground'>{workspace.model && workspace.customized
-            ? t('当前模型使用独立顺序，不受全局自动消耗排序影响。恢复继承后会重新跟随账号页。')
+            ? t('当前模型使用独立顺序，不受全局自动消耗排序影响。删除独立路由后会重新跟随账号页。')
             : t('与账号页共用：{rules}。积分到期等规则直接影响网关实际选路。', { rules: groupSortSummary(workspace.sorting.rules[provider] || []) || t('仅按手动顺序') })}</p>
         </DialogSection>
         {workspace.providers.find(item => item.id === provider)?.available === false ? <p className='text-xs text-warning'>{t('此提供商当前没有可用的模型绑定，配置已保留；在模型管理中恢复绑定后会自动回来。')}</p> : null}

@@ -16,9 +16,9 @@ import { t } from '../i18n'
  *
  * ── 布局：四张卡片，不是四行文字 ──────────────────────────
  * 平铺成「标签 | 值 | 操作」四行读起来像一张表格，也不告诉人哪个入口更该点。
- * 改成卡片：每张卡左边一枚品牌标（QQ / Telegram / Discord 官方造型，见
- * icons.js 那三枚）、右边主标题 + 副标题，整张卡可点。QQ 两张卡是「复制群号」
- * （群号本身就是要拿走的文本），另两张是「打开链接」（外链交给系统浏览器）。
+ * 改成卡片：每张卡左边一枚品牌标（QQ / Telegram 官方造型，见
+ * icons.js 那两枚）、右边主标题 + 副标题，整张卡可点。QQ 三张卡是「复制群号」
+ * （群号本身就是要拿走的文本），另一张是「打开链接」（外链交给系统浏览器）。
  *
  * 群 1、群 2 的「即将满员」放在卡片右上角而不是标题旁：它是这张卡的**状态**，
  * 挂在标题上会把标题挤成两截，扫视时也看不出这是「整张卡」的属性。
@@ -75,7 +75,7 @@ export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () =>
               </Item>
             ))}
 
-            {/* Telegram / Discord：整张卡是外链。标签直接写字面量（不取 link 上的字段
+            {/* Telegram：整张卡是外链。标签直接写字面量（不取 link 上的字段
                 再包一层）—— 扫描器只认字符串字面量首参，变量形式提不出键，会一直漏翻 */}
             {COMMUNITY_LINKS.map(link => (
               <Item render={<a href={link.url} target='_blank' rel='noopener' />} variant='outline'
@@ -91,7 +91,7 @@ export function QqGroupDialog({ open, onClose }: { open: boolean; onClose: () =>
                 />
                 <span className='qq-card-body'>
                   <span className='qq-card-title'>
-                    {link.id === 'telegram' ? t('Telegram 群') : t('Discord 群')}
+                    {t('Telegram 群')}
                   </span>
                   <span className='qq-card-sub'>{t('点击在浏览器中打开')}</span>
                 </span>

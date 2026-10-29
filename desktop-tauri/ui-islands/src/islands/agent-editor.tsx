@@ -9,7 +9,7 @@ import type { AgentClient, AgentOperation, AgentProfile } from './agent-types'
 
 export function ProfileEditor({ client }: { client: AgentClient }) {
   const store = React.useSyncExternalStore(subscribeAgentStore,getAgentStore,getAgentStore)
-  const [editor,setEditor] = React.useState<{ profile: AgentProfile; creating: boolean } | null>(null)
+  const [editor,setEditor] = React.useState<{ profile: AgentProfile; creating: boolean; native?: boolean } | null>(null)
   const [applying,setApplying] = React.useState<{ profile: AgentProfile; operation: AgentOperation } | null>(null)
   const disabled = Boolean(store.busy) || store.loading
   const remove = async (profile: AgentProfile) => {
@@ -24,7 +24,10 @@ export function ProfileEditor({ client }: { client: AgentClient }) {
       <CardContent className='agent-profiles'>
         {client.readError && <Alert variant='destructive'>{client.readError}</Alert>}
         {!client.readError && !client.live.length && <Empty>{t('未读取到可识别的客户端配置')}</Empty>}
-        {client.live.map(profile => <ProfileRow key={profile.id} profile={profile} live client={client} />)}
+        {client.live.map(profile => <ProfileRow key={profile.id} profile={profile} live client={client}>
+          <Button variant='ghost' size='xs' disabled={disabled || !profile.editable} onClick={() => setEditor({ profile, creating:false, native:true })}>{t('编辑')}</Button>
+          <Button variant='ghost' size='xs' disabled={disabled || !profile.deletable} onClick={() => setApplying({ profile, operation:'native-delete' })}>{t('删除')}</Button>
+        </ProfileRow>)}
         {client.live.length > 0 && <p className='text-xs leading-relaxed text-subtle'>{t('此处来自磁盘文件，不代表正在运行的旧会话已经重载。')}</p>}
       </CardContent>
     </Card>
@@ -42,7 +45,7 @@ export function ProfileEditor({ client }: { client: AgentClient }) {
         </ProfileRow>)}
       </CardContent>
     </Card>
-    {editor && <ProfileDialog key={`${client.id}-${editor.profile.id}`} client={client} profile={editor.profile} creating={editor.creating} onClose={() => setEditor(null)} />}
+    {editor && <ProfileDialog key={`${client.id}-${editor.profile.id}`} client={client} profile={editor.profile} creating={editor.creating} native={editor.native} onClose={() => setEditor(null)} />}
     {applying && <ApplyDialog client={client} profile={applying.profile} operation={applying.operation} onClose={() => setApplying(null)} />}
   </>
 }

@@ -24,6 +24,7 @@
 import { t } from '../i18n'
 import type { PoolItem, ProxyConfig } from './accounts-shared'
 import { loadPanel } from './proxies-state'
+import type { KernelImportInput, KernelImportStatus } from '../../../ui-shared/kernel-import'
 
 /* ─── 后端形态 ───────────────────────────────── */
 
@@ -44,7 +45,7 @@ export type SubscriptionItem = {
 }
 
 /** 内核状态（`sub_kernel::status_json`） */
-export type KernelStatus = {
+export type KernelStatus = KernelImportStatus & {
   installed: boolean
   version: string
   /**
@@ -124,6 +125,7 @@ export type SubscriptionBridge = {
   decodeQrImage?: (payload: { imageBase64: string }) => Promise<{ url?: string } | null | undefined>
   getKernelStatus?: () => Promise<KernelStatus | null | undefined>
   downloadKernel?: (choice?: KernelDownloadChoice) => Promise<KernelStatus | null | undefined>
+  importKernel?: (input: KernelImportInput) => Promise<KernelStatus | null | undefined>
   cancelKernelDownload?: () => Promise<KernelStatus | null | undefined>
   restartKernel?: () => Promise<KernelStatus | null | undefined>
   /** 手动关闭内核（只停进程；订阅与端口注册表保留，见 stopKernel） */
@@ -261,7 +263,7 @@ const POLL_ROUNDS = 20
  */
 function sectionSettled(payload: SubscriptionsPayload): boolean {
   const kernel = payload.kernel
-  if (!kernel || kernel.download.state === 'downloading') return false
+  if (!kernel || kernel.installBusy || kernel.import?.active || kernel.download.state === 'downloading') return false
   if (!kernel.installed) return true
   if (kernel.lastError && !kernel.running) return true
   const synced = kernel.providerSync ?? {}
@@ -467,6 +469,41 @@ export async function downloadKernel(choice?: KernelDownloadChoice): Promise<voi
     toast(t('内核下载失败：{reason}', { reason: errorMessage(error) }), 'err')
   } finally {
     patch({ pending: false })
+  }
+}
+
+export async function importKernel(input: KernelImportInput): Promise<void> {
+  const bridge = wb().workbuddyDesktop
+  if (typeof bridge?.importKernel !== 'function' || typeof bridge.getKernelStatus !== 'function') {
+    throw new Error(t('当前客户端不支持手动导入内核，请更新或刷新页面'))
+  }
+  if (state.pending || kernel()?.installBusy) throw new Error(t('内核正在执行操作，请稍后重试'))
+  patch({ pending: true })
+  try {
+    const first = await bridge.importKernel(input)
+    if (!first?.import?.id) throw new Error(t('网关未返回内核导入任务，请刷新状态后确认'))
+    if (first.import.state === 'error') throw new Error(first.import.error || t('内核导入失败'))
+    const id = first.import.id
+    if (state.data) patch({ data: { ...state.data, kernel: first } })
+    for (let round = 0; round < 300; round += 1) {
+      const next = round === 0 ? first : await bridge.getKernelStatus()
+      if (!next?.import || next.import.id !== id) throw new Error(t('内核导入状态已变化，请刷新后确认'))
+      if (state.data) patch({ data: { ...state.data, kernel: next } })
+      if (!next.import.active) {
+        if (next.import.state !== 'done') throw new Error(next.import.error || t('内核导入失败'))
+        refreshPool()
+        void pollSectionAfterChange()
+        if (next.import.saved === false) toast(t('内核已导入，但存放目录未能保存，重启网关后会恢复原位置'), 'err')
+        if (next.import.startError) toast(t('内核已导入，但启动失败：{reason}', { reason: next.import.startError }), 'err')
+        else toast(t('✅ 内核已手动导入到 {dir}', { dir: next.kernelDir }))
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    throw new Error(t('内核导入仍在后台执行，请刷新状态查看结果'))
+  } finally {
+    patch({ pending: false })
+    void loadSection(true)
   }
 }
 

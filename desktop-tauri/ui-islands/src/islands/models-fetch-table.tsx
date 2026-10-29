@@ -58,7 +58,7 @@ function rateCell(text: string) {
 }
 
 function nameCell(text: string) {
-  return <div className='truncate font-mono text-[12px] font-semibold'>{text}</div>
+  return <div className='truncate font-mono text-[12px] font-semibold'>{t(text)}</div>
 }
 
 export function ModelsFetchTable({
@@ -165,7 +165,7 @@ export function ModelsFetchTable({
           <TableCell><Badge variant={kind.variant}>{kind.label}</Badge></TableCell>
           <TableCell>{rateCell(count ? t('{n} 个', { n: count }) : '—')}</TableCell>
           <TableCell>
-            <span className='text-[11.5px] leading-[1.5] text-muted-foreground [overflow-wrap:anywhere]'>{note}</span>
+            <span className='text-[11.5px] leading-[1.5] text-muted-foreground [overflow-wrap:anywhere]'>{t(note)}</span>
           </TableCell>
           <TableCell>{rateCell(at || '—')}</TableCell>
           <TableCell>{rowFetchButton(row)}</TableCell>

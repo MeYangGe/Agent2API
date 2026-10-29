@@ -141,6 +141,7 @@
         { key: 'client', sel: '.req-client', track: '110px' },
         { key: 'apiKey', sel: '.req-api-key', track: '140px' },
         { key: 'dur', sel: '.req-dur', track: '96px' },
+        { key: 'speed', sel: '.req-speed', track: '96px' },
         { key: 'usage', sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
         { key: 'error', sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
         { key: 'detail', sel: '.req-detail', track: '60px' },

@@ -4,6 +4,9 @@ import {
   CollapsibleTrigger, cn,
 } from '@ui'
 
+import { PROVIDER_ICONS } from './add-provider-pick'
+import { t } from '../i18n'
+
 const ICON_FALLBACK: Record<string, string> = {
   'workbuddy-intl': 'workbuddy',
   'autoclaw-intl': 'autoclaw',
@@ -18,11 +21,12 @@ const ICON_FALLBACK: Record<string, string> = {
 
 export function ProviderLogo({ id, label }: { id: string; label: string }): React.ReactElement {
   const slug = ICON_FALLBACK[id] ?? id
+  const icon = PROVIDER_ICONS[id] || `assets/providers/${slug}.png`
   const initial = (label || id || '·').trim().slice(0, 1).toUpperCase() || '·'
   return (
     <Avatar className='size-[30px] rounded-[9px] bg-control' title={label} aria-hidden='true'>
       <AvatarFallback className='font-bold'>{initial}</AvatarFallback>
-      <AvatarImage keepMounted src={`assets/providers/${slug}.png`} alt='' loading='lazy' className='object-contain' />
+      <AvatarImage keepMounted src={icon} alt='' loading='lazy' className='object-contain' />
     </Avatar>
   )
 }
@@ -57,8 +61,8 @@ export function CheckinRow({
         >
           <ProviderLogo id={provider} label={name} />
           <div className='ck-row-info'>
-            <div className='ck-row-name'>{name}</div>
-            {description ? <div className='ck-row-desc'>{description}</div> : null}
+            <div className='ck-row-name'>{t(name)}</div>
+            {description ? <div className='ck-row-desc'>{typeof description === 'string' ? t(description) : description}</div> : null}
           </div>
           {summary ? <div className='ck-row-right'>{summary}</div> : null}
           {expandable ? (

@@ -1,7 +1,6 @@
 {
   " · 检查于 {time}": " · 확인 시각 {time}",
   " 已发布（当前 {current}），更新日志如下：": "이(가) 출시되었습니다(현재 {current}). 업데이트 노트는 다음과 같습니다:",
-  "Discord 群": "Discord 서버",
   "GitHub Token 未填写": "GitHub 토큰 미입력",
   "GitHub 令牌": "GitHub 토큰",
   "GitHub 加速前缀": "GitHub 가속 접두사",
@@ -12,7 +11,7 @@
   "GitHub 访问方式": "GitHub 접속 방식",
   "GitHub 访问设置已保存": "GitHub 접속 설정을 저장했습니다",
   "QQ 群": "QQ 그룹",
-  "QQ 群 / Telegram / Discord 都在这里": "QQ 그룹, Telegram, Discord가 모두 여기에 있습니다",
+  "QQ 群 / Telegram 都在这里": "QQ 그룹과 Telegram이 모두 여기에 있습니다",
   "QQ 群 1": "QQ 그룹 1",
   "QQ 群 2": "QQ 그룹 2",
   "QQ 群 3": "QQ 그룹 3",

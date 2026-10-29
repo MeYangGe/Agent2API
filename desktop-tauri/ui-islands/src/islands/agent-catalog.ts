@@ -4,7 +4,7 @@ import type { ManageModel, ManageView } from './models-custom-source'
 import { capabilitiesOf, reasoningLevelsOf } from './model-capability'
 import type { AgentModel } from './agent-types'
 
-export type CatalogModel = AgentModel & { label: string }
+export type CatalogModel = AgentModel & { label: string; provider: string; providers: string[] }
 
 type CatalogWindow = { workbuddyDesktop?: { getModelManage?: () => Promise<ManageView> } }
 
@@ -18,11 +18,11 @@ export async function loadCatalog(): Promise<CatalogModel[]> {
   const mappings = [...(view.mappings || []), ...custom.flatMap(view => view.mappings)]
   const result = new Map<string, CatalogModel>()
   for (const row of models) {
-    if (!row.enabled) continue
+    if (!row.enabled || row.kind === 'image') continue
     const capabilities = capabilitiesOf(row)
     const reasoning = reasoningLevelsOf(row)
     const model: CatalogModel = {
-      id: row.id, name: row.name || row.id, label: `${row.name || row.id} · ${row.providerLabel || row.provider}`,
+      id: row.id, name: row.name || row.id, provider: row.provider, providers:[row.provider], label: `${row.name || row.id} · ${row.providerLabel || row.provider}`,
       contextWindow: typeof capabilities.maxInputTokens === 'number' ? capabilities.maxInputTokens : null,
       maxOutputTokens: typeof capabilities.maxOutputTokens === 'number' ? capabilities.maxOutputTokens : null,
       supportsTools: typeof capabilities.supportsToolCall === 'boolean' ? capabilities.supportsToolCall : null,
@@ -30,9 +30,14 @@ export async function loadCatalog(): Promise<CatalogModel[]> {
       supportsReasoning: typeof capabilities.supportsReasoning === 'boolean' ? capabilities.supportsReasoning : null,
       reasoningLevels: reasoning?.levels || [], effort: '',
     }
-    if (!result.has(model.id)) result.set(model.id, model)
+    const add = (model: CatalogModel) => {
+      const existing = result.get(model.id)
+      if (!existing) result.set(model.id,model)
+      else if (!existing.providers.includes(row.provider)) existing.providers.push(row.provider)
+    }
+    add(model)
     for (const mapping of mappings.filter(mapping => mapping.enabled && mapping.target === row.id && mapping.provider === row.provider)) {
-      if (!result.has(mapping.alias)) result.set(mapping.alias, { ...model, id: mapping.alias, name: mapping.alias, label: `${mapping.alias} · ${row.providerLabel || row.provider}`, effort: mapping.reasoning || '' })
+      add({ ...model, providers:[row.provider], id: mapping.alias, name: mapping.alias, label: `${mapping.alias} · ${row.providerLabel || row.provider}`, effort: mapping.reasoning || '' })
     }
   }
   return [...result.values()]

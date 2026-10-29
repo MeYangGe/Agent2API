@@ -2,6 +2,8 @@ mod claude;
 mod cline;
 mod codex;
 mod crush;
+mod delete;
+mod edit;
 mod gemini;
 mod kimi;
 mod opencode;
@@ -171,6 +173,12 @@ pub fn equivalent(def: &ClientDef, saved: &Profile, live: &Profile) -> bool {
         return false;
     }
     true
+}
+
+pub use edit::{preserve_selection, remove_models, sync_cached_config};
+
+pub fn delete_plan(def: &ClientDef, path: &Path, profile: &Profile) -> Result<Plan, String> {
+    delete::plan(def, path, profile)
 }
 
 pub fn native_id(profile: &Profile) -> String {

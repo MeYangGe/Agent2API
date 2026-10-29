@@ -149,10 +149,15 @@ pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> R
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
         let action = text(&payload, "operation");
+        if action == "native-edit" || action == "native-delete" {
+            return agents::native::create_preview(def, &path, &payload, state.port);
+        }
         if action == "restore" || action == "disconnect" {
             return agents::apply::restore_preview(def, &path, action == "disconnect");
         }
-        let operation = operation(def, &payload)?;
+        let operation = if action == "quick-connect" {
+            if def.default_model { "default".into() } else { "apply".into() }
+        } else { operation(def, &payload)? };
         let profile = selected_profile(def, &payload, true)?;
         agents::preview::create(def, &path, &profile, &operation, state.port)
     })())
@@ -162,17 +167,17 @@ pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Res
     response((|| {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
-        let profile = selected_profile(def, &payload, false)?;
-        let operation = operation(def, &payload)?;
         let path = agents::paths::detect(def).path;
-        let applied = agents::apply::apply(
-            def,
-            &path,
-            &profile,
-            &operation,
-            text(&payload, "token"),
-            state.port,
-        )?;
+        let action = text(&payload, "operation");
+        let applied = if action == "native-edit" || action == "native-delete" {
+            agents::native::apply(def, &path, &payload, state.port)?
+        } else {
+            let profile = selected_profile(def, &payload, action == "quick-connect")?;
+            let operation = if action == "quick-connect" {
+                if def.default_model { "default".into() } else { "apply".into() }
+            } else { operation(def, &payload)? };
+            agents::apply::apply(def, &path, &profile, &operation, text(&payload, "token"), state.port)?
+        };
         let mut snapshot = agents::snapshot(state.port);
         if let Some(object) = snapshot.as_object_mut() {
             object.insert("applied".into(), applied);

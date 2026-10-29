@@ -26,6 +26,7 @@ export async function confirm(title: string, text: string, okText = t('确定'))
 export type AgentStore = {
   clients: AgentClient[]
   gateway: string
+  defaultModel: string
   requiresKey: boolean
   gatewayKeys: AgentGatewayKey[]
   detectedAt: number
@@ -37,7 +38,7 @@ export type AgentStore = {
   query: string
   busy: string
 }
-let state: AgentStore = { clients: [], gateway: '', requiresKey: false, gatewayKeys: [], detectedAt: 0, hostName: '', loading: false, error: '', selected: '', filter: 'all', query: '', busy: '' }
+let state: AgentStore = { clients: [], gateway: '', defaultModel: '', requiresKey: false, gatewayKeys: [], detectedAt: 0, hostName: '', loading: false, error: '', selected: '', filter: 'all', query: '', busy: '' }
 const listeners = new Set<() => void>()
 export const getAgentStore = () => state
 export function subscribeAgentStore(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener) } }
@@ -49,7 +50,7 @@ export function setQuery(query: string): void { patch({ query }) }
 
 function accept(payload: AgentPayload): void {
   if (!payload || !Array.isArray(payload.clients)) throw new Error(t('客户端列表响应无效'))
-  patch({ clients: payload.clients, gateway: payload.gateway.baseUrl, requiresKey: payload.gateway.requiresKey,
+  patch({ clients: payload.clients, gateway: payload.gateway.baseUrl, defaultModel: payload.gateway.defaultModel || '', requiresKey: payload.gateway.requiresKey,
     gatewayKeys: payload.gateway.keys || [], detectedAt: payload.detectedAt, hostName: payload.host?.name || '', error: '',
     selected: payload.clients.some(client => client.id === state.selected) ? state.selected : (payload.clients.find(client => client.detected)?.id || payload.clients[0]?.id || '') })
 }
@@ -113,13 +114,16 @@ export async function importFromClient(client: AgentClient): Promise<void> {
 export async function requestPreview(client: AgentClient, profile: AgentProfile | undefined, operation: AgentOperation): Promise<AgentPreview> {
   const call = host().workbuddyDesktop?.previewAgentProfile
   if (!call) throw new Error(t('当前环境不支持预览'))
-  return call({ clientId: client.id, profileId: profile?.id || '', ...(profile ? { profile } : {}), operation })
+  return call({ clientId: client.id, profileId: profile?.id || '', ...(profile ? { profile } : {}), operation,
+    ...(operation.startsWith('native-') ? { nativeRevision: client.nativeRevision } : {}) })
 }
 
 export async function applyProfile(client: AgentClient, profile: AgentProfile, operation: AgentOperation, preview: AgentPreview): Promise<void> {
   const call = host().workbuddyDesktop?.applyAgentProfile
   if (!call) throw new Error(t('当前环境不支持应用'))
-  const result = await mutation(client.id, () => call({ clientId: client.id, profileId: profile.id, operation, token: preview.token }))
+  const direct = operation.startsWith('native-') || operation === 'quick-connect'
+  const result = await mutation(client.id, () => call({ clientId: client.id, profileId: profile.id, operation, token: preview.token,
+    ...(direct ? { profile, nativeRevision: client.nativeRevision } : {}) }))
   if (!result.applied?.verified) throw new Error(t('客户端配置写入后未通过校验'))
   toast(result.applied.changed ? t('配置已应用并读回校验；请重开客户端或会话') : t('客户端配置已经一致，无需写入'))
 }

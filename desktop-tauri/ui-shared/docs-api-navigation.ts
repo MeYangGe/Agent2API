@@ -49,9 +49,9 @@ export function documentationGroups(sections: ApiSection[], packs: PluginProvide
   if (packs.length) {
     const locale = (window as unknown as { wbI18n?: { locale(): string } }).wbI18n?.locale() || 'zh-Hans'
     groups.push({
-      id: 'providers', title: t('提供商插件'), entries: [{
-        id: 'providers', title: t('提供商能力适配表'), group: t('提供商插件'),
-        description: t('能力由当前插件版本申报，表示适配支持情况，不代表账号额度或当前可用性。'),
+      id: 'providers', title: t('提供商能力'), entries: [{
+        id: 'providers', title: t('提供商能力适配表'), group: t('提供商能力'),
+        description: t('能力由当前网关本体或插件版本申报，表示适配支持情况，不代表账号额度或当前可用性。'),
         searchText: packs.flatMap(pack => [pack.name, documentText(pack.description, locale),
           ...pack.providers.flatMap(provider => [provider.id, provider.label,
             ...provider.notes.map(note => documentText(note, locale)),

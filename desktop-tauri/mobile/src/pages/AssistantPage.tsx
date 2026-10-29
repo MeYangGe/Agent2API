@@ -759,7 +759,7 @@ export function AssistantPage() {
         <SheetContent side='bottom'>
           <SheetHeader><SheetTitle>{t('选择 API Key')}</SheetTitle></SheetHeader>
           <SheetBody>
-            <ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || savingKey}
+            <ModelApiKeyField {...keyState} value={config?.apiKeyId ?? null} disabled={!config || busy || savingKey} rememberSelection
               onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t}
               onChange={async apiKeyId => {
                 if (!config || savingKey) return

@@ -186,7 +186,7 @@ export function MorePage() {
 
       <div className='m-section' style={{ paddingBottom: 8 }}>
         <Card className='m-card m-card-pad' style={{ fontSize: 11.5, color: 'var(--m-text-3)', lineHeight: 1.7 }}>
-          {t('手机端可管理所连接网关的账号、签到与插件；添加账号、编辑凭证、改写客户端配置仍需桌面端。')}
+          {t('手机端可管理所连接网关的账号、签到与插件，并使用提供商声明的动态登录入口；其余既有添加入口、编辑凭证和改写客户端配置仍需桌面面板。')}
         </Card>
       </div>
     </div>

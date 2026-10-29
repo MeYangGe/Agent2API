@@ -23,12 +23,8 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             if base.is_empty() {
                 continue;
             }
-            let mut profile = Profile::new(
-                id,
-                &format!("{} ({id})", string(entry, "name")),
-                "responses",
-                &base,
-            );
+            let name = string(entry, "name");
+            let mut profile = Profile::new(id, if name.is_empty() { id } else { &name }, "responses", &base);
             let wire = string(entry, "wire_api");
             if !wire.is_empty() && wire != "responses" {
                 profile.protocol = wire;
@@ -48,14 +44,16 @@ pub fn read(value: &Value) -> Result<Vec<Profile>, String> {
             profile.env_key = string(entry, "env_key");
             profile.api_key = string(entry, "experimental_bearer_token");
             profile.native.entry = entry.clone();
-            profile.native.settings = json!({ "profile": profile_key, "model_provider": id, "model": profile.model, "model_reasoning_effort": profile.effort });
+            profile.native.settings = json!({ "profile": profile_key, "model_provider": id, "model": profile.model, "model_reasoning_effort": profile.effort,
+                "runtime": { "model_provider": runtime.unwrap_or(value).get("model_provider"), "model": runtime.unwrap_or(value).get("model"), "model_reasoning_effort": runtime.unwrap_or(value).get("model_reasoning_effort") },
+                "rootEffort": value.get("model_reasoning_effort") });
             if !profile.env_key.is_empty() {
                 profile.auth_mode = "env".into();
             }
             profiles.push(profile);
         }
     }
-    if !profiles.iter().any(|p| p.enabled) {
+    if !profiles.iter().any(|p| p.enabled) && ["model_provider", "model", "model_reasoning_effort", "openai_base_url"].iter().any(|key| effective.get(*key).is_some()) {
         let base = string(&effective, "openai_base_url");
         let mut profile = Profile::new(&active, "Codex 官方或内置配置", "responses", &base);
         profile.model = string(&effective, "model");

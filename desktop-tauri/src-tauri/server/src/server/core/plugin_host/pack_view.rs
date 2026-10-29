@@ -250,6 +250,7 @@ pub fn list_packs() -> Vec<PackSummary> {
                 .unwrap_or_else(|| pack.manifest_providers.clone());
             let providers = declared
                 .into_iter()
+                .filter(|item| !crate::server::core::providers::availability::is_suspended(item.id.as_str()))
                 .map(|item| {
                     let id = item.id.0.clone();
                     let enabled = pack.providers.get(&id).copied().unwrap_or(true);

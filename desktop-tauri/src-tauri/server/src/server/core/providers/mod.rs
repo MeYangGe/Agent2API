@@ -25,10 +25,10 @@
 //! 给出分支，「注册了 provider 却忘了接线」在编译期就被拦住，不再需要运行期的
 //! 占位实现兜底。
 //!
-//! **加新 provider 的最小改动面**：`ProviderKind` 加变体 + 本文件 `PROVIDERS`
-//! 加条目 + `kind_from_id` / `kind_id` 各加一个分支 + `adapter.rs` 的
-//! `adapter_for` 接上真身适配器。账号层的参与由「注册表 + 各层
-//! 经 `kind_from_id` 判定」自动派生，不需要再改那些文件里的任何 id 清单。
+//! `ProviderKind` / `PROVIDERS` 保留旧提供商的身份与落盘契约；停用路线的
+//! 稳定 ID 由 `availability` 保存，不扩充枚举或注册执行体。
+//! 管理动作与目录调度问 `is_executable_provider` / `executable_provider_ids`，
+//! 执行仍统一经 `adapter::adapter_by_id`，不把未知 runtime id 当成 WorkBuddy。
 //!
 //! ── 静态注册表为什么用切片而不是 HashMap ─────────────────────
 //! provider 是**编译期内置**的（不是插件），数量有限（见 [`PROVIDERS`]）；
@@ -61,6 +61,7 @@
 //! 本文件仍然只做「身份与元数据」这一件事，不认识磁盘也不认识账号。
 
 pub mod adapter;
+pub mod availability;
 pub mod accio;
 pub mod autoclaw;
 pub mod catalog;
@@ -398,28 +399,28 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
     }
 }
 
-/// 这个 id 是不是**注册表里已登记的 provider**（W4a 起的唯一「provider 白名单」口径）。
+/// 这个 id 是否已知（旧身份、停用身份与真实插件的并集）。
 ///
-/// 语义与 `kind_from_id(id).is_some()` 完全相同，单独给个名字是为了让调用点
-/// 表达出「这里在校验一个 id 认不认识」而不是「这里要拿枚举」：账号层的添加
-/// 分支、配置层的 `providerRoute` 键校验、脱敏的 `providers` 数组校验都该用
-/// 这一句 —— 于是将来加 provider 时**这些校验点一行都不用改**（注册表是唯一
-/// 事实来源，见 `PROVIDERS`），也不会出现「某个模块忘了加新 id」的静默失配。
-///
-/// 反过来说：**不要**在任何地方另写 `matches!(id, "workbuddy" | "raccoon")`
-/// 之类的清单 —— 那正是本函数要消灭的东西。
-///
-/// ── 插件家也算（2026-10 起）─────────────────────────────────
-/// 只问枚举会让「已装入的插件家」在**所有配置校验**上被判成未知 —— 症状是
-/// 用户装好插件、账号也能转发，却在「Key 白名单 / 提示词覆盖 / 模型规则 /
-/// 账号导入」这些入口一律收到「未知的提供商」。判据因此是「注册表里有 **或**
-/// 已装入的插件接管了这个 id」。
-///
-/// 「是不是**内置**家」仍然只能问 [`kind_from_id`]：两者语义不同 —— 内置分支
-/// 要穷举枚举，插件家走 [`crate::server::core::plugin_host::registry::serves`]。
+/// 缺执行体的 ID 仍可识别，便于导入存量数据；管理动作是否可用
+/// 必须另问 `is_executable_provider`。
 pub fn is_known_provider_id(id: &str) -> bool {
-    kind_from_id(id).is_some()
-        || crate::server::core::plugin_host::serves_provider(id)
+    kind_from_id(id).is_some() || availability::is_suspended(id) || is_executable_provider(id)
+}
+
+/// 使用独立 FULL-auth 边界的稳定身份；停用不改变存量账号与错误分类语义。
+pub(crate) fn is_scoped_runtime_provider(id: &str) -> bool {
+    availability::is_runtime_identity(id)
+}
+
+/// 此刻有真实执行体的 provider（不含旧身份的 MissingPlugin 占位）。
+/// 自定义 `custom-` 提供商有独立的存储与直连路径，由消费方另行判断。
+pub fn is_executable_provider(id: &str) -> bool {
+    !availability::is_suspended(id) && crate::server::core::plugin_host::serves_provider(id)
+}
+
+/// 真实执行体的 ID；保留插件排序，不包含停用身份。
+pub fn executable_provider_ids() -> Vec<String> {
+    crate::server::core::plugin_host::installed_ids()
 }
 
 /// provider id → 给人看的名字；未登记的 id 原样回显。
@@ -453,7 +454,7 @@ pub fn label_of(id: &str) -> String {
     match kind_from_id(id) {
         // 内置家优先读注册表：那是既有文案契约（插件接管后也不该改字）。
         Some(kind) => meta(kind).label.to_string(),
-        // 第三方 provider 没有枚举值，标签由插件握手申报。
+        // runtime id 不靠占位 kind 取名：插件登记优先，最后回显原 ID。
         None => crate::server::core::plugin_host::lookup(id)
             .map(|adapter| adapter.label().to_string())
             .unwrap_or_else(|| id.to_string()),
@@ -484,53 +485,23 @@ pub fn meta(kind: ProviderKind) -> &'static ProviderMeta {
         .unwrap_or(&PROVIDERS[0])
 }
 
-/// 这家提供商此刻**有没有可用的执行体**（管理面列不列它的唯一判据）。
+/// 管理入口是否列出这家提供商（保留既有函数名与计数回调签名）。
 ///
-/// ── 为什么需要这条判据（2026-10 用户反馈）───────────────────
-/// 本版本不再内置任何一家的转发 / 账号实现，执行体全在提供商插件里。没装插件
-/// 时，[`PROVIDERS`] 这张**身份注册表**仍然完整 —— 它必须完整（账号记录里存的
-/// 是 `provider: "raccoon"` 这样的 id，要靠它翻出展示名）。但「我知道这家叫
-/// 什么」不等于「这家现在能用」：把它们一起列进「添加提供商」「签到中心」
-/// 「Key 的可用提供商」这些**动作入口**，用户看到的是一屏点了必然失败的项。
-///
-/// ── 判据只有一条：插件接管了吗 ──────────────────────────────
-/// **不**看「库里有没有它的账号」。2026-10 用户明确：插件不在，这家就该不存在；
-/// 数据显示不出来是预期行为（数据本身留在库里，装上插件原样回来）。带上
-/// 「有账号也显示」会让没装插件的用户面对一群点不动的入口。
-///
-/// ⚠️ 别把判据改成「反代提供商才有 X / 预置 API 没有 Y」这类**按类**的假设：
-/// 那是把今天的事实当成永久约定。这条判据只问「此刻有没有执行体」。
-/// 自定义提供商（`custom-` 前缀）不走这条判据 —— 它们的转发仍在网关里，
-/// 各调用点另有分流（见 `account_store::store_view::account_visible`）。
+/// 只看真实执行体，不因残留账号显示缺失插件或暂停的家。
+/// 自定义提供商由各消费方按 `custom-` 独立分流。
 pub fn serves_or_has_accounts<F>(id: &str, count: F) -> bool
 where
     F: Fn(&str) -> usize,
 {
-    // `count` 保留在签名里：调用点（Key 白名单）仍按它算 count 参与响应形状；
-    // 将来若要加回「有账号也列出来」的口径，改这一处即可。
     let _ = count;
-    crate::server::core::plugin_host::serves_provider(id)
+    is_executable_provider(id)
 }
 
-/// 注册表的摘要 JSON 形态：`[{id, label, count}, ...]`。
+/// 注册表摘要：旧身份保持展示顺序，再追加插件 runtime ID。
 ///
-/// `count` 由调用方传入的计数函数给出（账号存储那边按 provider 数账号总数）；
-/// `account_providers` 是「库里实际出现过的 provider id」（同样由调用方给，
-/// 本模块不认识磁盘）。两者都由调用方提供而不是这里去读盘：本模块是**纯静态
-/// 元数据**，于是它可以在任何初始化顺序下被调用。
-///
-/// ── 只列**此刻可用**的家（2026-10）──────────────────────────
-/// 过滤口径见 [`serves_or_has_accounts`]：没装插件时整张表是空的 —— 这正是
-/// 真实状态，前端据此显示「去安装插件包」而不是一屏点了没反应的卡片。
-///
-/// ── 两类来源（第三类「残留账号」被刻意去掉了）─────────────────
-///   1. **内置注册表**：`PROVIDERS` 里的 id，按注册顺序（存量契约）；
-///   2. **当前装着的插件家**：id 不在注册表里（第三方），靠握手拿到 label。
-///
-/// 曾经还有第 3 类「库里已有账号、但插件不在」—— 那是为了让老用户升级后
-/// 仍看得见自己的账号。2026-10 用户明确否掉了：**插件不在，这家就该不存在**；
-/// 数据留在库里、装上插件后原样回来。留着它只会让用户面对一群「点点都没反应」
-/// 的入口，那比看不见更糟。
+/// 每行包含 `{id, label, count, category, source}`；插件保留宿主申报的
+/// category / `plugin`。缺执行体的残留账号不列。
+/// `account_providers` 参数保留既有公开签名。
 pub fn summary_json<F>(count: F, account_providers: &[String]) -> Vec<Value>
 where
     F: Fn(&str) -> usize,
@@ -541,11 +512,15 @@ where
         .map(|kind| meta(kind))
         .filter(|detail| serves_or_has_accounts(detail.id, &count))
         .map(|detail| {
+            let plugin = crate::server::core::plugin_host::serves_provider(detail.id);
             json!({
                 "id": detail.id,
                 "label": detail.label,
                 "count": count(detail.id),
-                "category": crate::server::core::plugin_host::provider_category(detail.id),
+                "category": if plugin {
+                    json!(crate::server::core::plugin_host::provider_category(detail.id))
+                } else { json!("agent") },
+                "source": if plugin { "plugin" } else { "builtin" },
             })
         })
         .collect();
@@ -566,12 +541,10 @@ where
             "label": adapter.label(),
             "count": count(&id),
             "category": crate::server::core::plugin_host::provider_category(&id),
+            "source": "plugin",
         }));
     }
-    // `account_providers` 在两类来源之外只剩「插件已卸载的残留家」——
-    // 那些刻意不列（见上面「两类来源」）。参数保留是为了让调用方继续把
-    // 「库里有谁」传进来：将来若要加回某一类（比如「账号还在但插件停用」
-    // 的只读展示），判据写在这里一处即可，不必再改三个调用点。
+    // 缺插件的残留账号仍不列，记录留在账号库里等待执行体恢复。
     let _ = account_providers;
     list
 }

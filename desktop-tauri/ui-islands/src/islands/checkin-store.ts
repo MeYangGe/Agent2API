@@ -23,6 +23,7 @@ import type {
 } from './checkin-types'
 import { t } from '../i18n'
 import type { CheckinResultRow } from '../../../ui-shared/checkin'
+import { growthTaskRunnable } from '../../../ui-shared/checkin'
 import { rowCompleted, rowPending, rowMessage as resultMessage } from '../../../ui-shared/checkin-result'
 import { onboardingFromCenter } from './checkin-onboarding-cache'
 
@@ -631,13 +632,7 @@ export async function queryGrowth(id: string): Promise<void> {
 export async function runGrowth(id: string, mode: 'full' | 'claim'): Promise<void> {
   const current = growthOf(id)
   if (current.running) return
-  const targets = current.tasks.filter(task => {
-    if (!task.supported || task.unforgeable || task.locked) return false
-    if (mode === 'claim') {
-      return task.status === 'completed' || (task.current >= task.target && task.status !== 'claimed')
-    }
-    return task.status !== 'claimed'
-  })
+  const targets = current.tasks.filter(task => growthTaskRunnable(task, mode))
   if (targets.length === 0) {
     toast('没有需要执行的任务')
     return

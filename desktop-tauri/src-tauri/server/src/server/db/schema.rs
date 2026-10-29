@@ -157,6 +157,8 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // GitHub 检查、余额查询、模型刷新、凭证维护各多打一轮上游请求。
     // 属于「其它零散状态」：配置写入绝不能动它（否则排期归零、重启又立刻重跑）。
     "backgroundTaskState",
+    // 最近一次损坏任务状态的原文与恢复信息，仅供本机诊断，不参与配置或云同步。
+    "backgroundTaskStateRecovery",
     // 旧「定时查询积分」的结果快照（全局任务已退役）：键保留在保留清单里是
     // 刻意的 —— `core::usage_records` 启动时把它的行导入 account_usage_records
     // 表后删除本键；若那次迁移失败，这里不让配置写入把唯一的迁移来源误清掉。
@@ -328,8 +330,14 @@ pub fn is_reserved(key: &str) -> bool {
 /// 助手从「一次性对话」变成「有历史记录的会话」：左边一列会话、右边一条消息流，
 /// 关掉页面再回来还能接着聊。存**整条消息流的 JSON**（而不是逐条消息一行）的
 /// 理由与 `kv` 表同一取向：读写单元天然是「一整个会话」，逐条存只会让每次保存
-/// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查」。
-pub const SCHEMA_VERSION: i64 = 21;
+/// 变成 N 次写入 + 一次事务，而没有任何一处需要「按单条消息查询」。
+///
+/// ── 版本 22：清掉模型目录刷新的假失败冷却（[`reset_model_refresh_cooldown`]）
+/// 这是一次**纯数据修复**（无 DDL）：旧成败判据把「任一家失败」当成整轮失败，
+/// 于是一家的长期 401 就能把整条任务按到 24 小时冷却上，界面上显示成「冷却中」。
+/// 判据已改成 `round_succeeded`，但存量库里的 `failures` / `retryAt` 得在这里
+/// 清一次，否则升级后仍要干等旧冷却到期 —— 修复等于没生效。
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1046,6 +1054,66 @@ fn apply_version(
         19 => conn.execute_batch(include_str!("schema_assistant_images.sql")),
         20 => conn.execute_batch(include_str!("schema_debug_raw.sql")),
         21 => conn.execute_batch(include_str!("schema_assistant_title.sql")),
+        // v22：清掉「模型目录刷新」在旧成败判据下累积的假失败冷却（见 V22 注释）
+        22 => reset_model_refresh_cooldown(conn),
         _ => Ok(()),
     }
+}
+
+/// 版本 22：把「模型目录刷新」那条任务的**失败冷却**清掉（数据修复，无 DDL）。
+///
+/// ── 修的是什么 ──────────────────────────────────────────────
+/// 旧判据是 `failed == 0`（`core::scheduled_tasks::run_backend` 的
+/// `TASK_MODEL_REFRESH` 分支）：**任何一家**提供商刷新失败就把整轮算作失败。
+/// 而逐家失败是常态 —— 一家的登录态被上游作废（例如 CatPaw 的长期 401）就足以
+/// 让每一轮都失败一次，`failures` 于是按 `1h × 2^(n-1)` 一路顶到 24 小时上限，
+/// 其余能刷的家跟着一起停在旧清单上。界面上表现为「冷却中，N 小时后重试」，
+/// 看起来就是刷新功能坏了。
+///
+/// 判据已改成与凭证维护同一条（`round_succeeded`：有成功就不算整轮失败），
+/// 但**存量库里那串失败计数与 `retryAt` 还在**：不在这里清一次，用户升级后
+/// 仍要干等到旧冷却到期（实测能到二十多小时），等于修复不生效。
+///
+/// ── 为什么只清模型刷新这一条 ─────────────────────────────────
+/// 别的任务没有这个误判来源，它们的冷却记的是真实失败（断网 / 上游故障），
+/// 一并清掉等于替用户提前解封、白打一轮上游。
+///
+/// ── 为什么在这里做而不是写个一次性标记键 ─────────────────────
+/// `user_version` 本身就是「每个版本只跑一次」的事实来源（见 [`migrate`]），
+/// 复用它零新增状态；而 kv 里再放一个标记键还要登记进 `RESERVED_KV_KEYS`，
+/// 否则一次配置写入就会把它当「已删除的键」清掉、下次启动重跑一遍。
+///
+/// 失败不致命：状态是 `kv.backgroundTaskState` 里的一份 JSON，读不到 / 解析不出
+/// 就当作「没有要修的」，不让它挡住整个升级。
+fn reset_model_refresh_cooldown(conn: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    use serde_json::{json, Map, Value};
+
+    let text: Option<String> = conn
+        .query_row("SELECT value FROM kv WHERE key = 'backgroundTaskState'", [], |row| row.get(0))
+        .optional()?;
+    let Some(text) = text else { return Ok(()) };
+    let Ok(mut states) = serde_json::from_str::<Map<String, Value>>(&text) else {
+        return Ok(());
+    };
+    // 任务级键就是任务 id 本身（`scheduled_tasks::state_key`：模型刷新不是更新
+    // 检查那种带仓库前缀的特例）。逐家的 `modelRefresh:<provider>` 键不动 ——
+    // 它们的冷却记的是各家自己的失败，与这条误判无关。
+    let Some(state) = states.get_mut("modelRefresh").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    let had_cooldown = state.get("retryAt").and_then(Value::as_i64).unwrap_or(0) > 0
+        || state.get("failures").and_then(Value::as_u64).unwrap_or(0) > 0;
+    if !had_cooldown {
+        return Ok(());
+    }
+    state.insert("retryAt".to_string(), json!(0));
+    state.insert("failures".to_string(), json!(0));
+    let encoded = serde_json::to_string(&states)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    conn.execute(
+        "UPDATE kv SET value = ?1 WHERE key = 'backgroundTaskState'",
+        rusqlite::params![encoded],
+    )?;
+    Ok(())
 }

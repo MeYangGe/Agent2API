@@ -45,6 +45,8 @@ pub struct GatewayError {
     /// [`GatewayError::with_retry_after_seconds`]）：给不出时刻就不给头，
     /// 让客户端按自己的退避来 —— 编一个等待时长比不给更坏。
     pub retry_after_secs: Option<u64>,
+    /// 仅新增 scoped runtime 的内部分类凭证；不序列化，也不替换上游业务 code。
+    pub(crate) conversation_class: Option<crate::server::core::providers::adapter::UpstreamErrorClass>,
 }
 
 impl GatewayError {
@@ -56,6 +58,7 @@ impl GatewayError {
             upstream_code: None,
             code: None,
             retry_after_secs: None,
+            conversation_class: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl GatewayError {
             upstream_code: None,
             code: None,
             retry_after_secs: None,
+            conversation_class: None,
         }
     }
 
@@ -98,6 +102,12 @@ impl GatewayError {
 
     /// 是否为账号限额错误（HTTP 429 或上游 code 6004）
     pub fn is_quota_limit(&self) -> bool {
+        if let Some(class) = &self.conversation_class {
+            if matches!(self.status_code, 499 | 504 | 556) { return false; }
+            return matches!(class,
+                crate::server::core::providers::adapter::UpstreamErrorClass::QuotaLimited { status, .. }
+                    if !matches!(*status, 499 | 504 | 556));
+        }
         self.status_code == 429 || self.upstream_code == Some(QUOTA_LIMIT_CODE)
     }
 
@@ -149,7 +159,17 @@ impl GatewayError {
             error.insert("upstream_code".to_string(), Value::from(code));
         }
         if self.is_quota_limit() {
-            let reset_at = parse_quota_reset_at(&self.message);
+            let reset_at = match &self.conversation_class {
+                Some(crate::server::core::providers::adapter::UpstreamErrorClass::QuotaLimited { reset_at, .. }) => {
+                    let now = crate::server::logging::now_ms();
+                    reset_at.filter(|reset| valid_future_reset(*reset, now))
+                        .or_else(|| self.retry_after_secs.and_then(|seconds| reset_from_retry(seconds, now)))
+                        .unwrap_or(0)
+                }
+                Some(_) => 0,
+                // 旧提供商没有内部分类凭证，原有文案解析与显示口径保持不变。
+                None => parse_quota_reset_at(&self.message),
+            };
             if reset_at > 0 {
                 error.insert("reset_at".to_string(), Value::from(reset_at));
                 error.insert(
@@ -192,6 +212,16 @@ impl GatewayError {
     pub fn http_status(&self) -> StatusCode {
         StatusCode::from_u16(self.safe_status() as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
+}
+
+fn valid_future_reset(reset: i64, now: i64) -> bool {
+    reset > now && reset > 0 && reset <= (1_i64 << 53) - 1
+        && chrono::DateTime::from_timestamp_millis(reset).is_some()
+}
+
+fn reset_from_retry(seconds: u64, now: i64) -> Option<i64> {
+    let reset = i64::try_from(seconds).ok()?.checked_mul(1000)?.checked_add(now)?;
+    valid_future_reset(reset, now).then_some(reset)
 }
 
 impl std::fmt::Display for GatewayError {

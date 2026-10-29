@@ -4,7 +4,7 @@ import {
   FieldGroup, Label,
 } from '@ui'
 import { t } from '../i18n'
-import { limitersOf } from './accounts-domain'
+import { limitersOf, providerOf } from './accounts-domain'
 import { refreshUsageAfterCheckin, syncBalancesSnapshot } from './accounts-data'
 import type { AccountRecord } from './accounts-shared'
 import type { LimiterCondition, LimiterGroup } from './accounts-limiter-types'
@@ -23,7 +23,10 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
   const updateGroup = (index: number, patch: Partial<LimiterGroup>) => {
     onChange(draft.map((group, i) => i === index ? { ...group, ...patch } : group))
   }
-  const addGroup = () => setEditor({ group: -1, condition: -1, value: blankCondition() })
+  const newCondition = (): LimiterCondition => providerOf(account) === 'codearts'
+    ? { join: 'or', sourceId: 'account', models: [], metric: 'remaining', comparison: 'lt', threshold: 1 }
+    : blankCondition()
+  const addGroup = () => setEditor({ group: -1, condition: -1, value: newCondition() })
   const saveCondition = (value: LimiterCondition) => {
     if (!editor) return
     if (editor.group < 0) {
@@ -75,15 +78,15 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
             <SelectContent><SelectItem value='and'>{t('与')}</SelectItem><SelectItem value='or'>{t('或')}</SelectItem></SelectContent>
           </Select> : <span className='text-xs text-muted-foreground'>{t('当')}</span>}
           <div className='min-w-0 flex-1 text-xs'>
-            <div className='break-words'>{conditionText(condition)}</div>
-            {state ? <div className='text-muted-foreground mt-1'>{t('当前：{value}', { value: readingText(state.conditions[ci], condition) })}</div> : null}
+            <div className='break-words'>{conditionText(condition, account)}</div>
+            {state ? <div className='text-muted-foreground mt-1'>{t('当前：{value}', { value: readingText(state.conditions[ci], condition, account) })}</div> : null}
           </div>
           <Button variant='ghost' size='xs' onClick={() => setEditor({ group: index, condition: ci, value: condition })}>{t('编辑')}</Button>
           <Button variant='ghost' size='xs' disabled={group.conditions.length === 1} onClick={() => updateGroup(index, {
             conditions: group.conditions.filter((_, i) => i !== ci).map((c, i) => i === 0 ? { ...c, join: 'or' } : c),
           })}>{t('删除')}</Button>
         </div>)}
-        <Button variant='ghost' size='sm' onClick={() => setEditor({ group: index, condition: -1, value: blankCondition() })}>{t('＋ 添加条件')}</Button>
+        <Button variant='ghost' size='sm' onClick={() => setEditor({ group: index, condition: -1, value: newCondition() })}>{t('＋ 添加条件')}</Button>
         <FieldGroup orientation='horizontal' className='field-row'>
           <Label>{t('触发动作')}</Label>
           <Select value={group.action} onValueChange={action => updateGroup(index, { action: action as LimiterGroup['action'] })}>
@@ -95,7 +98,7 @@ export function LimiterSection({ account, draft, onChange, allowBalance = true }
             <SelectContent><SelectItem value='models'>{t('命中条件的模型')}</SelectItem><SelectItem value='account'>{t('整个账号')}</SelectItem></SelectContent>
           </Select> : null}
         </FieldGroup>
-        <p className='detail break-words'>{expressionText(group.conditions)}</p>
+        <p className='detail break-words'>{expressionText(group.conditions, account)}</p>
       </div>
     })}
     {!account ? <p className='detail'>{t('跨账号批量配置仅支持通用条件；套餐实例不能直接复制到其他账号。')}</p> : null}

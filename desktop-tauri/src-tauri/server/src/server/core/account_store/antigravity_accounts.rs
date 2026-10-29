@@ -64,6 +64,7 @@ impl AccountStore {
             "hasRefreshToken".to_string(),
             Value::Bool(!refresh_token.trim().is_empty()),
         );
+        public.insert("refreshTokenLongLived".to_string(), Value::Bool(true));
         public.insert(
             "hasAccessToken".to_string(),
             Value::Bool(

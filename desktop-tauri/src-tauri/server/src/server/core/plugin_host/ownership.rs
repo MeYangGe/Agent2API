@@ -8,6 +8,10 @@ use super::install::{self, InstalledPack, PackRegistry};
 pub(super) const WEB_PACK_ID: &str = "agent2api-web-providers";
 const LEGACY_PACK_ID: &str = "agent2api-providers";
 
+pub(super) fn reserved(id: &str) -> bool {
+    crate::server::core::providers::availability::BUILTIN_SUBSCRIPTION_IDS.contains(&id)
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCategory {
@@ -27,7 +31,9 @@ pub(super) fn category(dir: &Path) -> ProviderCategory {
 pub(super) fn owners(registry: &PackRegistry) -> BTreeMap<String, String> {
     let mut owners = BTreeMap::new();
     for pack in registry.packs.iter().filter(|pack| pack.enabled) {
-        for provider in declared_ids(pack) {
+        for provider in declared_ids(pack).into_iter().filter(|id| {
+            !reserved(id) && !crate::server::core::providers::availability::is_suspended(id)
+        }) {
             owners.entry(provider).or_insert_with(|| pack.id.clone());
         }
     }

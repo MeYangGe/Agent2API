@@ -3,7 +3,7 @@ export const PROVIDER_CAPABILITY_KEYS = [
 ] as const
 
 export type ProviderCapabilityKey = typeof PROVIDER_CAPABILITY_KEYS[number]
-export type ProviderCapabilityStatus = 'supported' | 'unsupported' | 'not_applicable' | 'undeclared'
+export type ProviderCapabilityStatus = 'supported' | 'implemented_unverified' | 'unsupported' | 'not_applicable' | 'undeclared'
 export type PluginDocumentText = string | Record<string, string>
 
 export type ProviderCapabilityCell = {

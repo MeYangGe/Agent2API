@@ -50,6 +50,7 @@ import {
   type KernelDownloadChoice,
 } from './proxies-sub-state'
 import { t } from '../i18n'
+import { KernelImportDialog } from './proxies-kernel-import'
 
 /** 字节 → MB 的一位数读数（与内核状态条同一格式） */
 function mb(bytes: number | undefined): string {
@@ -85,6 +86,7 @@ export function KernelDownloadDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = React.useState(false)
   const [stopping, setStopping] = React.useState(false)
   const [formError, setFormError] = React.useState('')
+  const [importOpen, setImportOpen] = React.useState(false)
 
   React.useEffect(() => {
     let alive = true
@@ -106,8 +108,8 @@ export function KernelDownloadDialog({ onClose }: { onClose: () => void }) {
   // 装好了就没什么可下载的：下载完成 / 别处装上了，弹窗自己收起来
   // （`installed` 是后端的实际判定，不是本地「我刚点了下载」的记忆）
   React.useEffect(() => {
-    if (status?.installed) onClose()
-  }, [status?.installed])
+    if (status?.installed && !importOpen) onClose()
+  }, [status?.installed, importOpen])
 
   const pick = buildProxyPick({ proxyChoice: status?.downloadProxy ?? null, pool, poolError })
   const currentProxy = proxyValue ?? pick.current
@@ -287,16 +289,18 @@ export function KernelDownloadDialog({ onClose }: { onClose: () => void }) {
             </>
           ) : (
             <>
+              <Button variant='outline' disabled={snapshot.pending || status?.installBusy} onClick={() => setImportOpen(true)}>{t('已下载？手动导入')}</Button>
               <div className='mr-auto' />
               <Button variant='outline' onClick={onClose}>{t('取消')}</Button>
               {/* pending 是别的内核动作（重启 / 删除）在途：那期间下载会和它抢队列 */}
-              <Button variant='default' disabled={busy || snapshot.pending} onClick={() => void start()}>
+              <Button variant='default' disabled={busy || snapshot.pending || status?.installBusy} onClick={() => void start()}>
                 {busy ? t('正在开始…') : t('下载')}
               </Button>
             </>
           )}
         </DialogFooter>
       </DialogContent>
+      {importOpen ? <KernelImportDialog onClose={() => setImportOpen(false)} /> : null}
     </Dialog>
   )
 }

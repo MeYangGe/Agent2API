@@ -88,6 +88,8 @@ const PROVIDER_ICONS: &[(&str, &[u8])] = &[
     ("lobsterai", include_bytes!("../../../../../ui/assets/providers/lobsterai.png")),
 ];
 
+const MINIMAX_CODE_SVG: &[u8] = include_bytes!("../../../../../ui/assets/providers/minimax-code.svg");
+
 /// 响应构造的小工具：省掉每个分支里重复的 builder 链。
 fn reply(status: StatusCode, mime: &'static str, body: Vec<u8>) -> Response {
     Response::builder()
@@ -150,6 +152,11 @@ pub async fn serve(Path(rest): Path<String>) -> Response {
             StatusCode::OK,
             "text/css; charset=utf-8",
             ISLANDS_CSS.as_bytes().to_vec(),
+        ),
+        "providers/minimax-code.svg" | "providers/minimax-code-global.svg" => reply(
+            StatusCode::OK,
+            "image/svg+xml",
+            MINIMAX_CODE_SVG.to_vec(),
         ),
         other => {
             // 提供商图标：`providers/<id>.png`

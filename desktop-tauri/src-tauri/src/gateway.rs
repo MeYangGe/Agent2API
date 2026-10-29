@@ -220,15 +220,18 @@ pub fn management_key() -> Option<String> {
     read_api_key()
 }
 
-/// 指定总超时的 Client。
+/// 指定总超时的本机直连 Client。
+///
+/// 本机管理请求携带凭据，必须绕过系统与环境变量代理。
 ///
 /// ── 为什么云同步要单独放宽 ──────────────────────────────────
 /// 通用 60 秒是给「管理 API 小请求」定的；云同步的上传 / 下载要打外网传几 MB，
 /// 慢速云盘上 60 秒根本不够。放宽的是**这一条命令**的超时，不是全局 ——
 /// 其它管理请求仍应快速失败（卡住的面板比报错更难排查）。
-fn client_with_timeout(timeout_ms: u64) -> Result<reqwest::Client, String> {
+pub(crate) fn local_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
+        .no_proxy()
+        .timeout(timeout)
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
@@ -245,7 +248,7 @@ fn request_builder_with_timeout(
 ) -> Result<reqwest::RequestBuilder, String> {
     let url = format!("http://127.0.0.1:{}{path}", proxy_port());
     crate::panel_session::ensure_local_access()?;
-    let base = client_with_timeout(timeout_ms)?;
+    let base = local_client(Duration::from_millis(timeout_ms))?;
     let mut builder = match method.to_uppercase().as_str() {
         "GET" => base.get(&url),
         "POST" => base.post(&url),
@@ -297,7 +300,7 @@ pub async fn call_with_api_key(method: &str, path: &str, body: Option<&Value>, a
         let key = reqwest::header::HeaderValue::from_str(api_key)
             .map_err(|_| "API Key 包含无效的请求头字符".to_string())?;
         request.headers_mut().insert("x-api-key", key);
-        let response = client_with_timeout(REQUEST_TIMEOUT_MS)?.execute(request).await
+        let response = local_client(Duration::from_millis(REQUEST_TIMEOUT_MS))?.execute(request).await
             .map_err(|error| describe_transport_error(&error))?;
         let status = response.status().as_u16();
         let text = response.text().await.map_err(|error| format!("读取响应失败: {error}"))?;

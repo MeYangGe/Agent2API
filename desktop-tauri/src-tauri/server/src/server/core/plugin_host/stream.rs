@@ -21,7 +21,7 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -31,13 +31,19 @@ use serde_json::{json, Value};
 use agent2api_provider_protocol as proto;
 
 use crate::server::core::upstream::usage::RequestTelemetry;
+use crate::server::errors::GatewayError;
 use crate::server::logging;
 
+pub(crate) type FailureSlot = Arc<Mutex<Option<GatewayError>>>;
+pub(crate) type PrivateFailureSlot = Arc<Mutex<Option<Value>>>;
+
+use super::errors::strict;
 use super::{Host, StreamEvent};
 
 /// 标准 Chat SSE 的只读用量旁路；跨分片缓冲有界，不改写下发字节。
 #[derive(Default)]
 struct UsageSniffer {
+    strict_provider: Option<&'static str>,
     line: Vec<u8>,
     data: Vec<u8>,
     line_bytes: usize,
@@ -46,6 +52,7 @@ struct UsageSniffer {
     skip_lf: bool,
     first_line_seen: bool,
     done: bool,
+    failure: Option<Value>,
 }
 
 impl UsageSniffer {
@@ -130,7 +137,20 @@ impl UsageSniffer {
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
             telemetry.report_usage(usage);
         }
+        if let Some(provider) = self.strict_provider {
+            if let Some((failure, private)) = strict::stream_failure(provider, &chunk) {
+                let prior_interruption = self.failure.as_ref().is_some_and(|body| {
+                    matches!(body.get("statusCode").and_then(Value::as_u64), Some(499 | 504))
+                });
+                if self.failure.is_none() || strict::stopped(&failure) && !prior_interruption {
+                    self.failure = Some(private);
+                }
+                telemetry.note_error(&failure.message);
+            }
+            return;
+        }
         if let Some(error) = chunk.get("error").filter(|value| crate::server::core::protocol::is_truthy(value)) {
+            if self.failure.is_none() { self.failure = Some(error.clone()); }
             let message = error.get("message").and_then(Value::as_str)
                 .or_else(|| error.as_str()).filter(|text| !text.trim().is_empty())
                 .map(str::to_string).unwrap_or_else(|| "上游流式返回错误".to_string());
@@ -156,6 +176,8 @@ pub(crate) struct RpcStream {
     /// usage / 首响旁路槽。
     telemetry: Arc<RequestTelemetry>,
     usage: UsageSniffer,
+    failure: Option<FailureSlot>,
+    private_failure: Option<PrivateFailureSlot>,
 }
 
 impl RpcStream {
@@ -169,11 +191,14 @@ impl RpcStream {
     /// `pending` 是「已经从通道里取出来、但还没下发」的正文（见
     /// [`Self::with_pending`] 的说明）。
     pub(crate) fn with_pending(
+        provider: &'static str,
         host: Arc<Host>,
         id: i64,
         events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
         pending: Option<Vec<u8>>,
         telemetry: Arc<RequestTelemetry>,
+        failure: Option<FailureSlot>,
+        private_failure: Option<PrivateFailureSlot>,
     ) -> Self {
         let (credit, mut credit_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
         let pump_host = host.clone();
@@ -183,7 +208,10 @@ impl RpcStream {
             }
         });
         let mut queue = VecDeque::new();
-        let mut usage = UsageSniffer::default();
+        let mut usage = UsageSniffer {
+            strict_provider: strict::applies(provider).then_some(provider),
+            ..UsageSniffer::default()
+        };
         if let Some(bytes) = pending {
             usage.feed(&bytes, &telemetry);
             queue.push_back(Bytes::from(bytes));
@@ -197,12 +225,56 @@ impl RpcStream {
             ended: false,
             telemetry,
             usage,
+            failure,
+            private_failure,
         }
+    }
+
+    fn capture_failure(&self, error: GatewayError) {
+        if let Some(slot) = &self.failure {
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // 已确认的取消/超时/清理失败不能被更早的额度帧覆盖。
+            if slot.is_none() || self.usage.strict_provider.is_some() && strict::stopped(&error)
+                && !slot.as_ref().is_some_and(|prior| matches!(prior.status_code, 499 | 504)) {
+                *slot = Some(error);
+            }
+        }
+    }
+
+    fn capture_frame_failure(&self) {
+        let Some(error) = &self.usage.failure else { return };
+        if let Some(provider) = self.usage.strict_provider {
+            if let Some((failure, private)) = strict::stream_failure(provider, &json!({ "error": error })) {
+                if let Some(slot) = &self.private_failure {
+                    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if slot.is_none() || strict::stopped(&failure) { *slot = Some(private); }
+                }
+                self.capture_failure(failure);
+            }
+            return;
+        }
+        let status = error.get("status").or_else(|| error.get("statusCode")).and_then(Value::as_u64)
+            .and_then(|status| i32::try_from(status).ok()).filter(|status| (400..600).contains(status)).unwrap_or(502);
+        let mut failure = GatewayError::with_status(status,
+            error.get("message").and_then(Value::as_str).unwrap_or("上游流式返回错误"));
+        failure.code = error.get("code").and_then(|value| value.as_str().map(str::to_string)
+            .or_else(|| value.as_i64().map(|code| code.to_string())))
+            .or_else(|| error.get("type").and_then(Value::as_str).map(str::to_string));
+        failure.upstream_code = error.get("upstreamCode").or_else(|| error.get("upstream_code"))
+            .and_then(Value::as_i64).or_else(|| error.get("code").and_then(Value::as_i64));
+        self.capture_failure(failure);
     }
 
     /// 排上「错误帧 + [DONE]」收尾。
     fn finish_with_error(&mut self, message: &str) {
         self.usage.finish(&self.telemetry);
+        self.capture_frame_failure();
+        if let Some(provider) = self.usage.strict_provider {
+            let failure = strict::fatal(provider, 502, "runtime_stream_interrupted");
+            self.finish_strict_error(failure);
+            return;
+        }
+        self.capture_failure(GatewayError::with_status(502, message).with_code("runtime_stream_interrupted"));
         self.ended = true;
         logging::console_line("[Model]", &format!("❌ {message}"));
         self.telemetry.note_error(message);
@@ -216,7 +288,27 @@ impl RpcStream {
                 "type": "proxy_error",
             }
         })));
-        self.pending.push_back(Bytes::from_static(b"data: [DONE]\n\n"));
+        if self.failure.is_none() {
+            self.pending.push_back(Bytes::from_static(b"data: [DONE]\n\n"));
+        }
+    }
+    fn finish_strict_error(&mut self, failure: GatewayError) {
+        let failure = self.failure.as_ref().and_then(|slot| {
+            let guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.as_ref().filter(|prior| matches!(prior.status_code, 499 | 504)).cloned()
+        }).unwrap_or(failure);
+        if strict::stopped(&failure) {
+            if let Some(slot) = &self.private_failure {
+                slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+            }
+        }
+        self.capture_failure(failure.clone());
+        self.ended = true;
+        logging::console_line("[Model]", &failure.message);
+        self.telemetry.note_error(&failure.message);
+        if !self.usage.done {
+            self.pending.push_back(crate::server::core::upstream::sse::sse_frame(&failure.payload()));
+        }
     }
 }
 
@@ -245,23 +337,47 @@ impl Stream for RpcStream {
                     // 差一个常量就会让窗口缓慢泄漏或溢出）
                     let _ = this.credit.send(bytes.len() + proto::FRAME_OVERHEAD_BYTES);
                     this.usage.feed(&bytes, &this.telemetry);
+                    this.capture_frame_failure();
                     this.telemetry.note_first_frame();
                     return Poll::Ready(Some(Ok(Bytes::from(bytes))));
                 }
                 Poll::Ready(Some(StreamEvent::Failed(message))) => {
-                    this.finish_with_error(&message);
+                    if let Some(provider) = this.usage.strict_provider {
+                        this.usage.finish(&this.telemetry);
+                        this.capture_frame_failure();
+                        this.finish_strict_error(strict::fatal(provider, 502, "runtime_stream_interrupted"));
+                    } else { this.finish_with_error(&message); }
                 }
                 Poll::Ready(Some(StreamEvent::Done(Ok(_)))) => {
                     this.usage.finish(&this.telemetry);
+                    this.capture_frame_failure();
                     // 插件正常结束。它本该自己写 `[DONE]`；漏了就在这里补上
                     // —— 少一个终止帧会让客户端一直等（连接挂着不关）。
                     if !this.usage.done {
+                        if this.failure.is_some() {
+                            this.finish_with_error("辅助程序流缺少真实 [DONE]，未补成功终态");
+                            continue;
+                        }
                         this.pending.push_back(Bytes::from_static(b"data: [DONE]\n\n"));
                     }
                     this.ended = true;
                 }
                 Poll::Ready(Some(StreamEvent::Done(Err(error)))) => {
-                    this.finish_with_error(&error.message);
+                    if let Some(provider) = this.usage.strict_provider {
+                        this.usage.finish(&this.telemetry);
+                        this.capture_frame_failure();
+                        if let Some((_, private)) = strict::private_control(&error) {
+                            if let Some(slot) = &this.private_failure {
+                                let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if slot.is_none() { *slot = Some(private); }
+                            }
+                        }
+                        let failure = super::rpc::rpc_error(provider, error, proto::methods::gateway::CONVERSATION);
+                        this.finish_strict_error(failure);
+                    } else {
+                        this.capture_failure(super::rpc::rpc_error("", error.clone(), proto::methods::gateway::CONVERSATION));
+                        this.finish_with_error(&error.message);
+                    }
                 }
             }
         }

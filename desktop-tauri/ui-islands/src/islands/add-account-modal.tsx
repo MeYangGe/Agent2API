@@ -32,7 +32,7 @@
 
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogSection, DialogTitle } from '@ui'
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@ui'
 
 import { shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
 import {
@@ -54,6 +54,7 @@ import {
   type AccountType,
 } from './add-provider-pick'
 import { ProviderBlock, WorkBuddyBlock } from './add-provider-blocks'
+import { DynamicProviderBlock } from './add-dynamic-provider'
 import { t } from '../i18n'
 
 type Step = 'pick' | 'form'
@@ -274,12 +275,13 @@ function AddAccountModal({
                 />
               </div>
               {hasBlock ? null : (
-                <div className='add-provider-block'>
-                  <DialogSection>
-                    <h3>{t('该提供商账号添加功能即将上线')}</h3>
-                    <p>{t('「{name}」的账号添加功能还在开发中，敬请期待。', { name: providerLabel })}</p>
-                  </DialogSection>
-                </div>
+                <DynamicProviderBlock
+                  key={state.provider}
+                  provider={state.provider}
+                  label={providerLabel}
+                  active={state.step === 'form'}
+                  version={version}
+                />
               )}
             </DialogBody>
             {/* 表单弹窗这条操作条归自定义块（它把自己的主按钮搬进来）；内置家的主按钮

@@ -61,6 +61,8 @@ import { t } from '../i18n'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
 import { modelApiKeyAllows } from '../../../ui-shared/model-api-key'
 import { useModelApiKeys } from '../../../ui-shared/use-model-api-keys'
+import { useRememberedModelApiKey } from '../../../ui-shared/model-api-key-memory'
+import { gatewayBase } from './assistant-state'
 import { ModelTestResult, modelTestOk as isOk, type ModelTestSlot as Slot, type TestModelResponse } from './model-test-result'
 
 /* ─── 类型 ─────────────────────────────────── */
@@ -254,7 +256,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     if (!load) throw new Error(t('当前环境不支持读取 API Key'))
     return load()
   })
-  const [apiKeyId, setApiKeyId] = React.useState<string | null>(null)
+  const { value: apiKeyId, ready: keySelectionReady, select: setApiKeyId } = useRememberedModelApiKey('model-test', gatewayBase)
   const selectedKey = keyState.keys.find(key => key.id === apiKeyId)
   const keyAllowed = Boolean(selectedKey && modelApiKeyAllows(selectedKey, target.id, provider))
   const selectedKeyRef = React.useRef(selectedKey)
@@ -350,7 +352,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
 
   /** 发起一轮：勾了几个账号就并发发几次（一个账号一条请求，互不影响） */
   function run(): void {
-    if (!keyState.ready || !selectedKey) {
+    if (!keySelectionReady || !keyState.ready || !selectedKey) {
       toast(t('请先选择一把 API Key'), 'err')
       return
     }
@@ -547,6 +549,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
           </div>
 
           <ModelApiKeyField {...keyState} value={apiKeyId} onChange={setApiKeyId} id='model-test-api-key'
+            disabled={!keySelectionReady} rememberSelection
             onRefresh={() => { void keyState.refresh().catch(() => {}) }} t={t} />
           {selectedKey && !keyAllowed ? <p role='status' className='text-xs text-destructive'>{t('所选 API Key 无权调用此模型或提供商')}</p> : null}
 
@@ -658,7 +661,7 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
         </DialogBody>
         <DialogFooter className='justify-end'>
           <Button variant='outline' onClick={onClose}>{t('关闭')}</Button>
-          <Button variant='default' disabled={!picked.length || !usable.length || !keyState.ready || !keyAllowed} onClick={run}>{t('开始测试')}</Button>
+          <Button variant='default' disabled={!picked.length || !usable.length || !keySelectionReady || !keyState.ready || !keyAllowed} onClick={run}>{t('开始测试')}</Button>
         </DialogFooter>
 
         {/* ── 结果层：叠在参数层之上的一层（位置与 overlayForceRender 的理由见模块头）── */}

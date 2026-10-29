@@ -25,7 +25,8 @@ import { parseAssistantMessages, assistantTitle } from '../../../ui-shared/assis
 export type { ChatMessage } from '../../../ui-shared/assistant-history'
 import { readAssistantStream, type ChatEvent, type ToolCall } from '../../../ui-shared/assistant-stream'
 import { t } from '../i18n'
-import { serverIdentity } from '../lib/servers'
+import { serverIdentity, apiBase } from '../lib/servers'
+import { readModelApiKeySelection, rememberModelApiKeySelection } from '../../../ui-shared/model-api-key-memory'
 export type { ChatEvent, ToolCall } from '../../../ui-shared/assistant-stream'
 
 export type ChatRole = 'user' | 'assistant' | 'tool'
@@ -45,9 +46,15 @@ export type AssistantConfig = {
 }
 
 export async function fetchAssistantConfig(): Promise<AssistantConfig> {
+  const identity = serverIdentity()
+  const scope = apiBase()
   const payload = await apiCall<{ config?: AssistantConfig }>('/api/assistant/config')
+  if (serverIdentity() !== identity) throw new DOMException('服务器已切换', 'AbortError')
   if (!payload.config) throw new Error(t('配置响应不完整'))
-  return payload.config
+  const apiKeyId = typeof payload.config.apiKeyId === 'string' && payload.config.apiKeyId.trim() ? payload.config.apiKeyId.trim()
+    : readModelApiKeySelection(scope, 'assistant')
+  if (apiKeyId) rememberModelApiKeySelection(scope, 'assistant', apiKeyId)
+  return { ...payload.config, apiKeyId }
 }
 
 /**
@@ -178,13 +185,17 @@ export async function summarizeAssistantSession(id: string, apiKey: string): Pro
 }
 
 export async function saveAssistantConfig(config: AssistantConfig): Promise<AssistantConfig> {
+  const identity = serverIdentity()
+  const scope = apiBase()
+  rememberModelApiKeySelection(scope, 'assistant', config.apiKeyId)
   const data = await apiCall<{ config: AssistantConfig }>('/api/assistant/config', { method: 'PUT', body: { config } })
+  if (serverIdentity() !== identity) throw new DOMException('服务器已切换', 'AbortError')
+  rememberModelApiKeySelection(scope, 'assistant', data.config.apiKeyId)
   return data.config
 }
 
 export async function saveAssistantTitleConfig(config: AssistantConfig, titleModel: string | null, titlePrompt: string): Promise<AssistantConfig> {
-  const data = await apiCall<{ config: AssistantConfig }>('/api/assistant/config', { method: 'PUT', body: { config: { ...config, titleModel, titlePrompt } } })
-  return data.config
+  return saveAssistantConfig({ ...config, titleModel, titlePrompt })
 }
 
 export async function deleteAssistantSession(id: string): Promise<void> {

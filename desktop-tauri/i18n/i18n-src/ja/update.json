@@ -1,7 +1,6 @@
 {
   " · 检查于 {time}": " · {time} に確認",
   " 已发布（当前 {current}），更新日志如下：": " が公開されました（現在 {current}）。更新履歴は以下のとおりです：",
-  "Discord 群": "Discord サーバー",
   "GitHub Token 未填写": "GitHub トークン未入力",
   "GitHub 令牌": "GitHub トークン",
   "GitHub 加速前缀": "GitHub 高速化プレフィックス",
@@ -12,7 +11,7 @@
   "GitHub 访问方式": "GitHub アクセス方式",
   "GitHub 访问设置已保存": "GitHub アクセス設定を保存しました",
   "QQ 群": "QQ グループ",
-  "QQ 群 / Telegram / Discord 都在这里": "QQ グループ・Telegram・Discord はこちら",
+  "QQ 群 / Telegram 都在这里": "QQ グループ・Telegram はこちら",
   "QQ 群 1": "QQ グループ 1",
   "QQ 群 2": "QQ グループ 2",
   "QQ 群 3": "QQ グループ 3",

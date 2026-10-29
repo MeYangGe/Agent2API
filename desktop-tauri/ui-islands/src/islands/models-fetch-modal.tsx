@@ -448,10 +448,16 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
         return
       }
       // 「模型来源」下拉的选择与刷新范围随请求带上（范围见 scopeProviders）
-      const result = await shared().workbuddyDesktop?.refreshModels({
-        accounts: buildSourceMap(sourceRows), providers: scopeProviders(),
-      })
-      setResults(Array.isArray(result?.results) ? result.results : [])
+      const refresh = shared().workbuddyDesktop?.refreshModels
+      if (!refresh) throw new Error(t('模型目录刷新不可用，请重新打开面板'))
+      const providers = pending.map(item => item.id).filter((id): id is string => Boolean(id))
+      const result = await refresh({ accounts: buildSourceMap(sourceRows), providers })
+      if (!Array.isArray(result?.results) || result.results.some(item => !item || typeof item.provider !== 'string'
+        || !['refreshed', 'failed', 'skipped'].includes(item.status || ''))
+        || providers.some(provider => result.results!.filter(item => item.provider === provider).length !== 1)) {
+        throw new Error(t('网关未返回逐家模型目录刷新结果'))
+      }
+      setResults(result.results)
       setFetched(true)
       setStatus('ready')
       // 真刷到新目录时通知调用方 —— 刷新落地只改了后端那份目录，模型管理页自持的 manage 视图
@@ -475,7 +481,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
    * 留着，界面上只有这一行发生变化。
    *
    * 失败**不**整屏换成「获取失败」：表里其他行的结果是有效的，一行失败不该把它们一起抹掉 ——
-   * 只留脚注 + toast 说清原因，这一行维持原样（待获取的行仍是「待获取」，已有结果的行保住上次读数）。
+   * 只留脚注 + toast 说清原因，并把当前行标为失败；其他行保留本轮已有结果。
    * 与全刷同一口径：`refreshed > 0` 才通知调用方（失败 / 跳过的清单一个字都没变）。
    */
   async function loadRow(row: Row) {
@@ -484,17 +490,28 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
     setBusyRow(row.provider)
     setHint('')
     try {
-      const result = await shared().workbuddyDesktop?.refreshModels({
-        // 这一行的下拉当前值（+ 落盘记忆）；后端只认它白名单里的那一家
+      const refresh = shared().workbuddyDesktop?.refreshModels
+      if (!refresh) throw new Error(t('模型目录刷新不可用，请重新打开面板'))
+      const result = await refresh({
         accounts: buildSourceMap([{ provider: row.provider, reported: row.item?.accountId }]),
         providers: [row.provider],
       })
-      setResults(prev => mergeResults(prev, Array.isArray(result?.results) ? result.results : []))
+      const items = Array.isArray(result?.results) ? result.results.filter(item => item?.provider === row.provider) : []
+      if (items.length !== 1 || !['refreshed', 'failed', 'skipped'].includes(items[0].status || '')) {
+        throw new Error(t('网关未返回逐家模型目录刷新结果'))
+      }
+      const item = items[0]
+      setResults(prev => mergeResults(prev, [item]))
       setFetched(true)
       setStatus('ready')
       if (Number(result?.refreshed) > 0) onRefreshed?.()
     } catch (error) {
       const message = errorMessage(error)
+      setResults(prev => mergeResults(prev, [{
+        provider: row.provider, providerLabel: row.label, status: 'failed', message,
+      }]))
+      setFetched(true)
+      setStatus('ready')
       setHint(message)
       toast(t('获取失败：{message}', { message }), 'err')
     } finally {

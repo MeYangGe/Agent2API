@@ -185,7 +185,7 @@ function runningFirstLine(entry: RequestEntry): React.ReactNode {
  */
 export function RequestCell({ entry, column }: { entry: RequestEntry; column: VisibleColumn }): React.ReactNode {
   const { align, key } = column
-  const base = column.sel.slice(1) + (key === 'dur' ? ' req-num' : '')
+  const base = column.sel.slice(1) + (key === 'dur' || key === 'speed' ? ' req-num' : '')
   const className = `${base} ta-${align}`
 
   switch (key) {
@@ -383,6 +383,12 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       )
     }
 
+    case 'speed': {
+      if (isRunning(entry)) return <span key={key} className={className} />
+      const speed = isOk(entry) ? tokensPerSecond(entry) : ''
+      return <span key={key} className={`${className}${speed ? '' : ' req-none'}`} title={SPEED_TIP}>{speed || '—'}</span>
+    }
+
     case 'usage': {
       // 进行中：用量要等收尾才记账，此刻没有任何读数可给 —— 留空比「-」更准确
       if (isRunning(entry)) return <span key={key} className={className} />
@@ -399,18 +405,10 @@ export function RequestCell({ entry, column }: { entry: RequestEntry; column: Vi
       const line2 = t('缓存读取: {cache} / 命中率: {rate}', {
         cache: formatTokens(entry.cacheReadTokens), rate: cacheRate(entry),
       })
-      // 生成速度跟在命中率后面（**同一行**，不另起一行）：速度是「token ÷ 时间」的
-      // 导出量，归在用量读数一族；只有成功行有 token（失败行清零），拿不到就不加。
-      // 整行 nowrap，超宽省略 —— 完整读数在 title 里（与该列既有手法同一套）
-      const speed = tokensPerSecond(entry)
-      const line2full = speed ? `${line2} · ${speed}` : line2
       return (
-        <span key={key} className={className} title={[line1, line2full].filter(Boolean).join('\n')}>
+        <span key={key} className={className} title={[line1, line2].join('\n')}>
           <span className='req-usage-line'>{line1}</span>
-          <span className='req-usage-line sub'>
-            {line2}
-            {speed ? <span title={SPEED_TIP}> · {speed}</span> : null}
-          </span>
+          <span className='req-usage-line sub'>{line2}</span>
         </span>
       )
     }
@@ -447,7 +445,8 @@ export function headRow(columns: VisibleColumn[]): React.ReactNode {
     <div className='req-head' key='__head'>
       {columns.map(column => (
         <span key={column.key} data-col={column.key}
-          className={`${column.sel.slice(1)}${column.key === 'dur' ? ' req-num' : ''} ta-${column.align}`}>
+          className={`${column.sel.slice(1)}${column.key === 'dur' || column.key === 'speed' ? ' req-num' : ''} ta-${column.align}`}
+          title={column.key === 'speed' ? SPEED_TIP : undefined}>
           {column.label}
         </span>
       ))}

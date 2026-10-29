@@ -378,7 +378,14 @@ pub fn query(query: &Query, limit: usize, offset: usize) -> Value {
                         "reason": row.get::<_, String>("reason")?,
                         "accountId": row.get::<_, String>("account_id")?,
                         "accountName": row.get::<_, String>("account_name")?,
-                        "provider": row.get::<_, String>("provider")?,
+                        // 存的是 provider id，读出来换成展示名（`qoder-intl`
+                        // → 「Qoder 国际版」）：界面上直接展示这一列，而 id
+                        // 只有开发者认得出。历史记录同样受益 —— 转换在读侧做，
+                        // 不改库（改库要迁移，且旧行本来也只需换名字）。
+                        "provider": crate::server::core::providers::label_of(
+                            &row.get::<_, String>("provider")?
+                        ),
+                        "providerId": row.get::<_, String>("provider")?,
                         "outcome": row.get::<_, String>("outcome")?,
                         "ok": row.get::<_, i64>("ok").unwrap_or(0) != 0,
                         "message": row.get::<_, Option<String>>("message")?,

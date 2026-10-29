@@ -50,7 +50,7 @@ export function PluginPackSettingsDialog({ pack, name, disabled, onClose, onEnab
               {providers.map(provider => <div key={provider.id}
                 className='flex min-w-0 items-center gap-3 rounded-md border border-hairline bg-surface-2 px-3 py-2.5'>
                 <Label htmlFor={`${idPrefix}-${provider.id}`} className='min-w-0 flex-1 flex-col items-start gap-0.5'>
-                  <span className='text-[12.5px] font-medium break-words text-foreground'>{provider.label}</span>
+                  <span className='text-[12.5px] font-medium break-words text-foreground'>{t(provider.label)}</span>
                   <code className='max-w-full text-[11px] break-all text-muted-foreground'>{provider.id}</code>
                   {provider.enabled && !provider.loaded ? <Badge variant='secondary' className='mt-1'>{t('未加载')}</Badge> : null}
                 </Label>

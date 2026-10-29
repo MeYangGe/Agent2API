@@ -52,7 +52,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::gateway;
@@ -464,7 +464,7 @@ pub async fn submit_kuku_sms_code(
         let _ = window.eval(&format!("window.__kukuSmsCode = '{}';", code));
         tokio::time::sleep(POLL_INTERVAL).await;
         match poll_once(&active.state).await {
-            PollOutcome::Pending => continue,
+            PollOutcome::Pending(_) => continue,
             PollOutcome::Done(_) => break,
             PollOutcome::Failed(error) => return Err(error),
             PollOutcome::Unreachable(error) => {
@@ -613,6 +613,7 @@ const RACCOON_CALLBACK_PATH: &str = "/callback";
 fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
     match provider {
         "raccoon" => Some(RACCOON_ALLOWED_HOSTS),
+        "doubaowork" => Some(&["doubao.com", "feishu.cn", "larksuite.com"]),
         // CatPaw / Qoder / Cline / AutoClaw 都不设限（理由见上）；**新加
         // provider 时不要让它落到默认分支** —— 那会静默沿用 WorkBuddy 的
         // 白名单，症状是登录窗口白屏（AutoClaw 那家还会连回调一起拦掉）。
@@ -702,6 +703,9 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
 /// `social_restore` 勾选时对 WorkBuddy 国际版额外放行 [`SOCIAL_IDENTITY_HOSTS`]：
 /// 恢复出来的 Google / GitHub 按钮做的是顶层跳转，不放行就会白屏（理由见该常量）。
 fn host_allowed(url: &url::Url, provider: &str, social_restore: bool) -> bool {
+    if provider == "doubaowork" {
+        return url.as_str() == "about:blank" || crate::doubaowork_login::allowed(url);
+    }
     match url.scheme() {
         "about" | "data" => true,
         "https" | "http" => {
@@ -781,6 +785,7 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 少了它前端会收到「未知的 provider」而登录按钮直接失败。
         "workbuddy-intl" => Ok("workbuddy-intl"),
         "raccoon" => Ok("raccoon"),
+        "doubaowork" => Ok("doubaowork"),
         // Qoder 两个地区（2026-10 拆家后是独立 provider）：设备授权两站同构，
         // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
@@ -982,8 +987,8 @@ fn emit_login_state(app: &AppHandle, state: LoginState) {
 /// 只有传输层错误（本地网关瞬时不可达）才继续重试 —— 那类错误下一拍自愈，
 /// 提前放弃反而会把一次正常的登录掐断。
 enum PollOutcome {
-    /// `{pending:true}`
-    Pending,
+    /// `{pending:true,hint?}`；缺少明确 done 的响应也按等待处理。
+    Pending(Option<String>),
     /// `{done:true, …}` —— 携带任务载荷（`{account, warning…}`，登录收尾
     /// 时透传给前端，例如 KukuAI 的「凭证已落库但未通过上游复核」警告）。
     Done(serde_json::Value),
@@ -1000,13 +1005,23 @@ enum PollOutcome {
 
 /// 读一次后端登录状态。
 async fn poll_once(state: &str) -> PollOutcome {
-    let path = format!("/api/session/login/wait?state={state}");
+    let query = {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("state", state);
+        query.finish()
+    };
+    let path = format!("/api/session/login/wait?{query}");
     let value = match gateway::call("GET", &path, None).await {
         Ok(value) => value,
         Err(error) => return PollOutcome::Unreachable(error),
     };
-    if value.get("pending").and_then(serde_json::Value::as_bool) == Some(true) {
-        return PollOutcome::Pending;
+    if value.get("pending").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("pending").is_some_and(serde_json::Value::is_object)
+        || value.get("done").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        let hint = value.get("hint").or_else(|| value.pointer("/pending/hint"))
+            .and_then(serde_json::Value::as_str).map(str::to_string);
+        return PollOutcome::Pending(hint);
     }
     if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
         return PollOutcome::Failed(error.to_string());
@@ -1038,6 +1053,294 @@ pub async fn cancel(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 新 options 只在 methodIndex 存在时启用动态协议；旧 Rust 签名和各家专用支路保留。
+pub async fn start_with_options(
+    app: &AppHandle,
+    edition: String,
+    mode: String,
+    provider: String,
+    social_restore: bool,
+    options: Option<Value>,
+) -> Result<Value, String> {
+    let dynamic = options.as_ref().is_some_and(|value| value.get("methodIndex").is_some());
+    if !dynamic {
+        // 旧入口也能带登录代理：界面上的代理选择器对内置家同样生效
+        // （antigravity 这类上游在无头服务器上只有应用内代理能出网）。
+        // 其余键（inputs / methodIndex）旧入口不认识，不传。
+        let proxy = options.as_ref().and_then(|value| value.get("proxy")).cloned();
+        return start(app, edition, mode, provider, social_restore, proxy).await;
+    }
+    let options = options.unwrap_or(Value::Null);
+    if options.get("methodIndex").and_then(Value::as_u64)
+        .filter(|index| *index <= 9_007_199_254_740_991).is_none()
+    {
+        return Err("登录方式索引必须是非负安全整数".into());
+    }
+    crate::startup::wait().await?;
+    let id = if provider.trim().is_empty() { "workbuddy" } else { provider.trim() };
+    // 动态入口只认当前已登记执行体（插件或本体 runtime provider），不让旧身份
+    // 表里的 MissingPlugin 占位或任意陌生 id 绕过运行时目录。
+    if !crate::server::core::providers::is_executable_provider(id) {
+        return Err(format!("提供商未在运行时目录中登记：{id}"));
+    }
+    // 动态 id 不经过旧地区别名归一，也不从占位 kind 反推；注册后原样透传。
+    let provider = id;
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|_| "无法生成登录流程标识")?;
+    let reservation = format!("starting-{}", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        if guard.is_some() {
+            return Err("已有登录流程在进行，请先完成当前登录或等待超时".into());
+        }
+        *guard = Some(ActiveLogin {
+            state: reservation.clone(), edition: edition.clone(), mode: mode.clone(),
+            provider: provider.into(),
+        });
+    }
+    emit_login_state(app, LoginState {
+        active: true, provider: Some(provider.into()), edition: Some(edition.clone()), mode: Some(mode.clone()),
+    });
+    let mut request = json!({
+        "provider": provider, "edition": edition, "mode": mode,
+        "socialRestore": social_restore, "options": options,
+    });
+    // HTTP 新契约带完整 options，同时兼容当前 API 的平铺读取。缺省字段不补
+    // null（inputs 缺省是 {}，proxy 的显式 null 则必须保留为直连）。
+    for key in ["methodIndex", "inputs", "proxy"] {
+        if let Some(value) = options.get(key) { request[key] = value.clone(); }
+    }
+    let response = gateway::call("POST", "/api/session/login/start", Some(&request)).await;
+    let started = match response {
+        Ok(value) => value,
+        Err(error) => { clear_active_login(app, &reservation); return Err(error); }
+    };
+    let Some(flow) = started.get("state").or_else(|| started.get("flow"))
+        .and_then(Value::as_str).filter(|value| !value.trim().is_empty())
+    else {
+        clear_active_login(app, &reservation);
+        return Err("后端未返回登录状态".into());
+    };
+    let auth_url = match started.get("url").or_else(|| started.get("authUrl")) {
+        None | Some(Value::Null) => "",
+        Some(Value::String(value)) => value.as_str(),
+        Some(_) => {
+            let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
+            clear_active_login(app, &reservation);
+            return Err("后端返回的登录链接格式无效".into());
+        }
+    };
+    let only_external = started.get("externalBrowser").and_then(Value::as_bool) == Some(true);
+    let mode_id = if auth_url.trim().is_empty() { "auto" }
+        else if only_external || mode == "external" { "external" } else { "embedded" };
+    let claimed = {
+        let state = app.state::<crate::state::AppState>();
+        let claimed = match state.login.lock() {
+            Ok(mut guard) if guard.as_ref().is_some_and(|active| active.state == reservation) => {
+                *guard = Some(ActiveLogin {
+                    state: flow.into(), edition: edition.clone(), mode: mode_id.into(), provider: provider.into(),
+                });
+                true
+            }
+            _ => false,
+        };
+        claimed
+    };
+    if !claimed {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
+        return Ok(json!({ "ok": false, "canceled": true }));
+    }
+    let mut instructions = started.get("instructions").and_then(Value::as_str).unwrap_or("").to_string();
+    if only_external && mode == "embedded" && !auth_url.trim().is_empty() {
+        if !instructions.is_empty() { instructions.push('\n'); }
+        instructions.push_str("此登录方式只支持系统浏览器，已按提供商要求打开；不会伪装成内嵌窗口。");
+    }
+    emit_login_progress(app, flow, &started, &instructions, None);
+    let result = run_dynamic_login(app, provider, flow, auth_url, mode_id, &started, &instructions).await;
+    if result.as_ref().map(|value| value.get("ok").and_then(Value::as_bool)) != Ok(Some(true)) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
+    }
+    clear_active_login(app, flow);
+    result
+}
+
+/// 只推送公开进度，不把授权 URL、options.inputs 或回调正文放进事件/日志。
+fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instructions: &str, hint: Option<&str>) {
+    let Some(active) = current_login(app).filter(|active| active.state == flow) else { return; };
+    let manual_callback = started.get("manualCallback").and_then(Value::as_bool) == Some(true);
+    let callback_input = if manual_callback && started.get("callbackInput").and_then(Value::as_str) == Some("code") {
+        "code"
+    } else { "url" };
+    let progress = json!({
+        "active": true, "provider": active.provider, "edition": active.edition, "mode": active.mode,
+        "state": flow, "manualCallback": manual_callback, "callbackInput": callback_input,
+        "instructions": instructions, "hint": hint,
+    });
+    let _ = app.emit("login:progress", &progress);
+    // 兼容仅订阅 onLoginState 的共享 UI 桥，新增字段不会改变旧状态结构。
+    let _ = app.emit("login:state", &progress);
+}
+
+#[derive(Clone)]
+struct DynamicNavigation {
+    hosts: Vec<String>,
+    callbacks: Vec<url::Url>,
+}
+
+impl DynamicNavigation {
+    fn new(auth: &url::Url, started: &Value) -> Result<Self, String> {
+        let hosts = match started.get("allowedHosts") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items.iter().map(|value| {
+                let host = value.as_str().ok_or("登录域名白名单格式无效")?
+                    .trim().trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase();
+                if host.is_empty() { return Err("登录域名白名单含有空主机".to_string()); }
+                Ok(host)
+            }).collect::<Result<Vec<_>, String>>()?,
+            Some(_) => return Err("登录域名白名单格式无效".into()),
+        };
+        let mut callbacks = Vec::new();
+        let mut capture = |key: &str, value: &str| {
+            if matches!(key, "redirect_uri" | "redirect" | "redirect_url" | "callback_url"
+                | "auth_callback_url" | "navigate_uri" | "return_url") {
+                if let Ok(callback) = url::Url::parse(value) {
+                    if callback.host_str().is_some() && callback.username().is_empty() && callback.password().is_none() {
+                        callbacks.push(callback);
+                    }
+                }
+            }
+        };
+        for (key, value) in auth.query_pairs() { capture(&key, &value); }
+        // SPA 授权页也会把 redirect_uri 放在 hash 路由的查询串里。
+        if let Some((_, query)) = auth.fragment().and_then(|fragment| fragment.split_once('?')) {
+            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) { capture(&key, &value); }
+        }
+        Ok(Self { hosts, callbacks })
+    }
+
+    fn is_callback(&self, url: &url::Url) -> bool {
+        if matches!(url.scheme(), "file" | "javascript" | "data" | "about" | "blob") { return false; }
+        if matches!(url.scheme(), "https" | "http") && !self.allows(url) { return false; }
+        self.matches_callback(url)
+    }
+
+    fn matches_callback(&self, url: &url::Url) -> bool {
+        url.username().is_empty() && url.password().is_none() && self.callbacks.iter().any(|target| {
+            url.scheme() == target.scheme() && url.host_str() == target.host_str()
+                && url.port_or_known_default() == target.port_or_known_default() && url.path() == target.path()
+        })
+    }
+
+    fn allows(&self, url: &url::Url) -> bool {
+        if !url.username().is_empty() || url.password().is_some() { return false; }
+        let Some(host) = url.host_str() else { return false; };
+        match url.scheme() {
+            "https" => self.hosts.is_empty() || self.hosts.iter().any(|item| {
+                host.eq_ignore_ascii_case(item) || host.to_ascii_lowercase().ends_with(&format!(".{item}"))
+            }),
+            // HTTP 只用于授权地址实际登记的回环 callback；仅白名单写 localhost 不够。
+            "http" => matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+                && self.matches_callback(url) && (self.hosts.is_empty() || self.hosts.iter().any(|item| {
+                    host.eq_ignore_ascii_case(item) || host.to_ascii_lowercase().ends_with(&format!(".{item}"))
+                })),
+            _ => false,
+        }
+    }
+}
+
+/// 动态流程独立于旧 Cookie/自定义协议支路；空 URL 也有流程，只跳过开页。
+async fn run_dynamic_login(
+    app: &AppHandle, provider: &str, flow: &str, auth_url: &str, mode: &str,
+    started: &Value, instructions: &str,
+) -> Result<Value, String> {
+    let mut profile = None;
+    let mut window = None;
+    if !auth_url.trim().is_empty() {
+        if auth_url.chars().any(|ch| ch <= '\u{20}' || ch == '\u{7f}') {
+            return Err("登录链接包含无效字符".into());
+        }
+        let auth = url::Url::parse(auth_url).map_err(|_| "登录链接无效")?;
+        let policy = DynamicNavigation::new(&auth, started)?;
+        if !policy.allows(&auth) { return Err("登录链接不是允许的 HTTPS 站点或合法本机回调地址".into()); }
+        if mode == "external" {
+            if std::env::var("WORKBUDDY_SKIP_OPEN_BROWSER").as_deref() != Ok("1") {
+                open_in_browser(auth_url)?;
+            }
+        } else {
+            profile = Some(LoginProfile::new()?);
+            let nav_policy = policy.clone();
+            let nav_state = flow.to_string();
+            let popup_state = nav_state.clone();
+            let seen = Arc::new(AtomicBool::new(false));
+            let nav_seen = seen.clone();
+            let built = WebviewWindowBuilder::new(app, login_window_label(flow), WebviewUrl::External(auth))
+                .data_directory(profile.as_ref().ok_or("登录环境不可用")?.path().to_path_buf())
+                .general_autofill_enabled(false)
+                .title(format!("登录 {} 账号", crate::server::core::providers::label_of(provider)))
+                .inner_size(1100.0, 820.0).min_inner_size(760.0, 560.0).center()
+                .on_navigation(move |url| {
+                    if nav_policy.is_callback(url) {
+                        if !nav_seen.swap(true, Ordering::SeqCst) {
+                            let state = nav_state.clone();
+                            let callback = url.as_str().to_string();
+                            tauri::async_runtime::spawn(async move { submit_callback(&state, &callback).await; });
+                        }
+                        return false;
+                    }
+                    nav_policy.allows(url)
+                })
+                .on_new_window(move |url, _| {
+                    if policy.is_callback(&url) && !seen.swap(true, Ordering::SeqCst) {
+                        let state = popup_state.clone();
+                        let callback = url.as_str().to_string();
+                        tauri::async_runtime::spawn(async move { submit_callback(&state, &callback).await; });
+                    }
+                    tauri::webview::NewWindowResponse::Deny
+                }).build().map_err(|_| "打开登录窗口失败")?;
+            let handle = app.clone();
+            let state = flow.to_string();
+            built.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) && login_is_current(&handle, &state) {
+                    clear_active_login(&handle, &state);
+                    let payload = json!({ "state": state });
+                    tauri::async_runtime::spawn(async move {
+                        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&payload)).await;
+                    });
+                }
+            });
+            window = Some(built);
+        }
+    }
+    // pollIntervalMs=0 只说明插件如何完成流程，不能关闭网关 /wait 轮询。
+    let interval = Duration::from_millis(started.get("pollIntervalMs").and_then(Value::as_u64)
+        .filter(|value| *value > 0).unwrap_or(2_000).clamp(1_000, 30_000));
+    let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
+    let mut last_hint = None;
+    let result = loop {
+        if !login_is_current(app, flow) { break Ok(json!({ "ok": false, "canceled": true })); }
+        if tokio::time::Instant::now() >= deadline { break Err("登录等待超时（5 分钟），请重试".into()); }
+        match poll_once(flow).await {
+            _ if !login_is_current(app, flow) => break Ok(json!({ "ok": false, "canceled": true })),
+            PollOutcome::Pending(hint) => {
+                if hint != last_hint {
+                    emit_login_progress(app, flow, started, instructions, hint.as_deref());
+                    last_hint = hint;
+                }
+            }
+            PollOutcome::Done(payload) => break Ok(json!({ "ok": true, "payload": payload, "external": mode == "external" })),
+            PollOutcome::Failed(error) => break Err(error),
+            PollOutcome::Unreachable(error) if task_gone(&error) => break Ok(json!({ "ok": false, "canceled": true })),
+            // 不记录 transport error 原文：它可能含带令牌的 URL。
+            PollOutcome::Unreachable(_) => {}
+        }
+        tokio::time::sleep(interval).await;
+    };
+    if let Some(window) = window { let _ = window.destroy(); }
+    drop(profile);
+    result
+}
+
 /// 发起一次登录。阻塞到登录完成、失败、取消或超时。
 ///
 /// `provider` 缺省（空串）按 workbuddy 处理 —— 老版本界面不会传它，
@@ -1051,11 +1354,15 @@ pub async fn start(
     mode: String,
     provider: String,
     social_restore: bool,
+    proxy: Option<Value>,
 ) -> Result<serde_json::Value, String> {
     if current_login(app).is_some() {
         return Err("已有登录流程在进行，请先完成当前登录或等待超时".to_string());
     }
     let provider = normalize_provider(&provider)?;
+    if provider == "doubaowork" {
+        return crate::doubaowork_login::start(app, &mode).await;
+    }
 
     // 小浣熊：授权地址由**后端适配器**生成（静态地址 + 本地生成的 state），
     // 所以请求体里只带 provider，不带 edition（那是 workbuddy 的端点维度）。
@@ -1114,10 +1421,16 @@ pub async fn start(
     // 给它这个选项只会制造一个永远等不到回调的卡死。
     let use_external = mode == "external" && provider != "raccoon";
 
+    let mut request = json!({ "edition": edition_id, "provider": provider });
+    // 登录代理：显式 `null`（用户选直连）也要带过去，与动态入口同一口径
+    // （见上面那段 `for key in ["methodIndex", "inputs", "proxy"]` 的注释）。
+    if let Some(proxy) = proxy {
+        request["proxy"] = proxy;
+    }
     let started = gateway::call(
         "POST",
         "/api/session/login/start",
-        Some(&json!({ "edition": edition_id, "provider": provider })),
+        Some(&request),
     )
     .await?;
     let login_state = started
@@ -1528,7 +1841,7 @@ async fn open_external(
             return Ok(json!({ "ok": false, "canceled": true }));
         }
         match poll_once(login_state).await {
-            PollOutcome::Pending => continue,
+            PollOutcome::Pending(_) => continue,
             PollOutcome::Done(payload) => {
                 return Ok(json!({ "ok": true, "external": true, "payload": payload }))
             }
@@ -1550,6 +1863,24 @@ async fn open_external(
         }
     }
     Err(format!("已打开系统浏览器完成{edition_label}登录，但等待超时（5 分钟），请重试"))
+}
+
+pub(crate) async fn run_cookie_login(
+    app: &AppHandle,
+    provider: &'static str,
+    auth_url: &str,
+    title: &str,
+    flow: &str,
+) -> Result<serde_json::Value, String> {
+    {
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.login.lock().map_err(|_| "登录状态锁不可用")?;
+        *guard = Some(ActiveLogin { state: flow.into(), edition: String::new(), mode: "embedded".into(), provider: provider.into() });
+    }
+    emit_login_state(app, LoginState { active: true, mode: Some("embedded".into()), edition: None, provider: Some(provider.into()) });
+    let result = run_embedded(app, provider, auth_url, title, flow, false, None, false).await;
+    clear_active_login(app, flow);
+    result
 }
 
 /// 内嵌 WebView 模式：建独立窗口加载登录页，同时轮询后端。
@@ -1622,6 +1953,7 @@ async fn run_embedded(
     // 临时风控限流（同一凭证几分钟后即恢复，2026-10-07 实测对照），
     // 密集重试只会延长风控窗口。
     let mut kuku_retry_block_until: Option<tokio::time::Instant> = None;
+    let mut doubaowork_submitted = false;
 
     // 导航拦截与弹窗拦截**共用同一个标志**：两种入口收到的可能是同一个回调
     // （页面先改 location、再被 WebView2 派生出一条弹窗请求），分开各一个标志
@@ -1718,6 +2050,9 @@ async fn run_embedded(
         // 同属一个 WebView2 数据目录、共享 Cookie 存储，弹窗里登录成功后
         // 等待循环照样能从 Cookie 读到 BDUSS）。
         .on_new_window(move |url, _features| {
+            if provider == "doubaowork" && crate::doubaowork_login::allowed(&url) {
+                return tauri::webview::NewWindowResponse::Allow;
+            }
             if provider == "kuku" {
                 return tauri::webview::NewWindowResponse::Allow;
             }
@@ -1845,8 +2180,18 @@ async fn run_embedded(
         // `on_new_window` 拦下并交给后端换令牌，成功与否统一走 `/wait`。
         // 初版那套「读窗口 cookie 找 ot_session」已删除：那条 Cookie 在
         // SPA 内扫码登录时根本不会被写出（见模块头的实测对照）。
+        if provider == "doubaowork" && !doubaowork_submitted {
+            match crate::doubaowork_login::cookie(&window).await {
+                Ok(Some(cookie)) => {
+                    doubaowork_submitted = true;
+                    submit_callback(login_state, &cookie).await;
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("[login] 豆包工作 Cookie 读取失败：{error}"),
+            }
+        }
         match poll_once(login_state).await {
-            PollOutcome::Pending => continue,
+            PollOutcome::Pending(_) => continue,
             // 任务载荷（`{account, warning…}`）随成功结果透传：前端据此
             // 在「账号已添加」之后补一条警告（例如 KukuAI 的凭证未通过
             // 上游复核 —— 账号未开通 KukuAI 时就是这条路）。
@@ -1882,7 +2227,7 @@ async fn submit_callback(login_state: &str, callback_url: &str) {
     let payload = json!({ "state": login_state, "callbackUrl": callback_url });
     match gateway::call("POST", "/api/session/login/callback", Some(&payload)).await {
         Ok(_) => eprintln!("[login] 已捕获登录回调并提交给网关"),
-        Err(error) => eprintln!("[login] 提交登录回调失败: {error}"),
+        Err(_) => eprintln!("[login] 提交登录回调失败，请查看登录进度提示"),
     }
 }
 

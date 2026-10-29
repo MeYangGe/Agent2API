@@ -95,9 +95,10 @@ pub fn supports_checkin(account: &Value) -> bool {
         if declared.exclude_guest && account.get("isGuest").and_then(Value::as_bool) == Some(true) {
             return false;
         }
-        // `daily: false` = 这家申报的是签到中心里的**别的卡**（ZCode 只有
-        // 「活动福利」），没有每日签到。不给这一位留出口的话，申报本身就会
-        // 被当成「有签到」，那张卡之外的账号也要被拉进来每天落一条失败。
+        // `daily: false` = 这家申报的是签到中心里的**别的卡**，没有每日签到。
+        // 不给这一位留出口的话，申报本身就会被当成「有签到」，那张卡之外的
+        // 账号也要被拉进来每天落一条失败。（ZCode 曾经是这一档：只有「活动
+        // 福利」；它的每日赠送套餐现在已按签到接入，`daily` 为 true。）
         return declared.daily;
     }
     // ── 插件家先分流 ────────────────────────────────────────────
@@ -384,7 +385,10 @@ pub async fn checkin_for(
         // CodeArts 的每日 ops 福利已随实现搬到插件（`welfare.claim`，能力位
         // `checkin`），走上面那条插件分支。
         // 智谱清言的签到（每日登录积分 + 活动领取 + 每日任务）已随实现搬到插件，
-        // 走上面那条插件分支（`plugin_checkin_capability`）。访客的排除仍在
+        // 走上面那条插件分支（`plugin_checkin_capability`）。
+        // ZCode 两地的每日签到（领当天赠送套餐）同样在插件里，走上面那条
+        // 插件分支；它的窗口是每天 19:00 起（见 `auto_checkin::times`）。
+        // 访客的排除仍在
         // `supports_checkin` 的 `isGuest` 分支里 —— 那是网关侧的集合划分。
         // ModelScope（魔搭）的两个站点：签到 = 调一次登录信息接口
         // （`GET {网页站}/api/v1/users/login/info`，**调用即触发当日魔粒**，

@@ -64,6 +64,19 @@ function shared(): SharedWindow {
   return window as unknown as SharedWindow
 }
 
+/** 错误响应可能包含凭据，只取文字字段，不序列化整个对象。 */
+function errorMessage(error: unknown, depth = 0): string {
+  if (typeof error === 'string') return error.trim()
+  if (error instanceof Error) return error.message.trim()
+  if (!error || typeof error !== 'object' || depth > 3) return ''
+  const record = error as Record<string, unknown>
+  for (const key of ['message', 'error', 'msg', 'reason']) {
+    const text = errorMessage(record[key], depth + 1)
+    if (text) return text
+  }
+  return ''
+}
+
 /* ─── 常量 ─────────────────────────────────── */
 
 /**
@@ -434,7 +447,7 @@ function ReportPage() {
       return summaryValue
     } catch (error) {
       if (token !== seq) return summaryValue
-      const message = error instanceof Error ? error.message : ''
+      const message = errorMessage(error)
       summaryValue = null
       // silent：只压掉控制台噪音（首屏自持加载 / 轮询用），错误态照常显示在页面上
       if (!options.silent) console.warn('读取报表数据失败:', message)

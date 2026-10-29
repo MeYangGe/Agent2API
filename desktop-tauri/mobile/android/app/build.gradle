@@ -16,7 +16,9 @@ android {
     namespace = "com.agent2api.mobile"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.agent2api.mobile"
+        // 允许构建期用 -PdevAppIdSuffix 追加后缀，产出可与正式包并存的独立应用。
+        // 不传该属性时行为与原来逐字一致（applicationId 仍是 com.agent2api.mobile）。
+        applicationId "com.agent2api.mobile" + (project.findProperty('devAppIdSuffix') ?: '')
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // 与 package.json 的版本对齐：apk 文件名与「关于」页都取这里。

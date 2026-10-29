@@ -27,15 +27,17 @@
 //! 完成，回调的应答就永远读不到。所以：
 //!   - 读循环只做「分类 → 投递到 pending 表 / 起 task」；
 //!   - 所有业务 await 都在独立的 task 里；
-//!   - 写端是一把 Mutex（不是 channel）：channel 会在写满时阻塞发送方，
-//!     而发送方可能就是读循环 —— 那又是一条死锁。
+//!   - 写端只串行化帧写入，不持进程生命周期锁等待 IO；
+//!   - 已开始的帧独立写完，避免调用方取消破坏共享管道的 JSON 边界。
 
 mod bootstrap;
+mod callbacks;
 pub mod catalog;
 mod compatibility;
 mod errors;
 mod gemini_signatures;
 mod install;
+mod lifecycle;
 mod logs;
 mod management;
 mod model_sync;
@@ -44,6 +46,7 @@ mod ownership;
 mod runtime;
 mod packages;
 mod pack_view;
+mod process;
 mod registry;
 mod rpc;
 mod rpc_cache;
@@ -55,6 +58,7 @@ pub mod update;
 #[cfg(test)]
 mod tests;
 
+pub use callbacks::GatewayCallbacks;
 pub use bootstrap::{
     reload as reload_host, set_loopback_port, spawn as spawn_bootstrap, start as bootstrap_host,
     StoreCallbacks,
@@ -116,7 +120,7 @@ pub fn clear_providers() {
 pub(crate) use stream::RpcStream;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -210,6 +214,19 @@ pub fn checkin_features() -> serde_json::Map<String, serde_json::Value> {
     map
 }
 
+/// 这次写失败是不是「帧太大」（issue #379）。
+///
+/// ── 为什么按文案判而不是新加错误码 ──────────────────────────
+/// 判据由协议 crate 的 `write_frame` 给出（`io::ErrorKind::InvalidData` +
+/// 「帧超过 … 字节上限」），而 `InvalidData` 同时也用于「帧无法序列化」。
+/// 两者在编排层应当同样处理 —— 都是**本地确定性失败**，重试没有意义 ——
+/// 所以这里把两种 `InvalidData` 一并归入。真正的区分在协议层，网关不必
+/// 复制那份知识。
+fn is_frame_too_large(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::InvalidData
+        && error.to_string().contains("帧超过")
+}
+
 /// 宿主状态（给界面显示）。
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct HostStatus {
@@ -221,7 +238,7 @@ pub struct HostStatus {
     pub crashes: u32,
     /// 已停用（崩溃太多次）。
     pub disabled: bool,
-    /// 最近一次失败原因。
+    /// 尚未恢复的失败原因；历史诊断保留在日志中。
     pub last_error: Option<String>,
 }
 
@@ -229,8 +246,12 @@ pub struct HostStatus {
 pub struct Host {
     /// 启动参数。
     options: HostOptions,
-    /// 子进程与管道（`None` = 没在跑）。
+    /// 当前代进程的写端；退出状态由 ProcessRun 独立持有。
     inner: Mutex<Option<Inner>>,
+    /// 状态转换与调用登记共用此锁；不得跨 await 持有。
+    lifecycle: StdMutex<()>,
+    generation: AtomicU64,
+    active: StdMutex<Option<Arc<process::ProcessRun>>>,
     /// 回调应答的等待者（插件 → 网关的请求）。
     ///
     /// ── 为什么用 std Mutex ────────────────────────────────────
@@ -242,12 +263,7 @@ pub struct Host {
     next_id: AtomicI64,
     /// 在途的流式调用（`abort` 与额度归还都按它找）。
     streams: StdMutex<HashMap<i64, StreamState>>,
-    /// 启动/重启的串行化锁。
-    ///
-    /// ── 为什么不能只靠 `inner` ──────────────────────────────────
-    /// 握手是一次 `call()`，它要写 stdin（拿 `inner`）。若启动路径仍持着
-    /// `inner`，两者就锁死了自己。这把锁把「启动」串行化，`inner` 只在
-    /// 真正 spawn 与写帧时短暂持有。
+    /// 启动与关闭串行化；握手期间不能持有 inner 锁。
     starting: Mutex<()>,
     /// 是否已完成握手（`init` 成功）。
     ///
@@ -260,22 +276,11 @@ pub struct Host {
     crashes: StdMutex<u32>,
     /// 是否已停用（崩溃太多次）。
     disabled: AtomicBool,
-    /// 是否正在主动关闭。
-    ///
-    /// ── 为什么需要它 ──────────────────────────────────────────
-    /// `shutdown()` 会让插件进程退出，读循环随之看到 EOF。若不区分「我们
-    /// 让它退的」与「它自己崩了」，每次正常关停都会给崩溃计数 +1 ——
-    /// 重启五次之后这个包就被永久停用了（用户完全不知道为什么）。
+    /// 主动关闭后该 Host 不得复活；重新启用由管理层创建新 Host。
     closing: AtomicBool,
-    /// 子进程是否在跑。
-    ///
-    /// ── 为什么单独一个原子而不是看 `inner` ──────────────────────
-    /// `inner` 是 tokio Mutex，同步的 `status()` 不能 await 它；而界面
-    /// 每秒都在轮询状态。用一个独立的原子标志，读循环与启动路径各自维护
-    /// 它 —— 两者的一致性由「只在 `start` 成功之后置真、只在读循环退出时
-    /// 置假」这条规则保证。
+    /// 子进程已启动且未确认通信中断；只有同代读循环可清除此标志。
     running: AtomicBool,
-    /// 最近一次失败原因。
+    /// 尚未恢复的失败原因。
     last_error: StdMutex<Option<String>>,
     /// 已加载的 provider（`init` 之后填）。
     providers: StdMutex<Vec<proto::ProviderInfo>>,
@@ -285,8 +290,8 @@ pub struct Host {
 
 /// 子进程与它的管道。
 struct Inner {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
+    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+    run: Arc<process::ProcessRun>,
 }
 
 /// 一条在途流的状态。
@@ -331,135 +336,7 @@ pub(crate) struct StreamCall {
     pub events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
 }
 
-/// 网关侧要实现的回调（插件的 `store.*` / `settings.*` / `log` / `notify`）。
-///
-/// ── 为什么是 trait 而不是直接调 account_store ─────────────────
-/// 这个模块属于「插件基础设施」，不该认识账号库的具体形状；而账号库在
-/// `core::account_store`，两者互相依赖会形成循环。用 trait 隔开之后，
-/// 接线在 `bootstrap` 里做一次，测试时也能塞假实现。
-pub trait GatewayCallbacks: Send + Sync + 'static {
-    /// `store.get`
-    fn store_get(
-        &self,
-        provider: String,
-        account: String,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<serde_json::Value, proto::WireError>,
-                > + Send
-                + '_,
-        >,
-    >;
-
-    /// `store.list`
-    fn store_list(
-        &self,
-        provider: String,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<serde_json::Value, proto::WireError>,
-                > + Send
-                + '_,
-        >,
-    >;
-
-    /// `store.update`（比较再写）
-    fn store_update(
-        &self,
-        account: String,
-        expect: serde_json::Value,
-        secret: serde_json::Value,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<serde_json::Value, proto::WireError>,
-                > + Send
-                + '_,
-        >,
-    >;
-
-    fn store_update_with_public(
-        &self,
-        account: String,
-        expect: serde_json::Value,
-        secret: serde_json::Value,
-        _public: serde_json::Value,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, proto::WireError>> + Send + '_>,
-    > {
-        self.store_update(account, expect, secret)
-    }
-
-    /// `store.mark_limited`
-    fn store_mark_limited(
-        &self,
-        account: String,
-        model: String,
-        reset_at: Option<i64>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), proto::WireError>> + Send + '_>,
-    >;
-
-    /// `store.ledger_get`
-    fn ledger_get(
-        &self,
-        account: String,
-        kind: String,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<serde_json::Value, proto::WireError>,
-                > + Send
-                + '_,
-        >,
-    >;
-
-    /// `store.ledger_put`
-    fn ledger_put(
-        &self,
-        account: String,
-        kind: String,
-        value: serde_json::Value,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), proto::WireError>> + Send + '_>,
-    >;
-
-    /// `settings.get`
-    fn settings_get(
-        &self,
-        provider: String,
-        key: String,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<serde_json::Value, proto::WireError>,
-                > + Send
-                + '_,
-        >,
-    >;
-
-    /// `settings.set`
-    fn settings_set(
-        &self,
-        provider: String,
-        key: String,
-        value: serde_json::Value,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), proto::WireError>> + Send + '_>,
-    >;
-
-    /// 插件日志（进运行日志页）。
-    fn log(&self, level: String, message: String);
-
-    fn log_context(&self, level: String, message: String, _context: serde_json::Value) {
-        self.log(level, message);
-    }
-
-    /// 插件通知界面（账号状态变化、进度）。
-    fn notify(&self, kind: String, payload: serde_json::Value);
-}
+const CALLBACK_FORBIDDEN: &str = "forbidden";
 
 impl Host {
     /// 建一个宿主（不启动进程）。
@@ -467,6 +344,9 @@ impl Host {
         Self {
             options,
             inner: Mutex::new(None),
+            lifecycle: StdMutex::new(()),
+            generation: AtomicU64::new(0),
+            active: StdMutex::new(None),
             pending: StdMutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             streams: StdMutex::new(HashMap::new()),
@@ -485,10 +365,12 @@ impl Host {
 
     pub(crate) fn ready(&self) -> bool {
         self.ready.load(Ordering::Acquire) && self.running.load(Ordering::Acquire)
+            && !self.closing.load(Ordering::Acquire)
     }
 
     /// 当前状态（给界面）。
     pub fn status(&self) -> HostStatus {
+        let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
         let providers = self
             .providers
             .lock()
@@ -505,222 +387,6 @@ impl Host {
         }
     }
 
-    /// 确保子进程在跑且已完成握手，返回可用的 provider 列表。
-    ///
-    /// ── 幂等 ──────────────────────────────────────────────────
-    /// 已握手就直接返回缓存的 provider 列表。崩溃之后调用它会重新 spawn
-    /// （受退避与次数限制）。
-    pub async fn ensure(self: &Arc<Self>) -> Result<Vec<proto::ProviderInfo>, String> {
-        if self.disabled.load(Ordering::Acquire) {
-            return Err(self
-                .last_error
-                .lock()
-                .ok()
-                .and_then(|e| e.clone())
-                .unwrap_or_else(|| "插件包反复崩溃，已停用".to_string()));
-        }
-        if self.ready.load(Ordering::Acquire) {
-            return Ok(self.providers.lock().map(|p| p.clone()).unwrap_or_default());
-        }
-        self.start().await
-    }
-
-    /// 优雅关闭（网关退出时调）。
-    pub async fn shutdown(&self) {
-        self.closing.store(true, Ordering::Release);
-        let mut guard = self.inner.lock().await;
-        if let Some(inner) = guard.as_mut() {
-            let frame = proto::Frame {
-                id: 0,
-                method: Some(proto::methods::gateway::SHUTDOWN.to_string()),
-                ..Default::default()
-            };
-            let _ = proto::write_frame(&mut inner.stdin, &frame).await;
-            // 给它 2 秒体面退出，然后杀
-            let _ = tokio::time::timeout(Duration::from_secs(2), inner.child.wait()).await;
-        }
-        *guard = None;
-        self.running.store(false, Ordering::Release);
-        self.ready.store(false, Ordering::Release);
-    }
-
-    /// 启动子进程并握手。
-    ///
-    /// ── 锁的顺序（改之前务必读完）────────────────────────────────
-    /// `starting` 串行化整条启动路径；`inner` 只在「spawn 落库」与写帧时
-    /// 短暂持有。**绝不能持着 `inner` 去 `call()`** —— `call()` 内部要写
-    /// stdin，也就是再拿一次 `inner`；tokio 的 Mutex 不可重入，那会直接
-    /// 死锁（曾经的 bug，7 个集成测试一起挂死就是它）。
-    async fn start(self: &Arc<Self>) -> Result<Vec<proto::ProviderInfo>, String> {
-        let _serial = self.starting.lock().await;
-        // 排队等锁期间可能已经被别人拉起来了
-        if self.ready.load(Ordering::Acquire) {
-            return Ok(self.providers.lock().map(|p| p.clone()).unwrap_or_default());
-        }
-        if self.disabled.load(Ordering::Acquire) {
-            return Err(self
-                .last_error
-                .lock()
-                .ok()
-                .and_then(|e| e.clone())
-                .unwrap_or_else(|| "插件包反复崩溃，已停用".to_string()));
-        }
-        // 退避窗口内不 spawn（避免一个必崩的包把 CPU 打满）
-        if let Ok(guard) = self.retry_after.lock() {
-            if let Some(deadline) = *guard {
-                if std::time::Instant::now() < deadline {
-                    let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    return Err(format!("插件包刚崩溃过，{:.1} 秒后重试", left.as_secs_f32()));
-                }
-            }
-        }
-
-        // 上一个进程可能还在（握手失败后没清）：先收掉，免得泄漏句柄
-        {
-            let mut guard = self.inner.lock().await;
-            if let Some(mut old) = guard.take() {
-                let _ = old.child.start_kill();
-                let _ = tokio::time::timeout(Duration::from_secs(2), old.child.wait()).await;
-            }
-        }
-        self.running.store(false, Ordering::Release);
-
-        let mut command = tokio::process::Command::new(&self.options.exe);
-        command
-            .args(&self.options.args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        // ── Windows 上不要弹控制台窗口 ────────────────────────
-        // 桌面端是 GUI 子系统程序，spawn 一个控制台子进程会闪一个黑框。
-        //
-        // 必须是**编译期**的 `#[cfg(windows)]`，不能写成
-        // `if cfg!(windows) { … }`：`creation_flags` 这个方法是 tokio 只为
-        // Windows 目标提供的，在 macOS / Linux 上它根本不存在 —— 运行期判断
-        // 两边都要参与编译，于是非 Windows 平台直接编译失败
-        // （error[E0599]: method not found in `&mut tokio::process::Command`）。
-        #[cfg(windows)]
-        {
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        if let Some(dir) = &self.options.cwd {
-            command.current_dir(dir);
-        }
-
-        let mut child = command.spawn().map_err(|e| {
-            let message = format!("启动插件进程失败（{}）: {e}", self.options.exe.display());
-            self.note_failure(&message);
-            message
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| "插件进程没有 stdin".to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "插件进程没有 stdout".to_string())?;
-        let stderr = child.stderr.take();
-
-        // stderr 单独一个 task：那是「插件崩了」的兜底诊断通道，
-        // 混进业务日志会淹没它。
-        if let Some(stderr) = stderr {
-            let exe = self.options.exe.display().to_string();
-            tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let mut lines = proto::frame::buffered(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    logging::console_line("plugin", &format!("[{exe}] {line}"));
-                }
-            });
-        }
-
-        self.running.store(true, Ordering::Release);
-        // 锁只在这里短暂持有，随后立刻释放再握手
-        *self.inner.lock().await = Some(Inner { child, stdin });
-
-        // 读循环：独立 task，持有 Arc<Host>
-        let host = self.clone();
-        let reader = proto::frame::buffered(stdout);
-        tokio::spawn(async move {
-            host.read_loop(reader).await;
-        });
-
-        // 握手
-        let env = proto::HostEnv {
-            data_dir: self.options.data_dir.clone(),
-            host_version: self.options.host_version.clone(),
-            target: self.options.target.clone(),
-            proxy: self.options.proxy.clone(),
-            debug_traffic: self.options.debug_traffic,
-            loopback_port: self.options.loopback_port,
-        };
-        let params = serde_json::json!({ "env": env });
-        match self
-            .call(proto::methods::gateway::INIT, params, self.options.init_timeout)
-            .await
-        {
-            Ok(value) => match serde_json::from_value::<Vec<proto::ProviderInfo>>(value) {
-                Ok(list) => {
-                    if let Ok(mut guard) = self.providers.lock() {
-                        *guard = list.clone();
-                    }
-                    // 握手成功：崩溃计数与退避都归零
-                    if let Ok(mut crashes) = self.crashes.lock() {
-                        *crashes = 0;
-                    }
-                    if let Ok(mut retry) = self.retry_after.lock() {
-                        *retry = None;
-                    }
-                    self.ready.store(true, Ordering::Release);
-                    Ok(list)
-                }
-                Err(e) => {
-                    let message = format!("插件返回的 provider 列表无法解析: {e}");
-                    self.note_failure(&message);
-                    Err(message)
-                }
-            },
-            Err(e) => {
-                let message = format!("插件握手失败: {e}");
-                self.note_failure(&message);
-                Err(message)
-            }
-        }
-    }
-
-    /// 读循环：只派发，不 await 业务。
-    async fn read_loop(
-        self: Arc<Self>,
-        mut reader: tokio::io::BufReader<tokio::process::ChildStdout>,
-    ) {
-        loop {
-            match proto::read_frame(&mut reader).await {
-                Ok(Some(frame)) => {
-                    match frame.kind() {
-                        proto::FrameKind::Reply | proto::FrameKind::Error => {
-                            // 这是插件对**我们发起的调用**的应答
-                            self.settle(frame);
-                        }
-                        proto::FrameKind::Request => {
-                            // 插件回调网关（store.* 等）—— 起 task 处理
-                            let host = self.clone();
-                            tokio::spawn(async move {
-                                host.serve_callback(frame).await;
-                            });
-                        }
-                        proto::FrameKind::Event => {
-                            // 插件的主动通知（log / notify）
-                            self.handle_event(frame);
-                        }
-                        proto::FrameKind::Unknown => {}
-                    }
-                }
-                Ok(None) => {
-                    self.note_exit("插件进程关闭了 stdout");
-                    return;
-                }
-                Err(e) => {
-                    self.note_exit(&format!("插件帧格式错误: {e}"));
-                    return;
-                }
-            }
-        }
-    }
 
     /// 唤醒一个等待中的调用。
     ///
@@ -830,87 +496,6 @@ impl Host {
         }
     }
 
-    /// 处理插件的回调请求。
-    async fn serve_callback(&self, frame: proto::Frame) {
-        let Some(method) = frame.method.clone() else { return };
-        let id = frame.id;
-        let params = frame.params.unwrap_or(serde_json::Value::Null);
-        let text = |key: &str| {
-            params.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_string()
-        };
-        let value = |key: &str| params.get(key).cloned().unwrap_or(serde_json::Value::Null);
-
-        let outcome: Result<serde_json::Value, proto::WireError> = match method.as_str() {
-            proto::methods::plugin::STORE_GET => {
-                self.callbacks.store_get(text("provider"), text("account")).await
-            }
-            proto::methods::plugin::STORE_LIST => self.callbacks.store_list(text("provider")).await,
-            proto::methods::plugin::STORE_UPDATE => {
-                self.callbacks
-                    .store_update_with_public(text("account"), value("expect"), value("secret"), value("public"))
-                    .await
-            }
-            proto::methods::plugin::STORE_MARK_LIMITED => {
-                let reset_at = params.get("reset_at").and_then(serde_json::Value::as_i64);
-                self.callbacks
-                    .store_mark_limited(text("account"), text("model"), reset_at)
-                    .await
-                    .map(|()| serde_json::Value::Null)
-            }
-            proto::methods::plugin::STORE_LEDGER_GET => {
-                self.callbacks.ledger_get(text("account"), text("kind")).await
-            }
-            proto::methods::plugin::STORE_LEDGER_PUT => {
-                self.callbacks
-                    .ledger_put(text("account"), text("kind"), value("value"))
-                    .await
-                    .map(|()| serde_json::Value::Null)
-            }
-            proto::methods::plugin::SETTINGS_GET => {
-                self.callbacks.settings_get(text("provider"), text("key")).await
-            }
-            proto::methods::plugin::SETTINGS_SET => {
-                self.callbacks
-                    .settings_set(text("provider"), text("key"), value("value"))
-                    .await
-                    .map(|()| serde_json::Value::Null)
-            }
-            proto::methods::plugin::LOG => {
-                self.callbacks.log_context(text("level"), text("message"), value("context"));
-                Ok(serde_json::Value::Null)
-            }
-            proto::methods::plugin::NOTIFY => {
-                let payload = value("payload");
-                if text("kind") == "models_changed" {
-                    let provider = payload.get("provider").and_then(serde_json::Value::as_str).unwrap_or("");
-                    let owner = runtime::host_for_provider(provider);
-                    if !owner.as_ref().is_some_and(|host| std::ptr::eq(host.as_ref(), self)) {
-                        Err(proto::WireError::with_code(
-                            "模型通知不属于当前插件进程",
-                            proto::WireError::UNSUPPORTED,
-                        ))
-                    } else {
-                        self.callbacks.notify(text("kind"), payload);
-                        Ok(serde_json::Value::Null)
-                    }
-                } else {
-                    self.callbacks.notify(text("kind"), payload);
-                    Ok(serde_json::Value::Null)
-                }
-            }
-            other => Err(proto::WireError::with_code(
-                format!("不认识的回调 {other}"),
-                proto::WireError::NO_METHOD,
-            )),
-        };
-
-        let frame = match outcome {
-            Ok(result) => proto::Frame { id, result: Some(result), ..Default::default() },
-            Err(error) => proto::Frame { id, error: Some(error), ..Default::default() },
-        };
-        let _ = self.write(frame).await;
-    }
-
     /// 发一个调用并等应答。
     pub async fn call(
         &self,
@@ -936,27 +521,40 @@ impl Host {
     ) -> Result<serde_json::Value, proto::WireError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut map) = self.pending.lock() {
-            map.insert(id, tx);
-        } else {
-            return Err(proto::WireError::with_code(
-                "回调表被污染",
-                proto::WireError::INTERNAL,
-            ));
-        }
+        let run = {
+            let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
+            let run = self.current_run().filter(|run| self.is_current_run(run)
+                && self.running.load(Ordering::Acquire) && !run.failed.load(Ordering::Acquire)
+                && (!run.is_expected_exit() || method == proto::methods::gateway::SHUTDOWN))
+                .ok_or_else(|| proto::WireError::with_code("插件进程不可用", proto::WireError::INTERNAL))?;
+            self.pending.lock().map_err(|_| proto::WireError::with_code("回调表被污染", proto::WireError::INTERNAL))?
+                .insert(id, tx);
+            run
+        };
         let frame = proto::Frame {
             id,
             method: Some(method.to_string()),
             params: Some(params),
             ..Default::default()
         };
-        if let Err(e) = self.write(frame).await {
+        if let Err(e) = self.write_for_run(frame, run).await {
             if let Ok(mut map) = self.pending.lock() {
                 map.remove(&id);
             }
+            // ── 帧超限归「本地前置失败」（issue #379）──────────────────
+            // 「请求体太大、这一帧写不出去」是**本地确定性的前置失败**：换账号、
+            // 重试、换家都不会变好，只会白等一轮。仓库里已有 556
+            // （`readiness::LOCAL_PRECONDITION_STATUS`）专门表达这一档，编排层
+            // 据此跳过重试（见 `provider_loop` 对 556 的处理）。归到 INTERNAL
+            // 会让一次注定失败的请求被当成上游抖动反复重试。
+            let code = if is_frame_too_large(&e) {
+                proto::WireError::LOCAL_PRECONDITION
+            } else {
+                proto::WireError::INTERNAL
+            };
             return Err(proto::WireError::with_code(
                 format!("写插件失败: {e}"),
-                proto::WireError::INTERNAL,
+                code,
             ));
         }
         match tokio::time::timeout(timeout, rx).await {
@@ -980,78 +578,29 @@ impl Host {
 
     /// 写一帧给插件。
     async fn write(&self, frame: proto::Frame) -> std::io::Result<()> {
-        let mut guard = self.inner.lock().await;
-        match guard.as_mut() {
-            Some(inner) => proto::write_frame(&mut inner.stdin, &frame).await,
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "插件进程没有在跑",
-            )),
-        }
+        let run = self.current_run().ok_or_else(process::disconnected)?;
+        self.write_for_run(frame, run).await
     }
 
-    /// 记一次失败（崩溃计数 + 退避判定）。
-    fn note_failure(&self, message: &str) {
-        if let Ok(mut last) = self.last_error.lock() {
-            *last = Some(message.to_string());
-        }
-        let crashes = self.crashes.lock().map(|mut c| {
-            *c += 1;
-            *c
-        }).unwrap_or(1);
-        logging::log("Plugin", &format!("宿主失败（第 {crashes} 次）: {message}"));
-        // 指数退避：1s → 2s → 4s → 8s → 16s，上限 60s。
-        // 第 1 次也给退避，否则一个「起来就崩」的包会被 ensure() 的调用方
-        // 按请求频率反复 spawn（每个请求一次进程启动）。
-        let secs = 1u64 << (crashes.saturating_sub(1)).min(6);
-        if let Ok(mut retry) = self.retry_after.lock() {
-            *retry = Some(std::time::Instant::now() + Duration::from_secs(secs.min(60)));
-        }
-        if crashes >= 5 {
-            self.disabled.store(true, Ordering::Release);
-            logging::log("Plugin", "插件包连续崩溃 5 次，已停用；请检查版本或重新安装");
-        }
-    }
-
-    /// 子进程退出（读循环结束时调）。
-    fn note_exit(&self, message: &str) {
-        let was_running = self.running.swap(false, Ordering::AcqRel);
-        self.ready.store(false, Ordering::Release);
-        if let Ok(mut guard) = self.streams.lock() {
-            // ── 先让在途流以错误收尾，再清表 ──────────────────────
-            // 只清表的话，消费者的通道发送端随条目一起被丢弃，接收端读到
-            // `None` —— 那与「上游正常结束」不可区分，客户端会拿到一条
-            // 截断但没有错误的流（看起来像模型少说了半句）。
-            for (_, state) in guard.iter() {
-                let _ = state.tx.send(StreamEvent::Failed(message.to_string()));
+    async fn write_for_run(&self, frame: proto::Frame, run: Arc<process::ProcessRun>) -> std::io::Result<()> {
+        let stdin = {
+            let guard = self.inner.lock().await;
+            let inner = guard.as_ref().filter(|inner| Arc::ptr_eq(&inner.run, &run))
+                .ok_or_else(process::disconnected)?;
+            inner.stdin.clone()
+        };
+        let mut stdin = stdin.lock_owned().await;
+        // write_all 可能已经写出半帧；调用方取消不能打断共享管道的帧边界。
+        tokio::spawn(async move {
+            if run.retired.load(Ordering::Acquire) || run.failed.load(Ordering::Acquire) {
+                return Err(process::disconnected());
             }
-            guard.clear();
-        }
-        // 主动关闭不算失败：否则每次正常关停都给崩溃计数 +1，五次之后
-        // 这个包就被永久停用了（见 `closing` 字段的说明）。
-        if self.closing.swap(false, Ordering::AcqRel) {
-            logging::verbose("Plugin", &format!("插件宿主已关闭（{message}）"));
-            return;
-        }
-        if was_running {
-            self.note_failure(message);
-        }
+            proto::write_frame(&mut *stdin, &frame).await
+        }).await.map_err(|error| std::io::Error::other(format!("插件写入任务未完成：{error}")))?
     }
 
-    /// 发起一次**流式**调用（`conversation`）。
-    ///
-    /// ── 与 `call()` 的分工 ──────────────────────────────────────
-    /// `call()` 是「一问一答」：投进 pending 表，等一条应答。流式调用有三段
-    /// （head → chunk* → 最终应答），中间的帧没有 pending 表可投 —— 它们要
-    /// 落到一个**专属通道**里，由消费者边读边还额度。所以这里单独一条路：
-    ///
-    ///   - `head` 走 oneshot（消费者要先知道状态码才能决定返回什么）；
-    ///   - `chunk` 走无界通道（读循环不 await，见 [`StreamState`] 的说明）；
-    ///   - 最终应答仍走 `pending`（`result: null` 或 error）。
-    ///
-    /// ── 为什么 `ensure()` 在这里而不是调用方 ─────────────────────
-    /// 与 [`Self::call`] 一致：崩溃之后第一次调用自动拉起子进程。放在这里
-    /// 就不会有「某条新加的流式调用忘了 ensure」这种漏。
+
+    /// 发起流式调用；head、chunk 和最终应答共用专属通道，保持帧顺序。
     pub(crate) async fn open_stream(
         self: &Arc<Self>,
         method: &str,
@@ -1061,10 +610,15 @@ impl Host {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        {
-            let mut guard = self.streams.lock().map_err(|_| "流式表被污染".to_string())?;
-            guard.insert(id, StreamState { tx: event_tx });
-        }
+        let run = {
+            let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
+            let run = self.current_run().filter(|run| self.is_current_run(run) && self.ready()
+                && !run.failed.load(Ordering::Acquire) && !run.is_expected_exit())
+                .ok_or_else(|| "插件进程不可用".to_string())?;
+            self.streams.lock().map_err(|_| "流式表被污染".to_string())?
+                .insert(id, StreamState { tx: event_tx });
+            run
+        };
 
         let frame = proto::Frame {
             id,
@@ -1072,9 +626,15 @@ impl Host {
             params: Some(params),
             ..Default::default()
         };
-        if let Err(e) = self.write(frame).await {
+        if let Err(e) = self.write_for_run(frame, run).await {
             if let Ok(mut guard) = self.streams.lock() {
                 guard.remove(&id);
+            }
+            // 流式入口的返回类型是 `String`（没有错误码通道），所以这里只在
+            // 超限时把「这是本地问题、重试没用」写进文案 —— 调用方据此展示，
+            // 不再额外引入一个只在这一处生效的错误类型。
+            if is_frame_too_large(&e) {
+                return Err(format!("写插件失败: {e}（请求体过大，换账号或重试都不会成功）"));
             }
             return Err(format!("写插件失败: {e}"));
         }

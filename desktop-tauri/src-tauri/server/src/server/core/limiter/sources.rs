@@ -9,6 +9,8 @@ use super::types::{json_of, QuotaSource};
 pub struct SourceFacts {
     pub sources: Vec<QuotaSource>,
     pub remaining: Option<f64>,
+    pub unlimited: bool,
+    pub unit: String,
 }
 
 pub type Facts = HashMap<String, SourceFacts>;
@@ -25,8 +27,11 @@ pub fn parse(usage: &Value) -> SourceFacts {
         rows.iter().filter_map(|row| serde_json::from_value::<QuotaSource>(row.clone()).ok())
             .filter(|source| !source.id.is_empty() && source.id.len() <= 512).collect()
     }).unwrap_or_default();
-    let (remaining, _) = crate::server::core::usage_records::extract_remaining(usage);
-    SourceFacts { sources, remaining }
+    let (remaining, unlimited) = crate::server::core::usage_records::extract_remaining(usage);
+    let unit = usage.get("unit").and_then(Value::as_str).unwrap_or_else(|| {
+        if usage.get("totalLeft").is_some() { "积分" } else { "" }
+    }).trim().to_string();
+    SourceFacts { sources, remaining, unlimited, unit }
 }
 
 pub fn note(id: &str, usage: &Value) {
@@ -42,15 +47,32 @@ pub fn reload() {
 pub fn rows_for(account: &Value, facts: &Facts) -> Value {
     let id = account.get("id").and_then(Value::as_str).unwrap_or("");
     let provider = crate::server::core::routing::provider_of(account);
-    let sources = facts.get(id).map(|facts| facts.sources.as_slice()).unwrap_or_default();
+    let record = facts.get(id);
+    let sources = record.map(|facts| facts.sources.as_slice()).unwrap_or_default();
     let mut rows = json_of(&sources).as_array().cloned().unwrap_or_default();
     let has_balance = crate::server::core::usage_query::supports_usage_provider(provider);
-    if has_balance && !sources.iter().any(|source| source.id == "account") {
-        rows.insert(0, json!({ "id": "account", "label": "账号主额度", "provider": provider,
-            "unit": "", "remaining": facts.get(id).and_then(|facts| facts.remaining) }));
+    if has_balance {
+        let unit = record.map(|facts| facts.unit.as_str()).filter(|unit| !unit.is_empty())
+            .or_else(|| sources.iter().find(|source| source.id == "account").map(|source| source.unit.as_str()))
+            .unwrap_or("");
+        let credit = unit == "积分" || unit.eq_ignore_ascii_case("credits");
+        let label = if credit { "总积分" } else { "账号主额度" };
+        if let Some(account) = rows.iter_mut().find(|source| source.get("id").and_then(Value::as_str) == Some("account")) {
+            if credit { account["label"] = json!(label); }
+            account["unit"] = json!(unit);
+        } else {
+            rows.insert(0, json!({ "id": "account", "label": label, "provider": provider,
+                "unit": unit, "remaining": record.and_then(|facts| facts.remaining),
+                "unlimited": record.is_some_and(|facts| facts.unlimited) }));
+        }
     }
-    rows.push(json!({ "id": "local", "label": "本地用量保护", "provider": provider,
-        "localOnly": true, "localEstimate": true }));
+    if provider == crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID {
+        rows.retain(|source| source.get("id").and_then(Value::as_str) == Some("account")
+            || source.get("unit").and_then(Value::as_str) == Some("积分"));
+    } else {
+        rows.push(json!({ "id": "local", "label": "本地用量保护", "provider": provider,
+            "localOnly": true, "localEstimate": true }));
+    }
     Value::Array(rows)
 }
 

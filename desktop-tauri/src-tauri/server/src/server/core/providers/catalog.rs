@@ -66,7 +66,7 @@ pub(crate) fn refresh_meta_for_provider(provider: &str) -> (bool, i64) {
 }
 
 fn all_provider_ids() -> Vec<String> {
-    let mut ids = crate::server::core::plugin_host::installed_ids();
+    let mut ids = super::executable_provider_ids();
     for provider in PROVIDERS {
         if !ids.iter().any(|id| id.eq_ignore_ascii_case(provider.id)) {
             ids.push(provider.id.to_string());

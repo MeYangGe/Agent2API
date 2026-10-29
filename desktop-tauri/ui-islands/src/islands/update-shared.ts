@@ -287,7 +287,6 @@ export const QQ_GROUPS = [
  */
 export const COMMUNITY_LINKS = [
   { id: 'telegram', url: 'https://t.me/+9gM8YPvgRL02NGRl' },
-  { id: 'discord', url: 'https://discord.gg/z9GzSJMWp' },
 ] as const
 
 /** 更新日志正文：渲染交给 wbMarkdown（不重写它），只做缺失兜底 */

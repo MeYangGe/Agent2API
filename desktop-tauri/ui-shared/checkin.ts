@@ -64,6 +64,38 @@ export type PlanEntry = {
 
 export type GrowthEntry = { id: string; name: string; provider: string }
 
+type GrowthTaskState = {
+  status?: string
+  current?: number
+  target?: number
+  supported?: boolean
+  unforgeable?: boolean
+  locked?: boolean
+}
+
+export function growthTaskCompleted(task: GrowthTaskState): boolean {
+  return task.status === 'completed' || (Number.isFinite(task.current) && Number.isFinite(task.target)
+    && Number(task.target) > 0 && Number(task.current) >= Number(task.target))
+}
+
+export function growthTaskRunnable(task: GrowthTaskState, mode: 'full' | 'claim'): boolean {
+  if (!task.supported || task.locked || task.status === 'claimed') return false
+  const completed = growthTaskCompleted(task)
+  return mode === 'claim' ? completed : !task.unforgeable || completed
+}
+
+
+/** 条目里的一家：生效时刻 + 今天跑过没有（`builtin` 有值 = 该家自带专属时刻） */
+export type ScheduleProviderRow = {
+  id: string
+  label: string
+  time: string
+  builtin: string | null
+  firedToday: boolean
+  /** 到点了但还没跑（`false` 且 `firedToday=false` = 在等窗口） */
+  overdue?: boolean
+}
+
 export type ScheduleEntry = {
   id: string
   label: string
@@ -71,8 +103,24 @@ export type ScheduleEntry = {
   enabled: boolean
   time: string
   providers: string[]
+  /** 逐家的时刻覆盖（`{providerId: "HH:MM"}`；空串 = 撤销覆盖） */
+  providerTimes: Record<string, string>
+  /** 逐家的生效时刻与今日状态（后端算好，界面直接渲染） */
+  providerRows: ScheduleProviderRow[]
+  /** 补签轮时刻（空串 = 关掉补签轮） */
+  retryTime: string
+  /** 逐家的补签时刻（主轮时刻 + 重试间隔，不早于 retryTime） */
+  providerRetryTimes?: Record<string, string>
+  /** 中性未领取的重试间隔（分钟；0 = 不重试） */
+  retryGapMinutes: number
+  /** 每账号每天的重试次数上限（0 = 不重试） */
+  retryLimit: number
   lastFiredDate: string | null
   lastFiredToday: boolean
+  /** 今天还没跑的家（界面显示「待执行」） */
+  pendingProviders: string[]
+  /** 中性未领取、等窗口重试的账号数 */
+  retryCount: number
   nextRunAt: number | null
   lastResult: CheckinResult | null
 }
@@ -129,7 +177,9 @@ export type AutoState = {
   enabled: boolean
   lastFiredToday: boolean
   running: boolean
-  providerOptions: { id: string; label: string }[]
+  providerOptions: { id: string; label: string; builtinTime?: string | null }[]
+  /** 缺省补签时刻（「补签时刻」输入框的 placeholder） */
+  defaultRetryTime?: string
   schedules: ScheduleEntry[]
 }
 
@@ -137,6 +187,8 @@ export type KeepaliveState = {
   models: string[]
   defaultModels: string[]
   apiKeyId?: string | null
+  /** 没显式选过、用的是第一把可用 Key（界面可以提示一句） */
+  apiKeyDefaulted?: boolean
   authError?: string | null
 }
 

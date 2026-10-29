@@ -37,6 +37,7 @@ import { shared, formatTime, type AccountRecord, type AccountsSnapshot, type Acc
 import { providerFeatures, type ProviderFeatures } from './accounts-features'
 import { t } from '../i18n'
 import { limiterHit } from './accounts-limiter-model'
+import { accountReloginText } from './accounts-authorization'
 
 // 能力表与插件申报的读取在 accounts-features.ts（那边的模块头说明了查询顺序）。
 // 这里转出去，是因为域层的既有调用点（`providerFeatures` 被 app.js / report.js /
@@ -145,15 +146,7 @@ export function providerSummaries(snapshot: AccountsSnapshot | null | undefined)
     if (known.has(id)) return
     known.set(id, { id, label: shared().wbProviders?.labelOf?.(id) || id, count })
   })
-  // 摘要还没到时的兜底项：名字优先问注册表，问不到才用字面量 —— 与
-  // add-provider-pick 那张卡的兜底同一口径（拆家后注册名带「国内版」）
-  if (!known.size) {
-    known.set(DEFAULT_PROVIDER_ID, {
-      id: DEFAULT_PROVIDER_ID,
-      label: shared().wbProviders?.labelOf?.(DEFAULT_PROVIDER_ID) || 'WorkBuddy 国内版',
-      count: 0,
-    })
-  }
+  // 首屏尚无摘要/账号时保持空表；不凭空创建未安装插件的提供商分组。
   return [...known.values()]
 }
 
@@ -300,32 +293,18 @@ export const TOKEN_PERIOD_MAX_SECONDS = 86_400
 /** 旧「余额不足处理」的缺省阈值（限制器上线后只作为旧记录的推导兜底） */
 export const DEFAULT_LOW_BALANCE_THRESHOLD = 1
 
-/** CodeArts 缺省 Token 规则的阈值：**每日** 950 万 Token（自然日 0 点重置）。
- * 不给满 1000 万：实际消耗停不到精确的额度上限，上游在 995 万左右就会开始
- * 报余额不足，压着 1000 万判定只会让请求撞报错，950 万是留足余量的判定线。 */
-export const DEFAULT_DAILY_TOKEN_LIMIT = 9_500_000
-
 /**
  * 各 provider 的**缺省限制规则**。查询顺序：**插件申报 → 内置表**。
  *
  * 插件申报优先（`AccountFeatures::default_limiters`）：这是「这一家的额度形态
  * 长什么样」的结论，属于 provider 知识。`undefined` = 插件没申报，走下面这张
  * 内置表（与后端 `limiter::default_rules` 同一口径）：
- * - **CodeArts → Token 自然日 950 万，跳过**：这家的余额读数常判不出
- *   （免费版账号没有积分类计量表，额度全在福利 token 池），余额规则形同虚设；
- *   「过了 0 点额度就回来」正是它的额度形态，按自然日 Token 判定才兜得住。
  * - **Cline 免费池 → 无规则**（原「不处理」缺省的理由不变）。
- * - **其余 → 余额 < 1 跳过**（历史缺省不变）。
+ * - **其余 → 总余额 < 1 跳过**。
  */
 export function defaultLimiters(provider: string | undefined | null): LimiterRule[] {
   const declared = provider ? providerFeatures(provider).defaultLimiters : undefined
-  if (declared) return declared.slice()
-  if (provider === 'codearts') {
-    return [{
-      type: 'token', action: 'skip', threshold: DEFAULT_DAILY_TOKEN_LIMIT,
-      reset: 'daily', enabled: true,
-    }]
-  }
+  if (declared && (provider !== 'codearts' || declared.every(rule => rule.type === 'balance'))) return declared.slice()
   if (provider === 'cline-free') return []
   return [{ type: 'balance', action: 'skip', threshold: DEFAULT_LOW_BALANCE_THRESHOLD, enabled: true }]
 }
@@ -370,7 +349,7 @@ function limiterRuleValid(rule: unknown): rule is LimiterRule {
 /**
  * 记录上没有 `limiters` 键（旧版后端 / 旧记录）时的推导：有显式 `lowBalance`
  * （用户 / 旧版配过）就原样尊重；两者都没有时按 provider 给缺省规则
- * （`defaultLimiters`，CodeArts 拿到的是 Token 自然日规则）。
+ * （`defaultLimiters`）。
  * 与后端 `limiter::derive_from_legacy` 同一口径。
  */
 function legacyRulesOf(account: AccountRecord | null | undefined): LimiterRule[] {
@@ -1285,16 +1264,11 @@ export type AccountTag = { text: string; kind: 'plain' | 'bad'; title: string }
  */
 export function accountTags(account: AccountRecord): AccountTag[] {
   return [
-    // 登录态被上游注销（issue #215）：refresh token 链已死，刷新不会再成功，
-    // 凭证维护也会跳过它 —— 只能重新登录。不标出来用户只会看到「刷新一直失败」。
-    // 放在最前面：它比下面任何一条都更该被看见（账号等于已经废了）。
     account.needsRelogin
       ? {
         text: t('需要重新登录'),
         kind: 'bad' as const,
-        title: account.needsReloginReason
-          ? t('{reason}。该账号的登录态已被上游注销，自动刷新不会再成功，请重新登录该账号', { reason: account.needsReloginReason })
-          : t('该账号的登录态已被上游注销，自动刷新不会再成功，请重新登录该账号'),
+        title: accountReloginText(account),
       }
       : null,
     // 没有转发能力的家：它的启用开关对转发没有意义，这里如实说明，而不是留一片空白
