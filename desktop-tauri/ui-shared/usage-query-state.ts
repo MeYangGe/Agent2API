@@ -38,7 +38,7 @@ export function mergeUsageQueryRow(row: UsageQueryRow, previous?: UsageQueryRow)
   return { ...row, usage: null, lastUsage, lastSuccessAt: lastUsage ? lastSuccessAt : 0 }
 }
 
-function usageAgeText(at: number, t: Translate, now: number): string {
+export function usageAgeText(at: number, t: Translate, now: number): string {
   const elapsed = Math.max(0, now - at)
   if (elapsed < 10_000) return t('刚刚更新')
   if (elapsed < 60_000) return t('{n} 秒前更新', { n: Math.floor(elapsed / 1000) })

@@ -52,6 +52,7 @@ import {
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
 import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
@@ -62,7 +63,7 @@ import {
   PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick,
   connectionsOf, getStore, groupSortRules, maskName, openBatchDialog, openGroupDialog, openSettingsDialog,
   poolError, proxyPoolSnapshot, queryUsageOnce, setAccountEnabled, setGroupEnabled,
-  tokenUsageOf, toggleGroupCollapsed, toggleNamesHidden, usageEntryOf, usageFailureOf, usageFailureStatusOf,
+  tokenUsageOf, toggleGroupCollapsed, toggleNamesHidden, usageEntryOf, usageFailureOf, usageFailureStatusOf, usageUpdatedAtOf,
 } from './accounts-data'
 import type { AccountGroup } from './accounts-domain'
 import { groupSortSummary } from './accounts-group-settings'
@@ -912,11 +913,17 @@ export function usagePool(entry: UsageEntry): { planName: string; text: string; 
   }
   // 套餐名优先取这个桶自己的（`wallet.planName`），退回账号级那份 ——
   // 桶认不出归属时（上游没给 plan_id）至少还有订阅里的名字可显示
-  const planName = String(lead.planName || subscription.planName || '')
+  const planName = String(lead.planName || subscription.planName || lead.displayName || '')
+  const remaining = numberOrNull(lead.balance)
+  const total = numberOrNull(lead.total)
   const percent = numberOrNull(lead.remainingPercent)
+    ?? (remaining !== null && total !== null && total > 0 ? remaining / total * 100 : null)
+  const text = remaining !== null && total !== null && total > 0
+    ? t('剩 {remaining} / {total}', { remaining: compactNumber(remaining), total: compactNumber(total) })
+    : t('可用 {value} {unit}', { value: numberText(lead.balance), unit: usageUnitLabel(String(lead.unit || ''), t) }).trim()
   return {
     planName,
-    text: String(lead.balanceView || numberText(lead.balance)),
+    text: String(lead.balanceView || text),
     percent: percent === null ? null : Math.max(0, Math.min(100, percent)),
   }
 }
@@ -978,23 +985,7 @@ type UsageFlatRow = {
   id?: string
 }
 
-/**
- * 余额格里的一条读数：**标签 …… 读数**一行，下面一条 3px 细线画剩余比例。
- *
- * ── 全站只有这一种形态 ────────────────────────────────────
- * 逐窗口读数（Antigravity 两组 × 两窗口、OpenCode Go 三窗口）共用一套形态。
- * 主额度桶也走这里。原先按 provider 分成两套 ——
- * 「背景色带 + 一行内读数」与「名称/读数一行 + 独立条」—— 同一类数据在
- * 表格里是两种长相，纵向扫读时对不上。
- *
- * ── 线比读数轻 ────────────────────────────────────────────
- * 轨道取 hairline（最淡的那条），条体取语义色（绿 / 黄 / 红），与右侧读数
- * 同源：**颜色说状态、长度说比例**，两者不会互相打架。线只有 3px ——
- * 满格时也不会像原先的背景色带那样铺成一块抢眼的亮色。
- *
- * `percent` 为 null 时只留空轨道、不画条：空轨道表示「上游没给比例」，
- * 0% 才是「用光了」，两者不能画成同一个样子。
- */
+/** 没有剩余比例时只显示读数，不用空轨道代替未知值。 */
 function UsageFlatRowView({ row }: { row: UsageFlatRow }) {
   const value = row.percentText || row.view
   return (
@@ -1004,133 +995,12 @@ function UsageFlatRowView({ row }: { row: UsageFlatRow }) {
         {row.win ? <span className='usage-meter-win'>{row.win}</span> : null}
         <span className='usage-meter-val'>{value}</span>
       </span>
-      <Meter value={row.percent} variant={row.over || row.tone === 'bad' ? 'destructive' : row.tone === 'ok' ? 'success' : row.tone === 'warn' ? 'warning' : 'muted'}
-        className='mt-[3px]' trackClassName='h-[3px]' aria-label={row.percent === null ? undefined : t('剩余 {percent}%', { percent: Math.round(row.percent) })} />
+      {row.percent !== null ? (
+        <Meter value={row.percent} variant={row.over || row.tone === 'bad' ? 'destructive' : row.tone === 'ok' ? 'success' : row.tone === 'warn' ? 'warning' : 'muted'}
+          className='mt-1' trackClassName='h-[3px]' aria-label={t('剩余 {percent}%', { percent: Math.round(row.percent) })} />
+      ) : null}
     </span>
   )
-}
-
-/**
- * 窗口码 → 界面短名。码由后端给（`window` 键），译文只在这里拼 —— 后端返回中文的
- * 话，非中文界面里会露出一串看不懂的汉字（与 `zcodePlanStateLabel` 同一条纪律：
- * 状态码由后端给、文案只在前端拼）。
- *
- * 复用**已有的**周期词键（`每日` / `每周` / `每月`，五种语言都有译文），不新造
- * 一套短词：同一件事在界面上只该有一种说法。`5h` 是纯 ASCII、各语言同形，因此
- * **不进词典**（它与「5 小时」是同一条窗口的两种写法：长名在悬停的全名里，短名
- * 只在这里）。认不出的码原样透出 —— 上游将来多一种窗口时，界面上看到的是那个码。
- */
-function windowCodeLabel(code: string): string {
-  switch (code.trim().toLowerCase()) {
-    case '5h': return '5h'
-    case 'weekly': return t('每周')
-    case 'monthly': return t('每月')
-    case 'daily': return t('每日')
-    default: return code.trim()
-  }
-}
-
-/**
- * 余额文档 → **逐窗口**读数（`windows[]` 形状），一个窗口一行平铺
- * （形状就是 [`UsageFlatRow`]）。
- *
- * ── 这一家的额度为什么必须逐窗口出 ──────────────────────────
- * 窗口型额度不是「一个池子剩多少」而是**几个窗口各自的剩余比例** —— 只报一个
- * 数字说不清「5 小时还剩着、每周已经用光」，而后者正是「这账号还能不能跑」的答案。
- * 于是后端除主读数外给出 `windows[]`，这里一窗一条。
- *
- * ── 两家的窗口共用这一种形态（紧凑背景条）───────────────────
- * 这一档**只有**窗口型额度（没有「一个池子剩多少」那种池子读数），所以形态可以
- * 统一：背景铺一条按比例的半透明色带，前景一行读完（短标签 + 百分比）。
- *   · **OpenCode Go**（3 条：5 小时 / 每周 / 每月）；
- *   · **Antigravity**（4 条：Gemini 与 Claude/GPT 各一份 5 小时 / 每周）。
- * 条数少也不退回「名称/读数一行 + 条一行」的老形态：同一形状两套渲染要各维护一份，
- * 而两者的信息量本来一模一样（标签、读数、比例），只是省了行高。
- *
- * ── 标签：三段各司其职，短名在格子里、全名在悬停 ─────────────
- * 132px 的内容盒（148 的列宽减去内边距）放不下「Claude/GPT · 每周」，于是拆成三段：
- *   · **组名**（`row.group`，专名原样）—— 可省略，同一家的几条共用一个组名；
- *   · **窗口码**（`row.window` → `windowCodeLabel`）—— 不吃压缩：同一组的两条
- *     唯一的差别就在这半段，把它一起省略会让「Gemini 5 小时」与「Gemini 每周」
- *     长得一模一样，用户分不出哪条是哪条；
- *   · **百分比** —— 同样不吃压缩。
- * 老后端 / 只给 `label` 的行照旧用 `label` 当组名（两条路都不缺词）；
- * 全名（`label`）与重置时刻一起进悬停提示。
- *
- * 缺失一律当「不知道」：`remainingPercent` 读不到时那一行**不画条**、读数是
- * 「—」（后端没给 `view` 时按比例补一句，比例也没有就留破折号）—— 一条空条与
- * 「这一窗口用光了」读起来一样，而它们是两件事。
- *
- * 语义色与 token 那两行同一口径：没读到灰；剩余 < 20%（含耗尽 0%）黄 ——
- * 这一列的红只留给查询失败，某个窗口用光还不是「这次没查到」。
- */
-export function usageWindows(entry: UsageEntry): UsageFlatRow[] {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
-  const data = entry as Record<string, unknown>
-  const rows = Array.isArray(data.windows) ? data.windows as Array<Record<string, unknown>> : []
-  const out: UsageFlatRow[] = []
-  for (const row of rows) {
-    if (!row || typeof row !== 'object') continue
-    // ── 名字拆成两段：组名（可省）+ 窗口码 ────────────────────────
-    // Antigravity 的行是「组 + 窗口」（`Gemini` / `Claude/GPT` × 5 小时 / 每周）：
-    // 内容盒放不下整串，而同组两条唯一的差别恰恰是窗口那半段 —— 整串一起省略会让
-    // 它们长得一模一样、分不出哪条是哪条。所以拆开：组名一段（可省略）、
-    // 窗口码一段（不吃压缩）。
-    // OpenCode 的行只有窗口、没有组，组名那段自然是空串 —— 于是它直接显示译好的
-    // 窗口名（`Weekly`），比原先直接用后端的中文 `label` 更贴界面语言。
-    // 老后端：两个码都没有时整串退回 `label`（路不缺词）。`label`（全名）始终进悬停。
-    const label = usageWindowLabel(row.label, t)
-    const group = String(row.group || '').trim()
-    const windowCode = String(row.window || '').trim()
-    const windowShort = windowCode ? windowCodeLabel(windowCode) : ''
-    const name = group || (windowShort ? '' : label)
-    if (!name && !windowShort) continue
-    const read = numberOrNull(row.remainingPercent)
-    // 条画的是**剩余**比例（与积分明细同向），越界一律夹回 0~100
-    const percent = read === null ? null : Math.max(0, Math.min(100, read))
-    const view = usageWindowView(row, t, numberText)
-    // 重置时刻：后端给毫秒（`resetsAt`），这里按界面语言拼一句进悬停 ——
-    // 复用已有的 `重置 {date}` 键（五种语言都有译文），不另造一句同义文案；
-    // 与弹层里那个「重置 {date}」同款，给不出时刻就整段不写
-    const resetsAt = numberOrNull(row.resetsAt)
-    const resetLine = resetsAt !== null && resetsAt > 0
-      ? t('重置 {date}', { date: formatTime(resetsAt) })
-      : ''
-    const displayPercent = percent !== null && row.remaining === undefined && row.limit === undefined
-      && row.unlimited !== true
-    out.push({
-      name,
-      win: windowShort,
-      view,
-      tone: row.unlimited === true ? 'ok' : percent === null ? 'muted' : percent < 20 ? 'warn' : 'ok',
-      percent,
-      over: false,
-      // 悬停：名字用**全名**（short 是给格子省地方的，悬停里要能看全），
-      // 后接读数与重置时刻（后者只有后端给了才算）
-      title: [label || [name, windowShort].filter(Boolean).join(' '), view, resetLine]
-        .filter(Boolean).join(' · '),
-      percentText: displayPercent ? `${Math.round(percent!)}%` : '',
-      id: String(row.key || '').trim() || name,
-    })
-  }
-  return out
-}
-
-/**
- * 逐窗口那一档的套餐徽标（`{text, free}`；读不到给 null）。
- *
- * 与 `usageDetailOf` 里的套餐徽标同源同形（都读 `subscription.planName`，文案走
- * `planBadgeLabel`、免费判据走 `isFreePlan`）—— 两处显示的是同一件事，措辞与
- * 配色必须一致，否则同一个账号在两档里会长得不一样。
- */
-function windowsPlan(entry: UsageEntry): { text: string; free: boolean } | null {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
-  const subscription = ((entry as Record<string, unknown>).subscription && typeof (entry as Record<string, unknown>).subscription === 'object'
-    ? (entry as Record<string, unknown>).subscription
-    : {}) as Record<string, unknown>
-  const name = String(subscription.planName || '').trim()
-  if (!name) return null
-  return { text: planBadgeLabel(name), free: isFreePlan(name) }
 }
 
 /** 明细弹层的数据形状（`usageDetailOf` 的产物） */
@@ -1362,42 +1232,17 @@ function UsageReadingCell({ account, entry }: { account: AccountRecord; entry: U
       title: summary.title,
     }
     : null
-  // ── 逐窗口读数：一格多条（`windows[]` 形状）──────────────────
-  // 两家用同一个形状、两种形态（判据在 `usageWindows`：条数 > 3 走紧凑背景条）：
-  // OpenCode Go 的三个用量窗口（沿用名称/读数 + 独立条的既有形态）与 Antigravity
-  // 的两组 × 两窗口（Gemini / Claude/GPT 各一份 5 小时与每周 —— 后端
-  // `antigravity::balance` 的 `wallets_of`）。判据与上面两处同一档（读数可用才画）：
-  // 这几条本身就在讲「还剩多少」，挂在一句错误下面会把错误装饰成一条可信的读数。
   const windows = summary.kind === 'ok' || summary.kind === 'warn' ? usageWindows(entry) : []
   if (windows.length) {
-    // 套餐徽标：这一档原来只有逐窗口读数，而 Antigravity 的订阅档（Pro / Ultra /
-    // Free）正是「这账号值多少」的一半 —— 后端在 `subscription.planName` 里给了，
-    // 显示形态与 `UsageDetailCell` 的徽标同一枚（`.plan-chip`，免费版走中性灰）
-    const plan = windowsPlan(entry)
-    const supplementary = usageSupplementReadingsOf(entry, t, numberText).filter(line => !line.startsWith(t('套餐 {name}', { name: '' })))
-    const warnings = usageWarningsOf(entry)
+    const detail = creditDetail ? (
+      <CreditDetailButton variant='sum' {...creditDetail}>{t('积分明细')}</CreditDetailButton>
+    ) : null
     return (
-      <span className='usage-cell' title={summary.title}>
-        {plan ? (
-          <span className='usage-plan'>
-            <Badge variant={plan.free ? 'secondary' : 'brand'} shape='tag' className={`plan-chip${plan.free ? ' free' : ''}`}>{plan.text}</Badge>
-          </span>
-        ) : null}
-        {creditDetail ? (
-          <CreditDetailButton variant='pool' {...creditDetail}>
-            {windows.map(row => <UsageFlatRowView key={row.id || row.name} row={row} />)}
-          </CreditDetailButton>
-        ) : windows.map(row => <UsageFlatRowView key={row.id || row.name} row={row} />)}
-        {supplementary.length || warnings.length ? (
-          <span className='usage-notes'>
-            {supplementary.map(line => <span key={line} className='usage-note' title={line}>{line}</span>)}
-            {warnings.map(line => <span key={line} className='usage-note warn' title={t(line)}>{t(line)}</span>)}
-          </span>
-        ) : null}
+      <UsageWindowsCell entry={entry} rows={windows} updatedAt={usageUpdatedAtOf(account)} creditDetail={detail}>
         {blockedBadge}
         {pendingBadge}
         {tokenSub}
-      </span>
+      </UsageWindowsCell>
     )
   }
   if (supportsUsageDetail(account)) {

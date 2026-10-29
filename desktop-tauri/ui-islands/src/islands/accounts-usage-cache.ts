@@ -68,6 +68,12 @@ export function usageEntryOf(account: AccountRecord): UsageEntry {
   return (row?.at || 0) >= changedAt ? entry : row?.lastUsage ?? undefined
 }
 
+export function usageUpdatedAtOf(account: AccountRecord): number {
+  const row = queryRows.get(account.id)
+  const at = row?.lastSuccessAt ?? 0
+  return Number.isFinite(at) && at > 0 && at <= 8.64e15 ? at : 0
+}
+
 export function usageFailureStatusOf(account: AccountRecord): { text: string; detail: string } | null {
   const failure = usageFailureOf(usageEntryOf(account))
   if (!failure || failure.notConfigured) return null

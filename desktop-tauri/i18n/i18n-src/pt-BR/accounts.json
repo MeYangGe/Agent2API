@@ -1,4 +1,11 @@
 {
+  "重置详情": "Detalhes da renovação",
+  "窗口重置时间": "Renovação de cada janela",
+  "未返回重置时间": "Horário de renovação indisponível",
+  "各窗口独立限制请求，不相加为总余额。": "Cada janela limita as solicitações de forma independente; elas não somam um saldo total.",
+  "部分窗口偏低": "Algumas cotas estão baixas",
+  "部分读数未知": "Algumas leituras são desconhecidas",
+  "额度充足": "Cota disponível",
   "更新失败": "Falha ao atualizar",
   "刚刚更新": "Atualizado agora",
   "{n} 秒前更新": "Atualizado há {n} segundos",

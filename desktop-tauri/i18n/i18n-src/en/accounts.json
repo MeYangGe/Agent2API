@@ -1,4 +1,11 @@
 {
+  "重置详情": "Reset details",
+  "窗口重置时间": "Window reset times",
+  "未返回重置时间": "Reset time unavailable",
+  "各窗口独立限制请求，不相加为总余额。": "Each window limits requests independently; they do not add up to a total balance.",
+  "部分窗口偏低": "Some windows are low",
+  "部分读数未知": "Some readings are unknown",
+  "额度充足": "Quota available",
   "更新失败": "Update failed",
   "刚刚更新": "Updated just now",
   "{n} 秒前更新": "Updated {n} seconds ago",

@@ -8,7 +8,7 @@ import { adoptAccountSorting, refreshAccountSorting } from './accounts-sort'
 import { NOT_CONFIGURED_CODE, putUsage, putUsageRow, usageEntries, usageEntryOf, usageFailureOf } from './accounts-usage-cache'
 import { t } from '../i18n'
 
-export { NOT_CONFIGURED_CODE, pruneUsageCache, usageEntries, usageEntryOf, usageFailureOf, usageFailureStatusOf } from './accounts-usage-cache'
+export { NOT_CONFIGURED_CODE, pruneUsageCache, usageEntries, usageEntryOf, usageFailureOf, usageFailureStatusOf, usageUpdatedAtOf } from './accounts-usage-cache'
 
 const tokenUsageMap = new Map<string, TokenReading[]>()
 let lastTokenAt = 0

@@ -11,8 +11,8 @@
    只有它该参与伸缩 —— 所以它是**唯一**的弹性列：本文件不写它的宽度，
    accounts-columns.ts 也不给它 inline width（见那份文件的 FLEX_COLUMNS）。
 
-   预算：九个固定列合计 1081px
-   （47 + 84 + 186 + 56 + 80 + 148 + 132 + 148 + 200，逐列见下方声明）。
+   预算：九个固定列合计 1241px
+   （47 + 84 + 186 + 56 + 80 + 148 + 132 + 308 + 200，逐列见下方声明）。
    默认窗口 1060px 时列表可用宽度约 791px，也就是说**默认窗口下这张表横向滚动**，
    账号列被压到它的下限而不是「剩余宽度」。这是有意的：
    表格**不压缩列宽**（见下），宁可横滚也不把行内按钮折成两行、
@@ -201,19 +201,8 @@
 /* 有效期列 132：双凭证（仅 CodeArts）要同排放「Refresh Token · 317 天后」，
    单凭证的家仍是一行读数，多出的空间由居中排布吸收。 */
 .cell-expiry { width: 132px; }
-/* 余额列：主额度桶的两行形态（套餐名 + 进度条与读数）需要比纯读数宽一档 ——
-   84px 放不下「ZCode Trust Build」+「8800万 / 1亿 token」，套餐名会被省略成
-   「ZCode Tr…」而失去意义。132 与优先级列同档，是「一行塞得下套餐名」的最小值。
-   读数更长的家（可用 4300 积分）仍按省略号收口、完整值在 title 里。
-
-   **本轮 132 → 148**（逐窗口那一档当时改成紧凑背景条，现已统一为 `.usage-meter`）：
-   那一档最宽的一行是 Antigravity 的「Claude/GPT 每周 100%」——三段合计约 111px
-   （组名 55 + 窗口 20 + 读数 26 + 两处 5px 间距），而 132 的内容盒只有
-   132 − 16（td 内边距）= 116px，组名会被砍成「Claude/GP…」。
-   而「Claude/GPT」正是这个功能要让人看见的那一组（issue #288），砍掉它就白做了。
-   148 的内容盒 132px 恰好留出余量；代价是固定列合计 1013 → 1029、
-   横滚线 1313 → 1329（16px，与这份文件「宁可横滚也不压列」的口径一致）。 */
-.cell-usage { width: 148px; }
+/* 余额列供模型组与三个额度窗口并排，拖窄后纵向显示；主额度桶保持紧凑宽度。 */
+.cell-usage { width: 308px; }
 /* 操作列：四颗按钮的最坏情况（签到 / 已签到 / 余额 / 设置 / ⋯ 里同时出现的那四颗），
    本次改造从 250 收到 200 —— 理由见文件头的列宽预算。
    这个值是**量出来的**，不是估的：按 11.5px 字号、每颗按钮左右各 8px 内边距、
@@ -693,21 +682,14 @@ body.queue-dragging * { cursor: grabbing; }
    与 `#toast.warn` / `.badge.warn` 同一语义。 */
 .usage-sum.warn { color: var(--warn); font-weight: 600; }
 
-/* ─── 余额列：统一读数形态（`.usage-meter`）───────────────────────
-   一条读数 = 「标签 …… 读数」一行 + 下面一条 3px 细线。
-   **全站余额读数只有这一种形态**：逐窗口读数（Antigravity 两组 × 两窗口、
-   OpenCode Go 三窗口）、CodeArts 的 token 池、主额度桶（ZCode / Trae）。
-   原先按 provider 分成两套（背景色带 / 名称+独立条），同一类数据在表格里
-   是两种长相，纵向扫读时对不上。
-
-   线的口径：
-     · 高度 3px、圆头 —— 比读数轻，满格时不会铺成一块抢眼的亮色；
-     · 轨道取 hairline（全站最淡的那条），条体取语义色（绿 / 黄 / 红）；
-     · 画的是**剩余**比例，与右侧读数同向（条长 = 还剩多少）；
-     · `percent` 为 null 时只留空轨道、不画条 —— 空轨道 = 上游没给比例，
-       0% = 用光了，两者不能画成同一个样子。 */
+/* ─── 主额度桶读数：标签、余量与剩余细线 ───
+   窗口型额度使用独立的分组布局，不再重复钱包摘要。
+   未知比例不画轨道；已知耗尽仍显示 0% 的轨道。 */
 .usage-meter {
   display: block;
+  width: 100%;
+  max-width: 240px;
+  margin-inline: auto;
   min-width: 0;
   font-variant-numeric: tabular-nums;
 }
@@ -719,8 +701,9 @@ body.queue-dragging * { cursor: grabbing; }
 .usage-meter-head {
   display: flex;
   align-items: baseline;
-  gap: 5px;
+  gap: 8px;
   min-width: 0;
+  line-height: 1.4;
 }
 
 /* 组名：可省略（同一家的几条共用一个组名时只写一次） */
@@ -730,8 +713,8 @@ body.queue-dragging * { cursor: grabbing; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
-  color: var(--text-3);
+  font-size: 11px;
+  color: var(--text-2);
 }
 
 /* 窗口码：不吃压缩 —— 同一组下几条唯一的差别就在这半段 */
@@ -742,12 +725,15 @@ body.queue-dragging * { cursor: grabbing; }
   white-space: nowrap;
 }
 
-/* 读数：恒贴右缘（没有组名的那一档全靠它撑起宽度） */
+/* 读数靠右，长值省略；完整读数保留在悬停说明中。 */
 .usage-meter-val {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   margin-left: auto;
-  font-size: 10.5px;
-  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  font-weight: 600;
   white-space: nowrap;
   text-align: right;
 }
