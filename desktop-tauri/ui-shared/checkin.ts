@@ -90,8 +90,13 @@ export type ScheduleProviderRow = {
   id: string
   label: string
   time: string
+  timeEnd?: string
   builtin: string | null
   firedToday: boolean
+  accountCount?: number
+  attemptedCount?: number
+  pendingCount?: number
+  nextAccountAt?: number | null
   /** 到点了但还没跑（`false` 且 `firedToday=false` = 在等窗口） */
   overdue?: boolean
 }
@@ -102,6 +107,8 @@ export type ScheduleEntry = {
   displayLabel: string
   enabled: boolean
   time: string
+  /** 随机签到区间的结束时刻，与 time 同属北京时间当天 */
+  timeEnd?: string
   providers: string[]
   /** 逐家的时刻覆盖（`{providerId: "HH:MM"}`；空串 = 撤销覆盖） */
   providerTimes: Record<string, string>
@@ -109,7 +116,7 @@ export type ScheduleEntry = {
   providerRows: ScheduleProviderRow[]
   /** 补签轮时刻（空串 = 关掉补签轮） */
   retryTime: string
-  /** 逐家的补签时刻（主轮时刻 + 重试间隔，不早于 retryTime） */
+  /** 逐家的补签时刻（主签到区间结束 + 等待间隔，不早于 retryTime） */
   providerRetryTimes?: Record<string, string>
   /** 中性未领取的重试间隔（分钟；0 = 不重试） */
   retryGapMinutes: number
@@ -121,6 +128,12 @@ export type ScheduleEntry = {
   pendingProviders: string[]
   /** 中性未领取、等窗口重试的账号数 */
   retryCount: number
+  /**
+   * 今天重试次数已用完的账号 id（后端按 `retryLimit` 记账算出来的）。
+   * 这些账号已经从 `retryCount` 里摘掉了，界面必须单独说一句
+   * 「今天不再重试」，否则数字归零看起来像「没事了」。
+   */
+  retryExhausted?: string[]
   nextRunAt: number | null
   lastResult: CheckinResult | null
 }
@@ -223,6 +236,7 @@ export type HistoryRow = {
 }
 
 export type RecordRow = {
+  rowId?: number
   ts: number
   date?: string
   accountId?: string

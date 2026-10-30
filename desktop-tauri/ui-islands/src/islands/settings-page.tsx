@@ -61,10 +61,8 @@ import {
   cancelLanRegister,
   clearDegrade,
   closePasswordDialog,
-  confirmDbRestore,
   dropLastRetryCode,
   exportAccounts,
-  exportDatabase,
   importAccounts,
   load,
   openPasswordDialog,
@@ -92,7 +90,6 @@ import {
   renderSanitize,
   renderSettings,
   renderStorage,
-  resolveDbBackupConfirm,
   resolveLanConfirm,
   resolveRetentionConfirm,
   restoreCategory,
@@ -118,7 +115,6 @@ import {
   showCategory,
   submitLanRegister,
   submitPasswordChange,
-  toggleDbIncludeLogs,
   toggleLan,
   toggleLanPanel,
   useSettings,
@@ -149,6 +145,7 @@ import {
 // 与设置页的快照 store 没有交集，见该文件的模块头
 import { CloudSyncPanel } from './settings-cloud-sync'
 import { DbRestoreDialog } from './settings-db-restore'
+import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-backup'
 import { SanitizePanel } from './settings-sanitize'
 // 侧边栏菜单面板（设置 → 显示）：显隐 / 顺序 / 分组。布局模型在
 // ui/sidebar-layout.js（经典脚本，主侧边栏渲染与这里共用同一份），见该文件的模块头
@@ -1838,65 +1835,7 @@ function DataPane({ snap }: { snap: SettingsSnapshot }) {
           云同步更常用，放上面。 */}
       <CloudSyncPanel />
 
-      {/* 整库备份 / 恢复：桌面端与网页端（含 Docker）都渲染 —— 桌面壳走系统
-          文件对话框，网页端走浏览器下载 / 上传，桥两侧的返回值同形（见
-          web_shim.rs 的 exportDatabase / importDatabase）。
-          排在「账号导入 / 导出」之前 —— 恢复是整库替换，两种语义别让用户混着看 */}
-      <Card render={<section />} className='panel'>
-        <PanelHead
-          title={t('整库备份 / 恢复')}
-          tip={TIPS.backup}
-          actions={
-            <>
-              <Button
-                id='btn-settings-db-export'
-                variant='outline'
-                disabled={io === 'dbExport' || io === 'dbImport'}
-                onClick={() => void exportDatabase()}
-              >
-                {io === 'dbExport' ? t('备份中…') : t('备份整库')}
-              </Button>
-              <Button
-                id='btn-settings-db-restore'
-                variant='destructive'
-                disabled={io === 'dbExport' || io === 'dbImport'}
-                onClick={() => confirmDbRestore()}
-              >
-                {io === 'dbImport' ? t('恢复中…') : t('恢复整库')}
-              </Button>
-            </>
-          }
-        />
-        <CardContent className='panel-body'>
-          {/* 恢复后的密钥警告（后端 warning 原文，密钥对不上时导入后账号解不开）：
-              排在面板最前 —— 用户刚点完标题栏的「恢复整库」，视线就在这片区域，
-              这条警告必须第一眼看到；而且它**常驻**，不像 toast 那样几秒后消失。
-              呈现沿用本页既有的 .danger-zone 警示框（与下面那条备份说明同款），
-              不自造组件；文案是服务端生成的数据，原样显示、不翻译 */}
-          {snap.dbWarning ? (
-            <Alert variant='destructive' className='danger-zone' id='settings-db-warning'>
-              <strong>{t('⚠️ 密钥警告')}</strong>
-              <br />
-              {snap.dbWarning}
-            </Alert>
-          ) : null}
-          <div className='retention-row'>
-            <Label htmlFor='settings-db-include-logs'>{t('包含日志与调试报文')}</Label>
-            <Switch
-              id='settings-db-include-logs'
-              checked={snap.dbIncludeLogs}
-              disabled={io !== null}
-              onCheckedChange={toggleDbIncludeLogs}
-            />
-            <div className='hint'>
-              {t('取消勾选后只备份业务数据（账号、配置与余额记录），文件显著变小；事件日志、请求统计与调试报文不会进备份文件。')}
-            </div>
-          </div>
-          <Alert variant='destructive' className='danger-zone'>
-            <strong>{NOTES.backupDanger}</strong>
-          </Alert>
-        </CardContent>
-      </Card>
+      <DatabaseBackupPanel />
 
       <Card render={<section />} className='panel'>
         <PanelHead
@@ -1997,7 +1936,8 @@ function DataPane({ snap }: { snap: SettingsSnapshot }) {
             <StorageCount label={t('事件日志')} value={count(storage.logs)} />
             <StorageCount label={t('请求记录')} value={count(storage.requests)} />
             <StorageCount label={t('报表天数')} value={count(storage.dailyDays)} />
-            <StorageCount label={t('调试报文')} value={count(storage.debug)} />
+            <StorageCount label={t('上游调试报文')} value={count(storage.upstreamRaw)} />
+            <StorageCount label={t('下游正文')} value={count(storage.downstreamRaw)} />
           </div>
           <div className='hint retention-note'>{NOTES.storage}</div>
         </CardContent>
@@ -2241,44 +2181,6 @@ function PasswordDialog({ password }: { password: { busy: boolean; error: string
           </Button>
           <Button onClick={submit} disabled={busy || mismatch || !oldValue || !newValue || !repeat}>
             {busy ? t('正在修改…') : t('修改密码')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/**
- * 「恢复整库备份」的确认弹窗（骨架照 RetentionConfirmDialog）。
- *
- * 恢复是**替换**语义：本机的账号、配置、日志、面板登录态会整体换成备份文件
- * 的状态。焦点落在「取消」—— 危险操作敲回车不该等于同意（与保留期确认同一
- * 取向）；确认后才弹系统文件框（壳侧 import_database）。
- */
-function DbBackupConfirmDialog({ confirm }: { confirm: { includeLogs: boolean } | null }) {
-  const cancelRef = React.useRef<HTMLButtonElement | null>(null)
-
-  return (
-    <Dialog open={confirm !== null} onOpenChange={next => { if (!next) resolveDbBackupConfirm(false) }}>
-      <DialogContent className='w-[min(440px,calc(100vw-48px))]' initialFocus={cancelRef}>
-        <DialogHeader>
-          <DialogTitle>{t('恢复整库备份')}</DialogTitle>
-        </DialogHeader>
-        <DialogBody>
-          <Alert variant='destructive' className='danger-zone'>
-            {t('本机的全部数据（账号、网关配置、日志统计与桌面设置）将被所选备份文件')}
-            <strong>{t('整体替换')}</strong>{t('，包括恢复后需要重新登录管理面板。')}
-            <br />
-            <strong>{t('替换前会自动把当前数据备份到配置目录的 backups/ 文件夹。')}</strong>{t('确定继续？')}
-          </Alert>
-        </DialogBody>
-        <DialogFooter>
-          <div className='mr-auto' />
-          <Button ref={cancelRef} variant='outline' onClick={() => resolveDbBackupConfirm(false)}>
-            {t('取消')}
-          </Button>
-          <Button variant='destructive' onClick={() => resolveDbBackupConfirm(true)}>
-            {t('选择备份文件并恢复')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -2533,7 +2435,7 @@ function SettingsPage() {
       </div>
 
       <RetentionConfirmDialog confirm={snap.retentionConfirm} />
-      <DbBackupConfirmDialog confirm={snap.dbBackupConfirm} />
+      <DatabaseBackupDialogs />
       {/* 恢复进度弹窗：**不可关闭**，直到恢复收口（见该文件的说明） */}
       <DbRestoreDialog />
       <PasswordDialog password={snap.account.password} />

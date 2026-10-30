@@ -1,8 +1,8 @@
 /* ─────────────────────────────────────────────
    签到中心页（page-checkin.css）
 
-   页内三个标签页（SegmentedControl 切换）：签到中心（总览卡 + 三块任务面板）、
-   定时签到（总开关 + 条目列表 + 保活模型链）、签到记录（每账号明细表）。
+   页内四个标签页：签到中心、定时签到、定时补签、签到记录。
+   定时签到与定时补签的页面布局在 page-checkin-schedule.css 中维护。
    页面骨架类名全部以 .ck- 前缀自持；控件（Badge / Button / Checkbox / Input /
    Progress / SegmentedControl / Select / Spinner / Switch / Pager）来自组件库，
    不在这里画。
@@ -362,29 +362,39 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 .ck-range-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ck-mini-warn { margin-top: 6px; font-size: 11.5px; color: var(--warn); }
 
-/* ── 签到记录：明细表 ──
-   筛选条本身定义在文件末尾的页面骨架那一段（`.ck-filters`），这里只管表。 */
-.ck-records-scroll { overflow-x: auto; }
+/* ── 签到记录：明细表 ── */
+.page.active[data-page="checkin"]:has(.ck-page-records) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: var(--pad);
+}
+.ck-page-records,
+.ck-page-records > .ck-records-main,
+.ck-records-main > .ck-records-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.ck-page-records > .ck-tabs,
+.ck-records-panel > .panel-head,
+.ck-records-panel > .ck-filters,
+.ck-records-panel > .ck-fold-note,
+.ck-records-panel > .panel-foot { flex: none; }
+.ck-records-scroll { flex: 1; min-height: 0; overflow: auto; }
 
-/* 列宽。table-layout: fixed 下按 colgroup 分配：时间列是**定宽 px**（它装的是
-   formatTime 的完整输出，宽窄窗口都要一行放下），其余五列按百分数吃掉剩余宽度
-   （合计 100%）。没拖过的列走这里的默认值；拖过的列由 table-columns.js 把覆盖
-   宽度写成 <col> 的 inline width，优先于这里的默认值。改默认列宽时与
-   checkin-records-tab.tsx 的 RECORD_COLUMNS 一起看（那边是列的集合与顺序） */
-.ck-records-table { table-layout: fixed; }
+.ck-records-table { table-layout: fixed; overflow: visible; }
 .ck-records-table col.ck-col-time { width: 160px; }
 .ck-records-table col.ck-col-account { width: 18%; }
 .ck-records-table col.ck-col-provider { width: 10%; }
 .ck-records-table col.ck-col-source { width: 11%; }
 .ck-records-table col.ck-col-outcome { width: 13%; }
 .ck-records-table col.ck-col-detail { width: 48%; }
-/* 表头格是列宽把手的定位锚（.col-grip 绝对定位挂在它的右缘，见 components.css） */
-.ck-records-table thead th { position: relative; }
-/* 内容超出列宽就裁掉，不压到相邻列上：列宽可以拖，要看全就把这一列拖宽
-   （定宽列与弹性列的取舍口径见 table-columns.js 的模块头） */
-.ck-records-table td { overflow: hidden; }
-/* 时间列定宽：时间与北京日期两行都不换行 */
-.ck-records-table .ck-col-time { white-space: nowrap; }
+.ck-records-table thead th { position: sticky; top: 0; }
+.ck-records-table td { overflow: hidden; overflow-wrap: anywhere; }
+.ck-records-table .ck-record-time { white-space: nowrap; }
 .ck-record-date {
   display: block;
   font-size: 11px;
@@ -544,15 +554,6 @@ body.ck-chain-dragging { cursor: grabbing; user-select: none; }
 }
 .ck-filters > * { flex-shrink: 0; }
 .ck-filters-count { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
-.ck-pager {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 10px;
-  border-top: 1px solid var(--hairline);
-}
-.ck-pager-label { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
 /* ── 空态 ── */
 .ck-empty-state {

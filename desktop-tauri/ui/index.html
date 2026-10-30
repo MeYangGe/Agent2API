@@ -16,45 +16,6 @@
   <link rel="icon" type="image/png" href="assets/app-icon-192.png">
   <title data-i18n="Agent2API · 多提供商本地网关">Agent2API · 多提供商本地网关</title>
   <script>
-    // ── 桌面端的面板登录守卫 ──────────────────────────────────
-    // 只有「注册过管理员」之后才需要登录（未注册 = 桌面当正常软件用，免登录）。
-    // 判据与网页端 `panel_boot_redirect` 同源（服务端判的是浏览器导航），但桌面
-    // 窗口的页面来自 tauri://，服务端看不到这次导航，只能在页面侧拦。
-    //
-    // 为什么要先藏一下：判断要问壳（异步），而页面主体一旦开始渲染，注册过管理员
-    // 的用户会先看到整块界面再被跳走。`data-auth-pending` 由下面的首屏样式隐藏，
-    // 判定完成后移除 —— 最坏情况是几十毫秒空白，而不是闪一屏主界面。
-    (function () {
-      var desktop = window.workbuddyDesktop;
-      if (!desktop || desktop.platform === 'web'
-        || typeof desktop.panelSessionStatus !== 'function') return;
-      document.documentElement.dataset.authPending = '1';
-      var pending = desktop.panelSessionStatus();
-      function reveal() {
-        delete document.documentElement.dataset.authPending;
-      }
-      // 后端冷启动可能较慢；等待登录判定时仍须展示窗口和端口排障入口。
-      var watchdog = window.setTimeout(reveal, 1500);
-      pending.then(function (state) {
-        window.clearTimeout(watchdog);
-        if (state && state.registered && !state.authenticated) {
-          // replace 而不是 assign：登录页不该出现在「后退」栈里
-          window.location.replace('login.html');
-          return;
-        }
-        reveal();
-      }).catch(function () {
-        window.clearTimeout(watchdog);
-        reveal();
-      });
-    })();
-  </script>
-  <style>
-    /* 登录守卫生效期间藏住首屏（见上面那段脚本）。放在 head 里而不是外链 CSS：
-       要在 CSS 解析前就命中，否则首屏仍会闪一下。 */
-    html[data-auth-pending] body { visibility: hidden; }
-  </style>
-  <script>
     // 与主题持久化配合：在 CSS 解析前先贴上 data-theme，避免深色模式首屏闪烁
     (() => {
       const mode = localStorage.getItem('workbuddy-desktop-theme') || 'system';

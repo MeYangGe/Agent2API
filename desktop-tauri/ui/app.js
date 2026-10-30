@@ -401,10 +401,8 @@ function clearPluginPage() {
  * 索取时手上只有 `event.source`，那正是它的 contentWindow。
  *
  * ── 为什么复用 `directCredentials` ─────────────────────────
- * 它已经处理了两端的差别：桌面壳给第一把 Key、网页面板给 `x-panel-token` +
- * `Authorization`，未注册管理员的部署给用户输入的网关 Key。插件页面要的正是
- * 「能调管理 API 的那组头」，与助手页直连网关用的是同一份（见 bridge.rs 的
- * 同名方法说明）。为插件页另开一条「取令牌」的桥会让这套判定长出第二份。
+ * 它已经处理了两端的差别：桌面壳给本机短效会话，网页面板给自己的登录凭证。
+ * 插件页面要的是管理 API 的凭证，不是模型调用的 Key。
  *
  * 读不到时什么都不做 —— 插件页面自己会退化成「只用同源 cookie」。
  */
@@ -571,6 +569,7 @@ function showPage(name, { persist = true } = {}) {
   // 网络代理页自持清单（代理池），切进去时拉一次最新：别的窗口 / 别的页面
   // （账号弹窗里改过引用）都可能让它变过。面板内部保证「这次刷新一定落地」
   if (page === 'proxies') {
+    window.wbProxiesPanel?.activate?.();
     void window.wbProxiesPanel?.load?.();
   }
   // 切到账号页时立刻补一次连接数：那条 2 秒轮询只在「当时就在账号页」时才发请求，
@@ -1346,6 +1345,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (currentPage === 'accounts') void window.wbAccountsView?.refreshList?.();
   void window.wbAccountsView?.syncBalancesSnapshot?.();
+  if (api.platform !== 'web') {
+    const frame = pluginPageHost()?.querySelector('iframe');
+    if (frame) void pushPanelToken(frame.contentWindow);
+  }
 });
 
 // 定时轮询：限额标记（429 + 恢复时间）与账号状态变化自动刷新；窗口隐藏时暂停
@@ -1368,6 +1371,11 @@ setInterval(() => {
   // localStorage 不通）刚改过布局时，这一端最迟在这一轮跟上。
   // 内容没变时 `syncFromServer` 自己早退，不会重画（重画会打断正在拖动的项）。
   void window.wbSidebarLayout?.syncFromServer?.();
+  // 插件页缓存着管理凭证，桌面会话提前续期后要把新值递进去。
+  if (api.platform !== 'web') {
+    const frame = pluginPageHost()?.querySelector('iframe');
+    if (frame) void pushPanelToken(frame.contentWindow);
+  }
 }, 20_000);
 
 // 「软件版本检查」结果的轮询：读**后端缓存**，不自己打 GitHub。

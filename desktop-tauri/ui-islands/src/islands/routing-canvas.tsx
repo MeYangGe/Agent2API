@@ -4,13 +4,13 @@ import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import { inactiveProvider, orderedProviders } from './routing-display'
 import { PROVIDER_ICONS } from './add-provider-pick'
-import { groupSortSummary } from './accounts-group-settings'
+import { groupSortSummary, manualOrderBlockedMessage } from './accounts-group-settings'
 import {
-  accountOrder, accountOrderLocked, cloneProfile, moveAccount, moveProvider, patch, saveProfile,
+  accountOrder, accountOrderLocked, accountOrderRules, cloneProfile, moveAccount, moveProvider, patch, saveProfile,
   setAllProvidersExpanded, setProviderExpanded, snapshot,
 } from './routing-state'
 import { formatDuration, IconButton, ProviderRouteBadge, RouteIcon, RouteStateBadge, stickyLabel, strategyLabel } from './routing-ui'
-import { host, type RouteEntry, type RoutingWorkspace } from './routing-types'
+import { host, notify, type RouteEntry, type RoutingWorkspace } from './routing-types'
 
 function ProviderMark({ id, label }: { id: string; label: string }) {
   return PROVIDER_ICONS[id]
@@ -102,6 +102,10 @@ function useRoutingDrag() {
       setDragging('')
       setDrop(null)
       if (event.type === 'pointercancel' || !drag.active || !drag.target || snapshot().busy) return
+      if (drag.kind === 'account' && accountOrderLocked(drag.provider)) {
+        notify(manualOrderBlockedMessage(accountOrderRules(drag.provider)), 'err')
+        return
+      }
       const profile = cloneProfile()
       const ids = drag.kind === 'account' ? profile.accountOrder[drag.provider] : profile.providers
       if (!ids) return
@@ -120,8 +124,13 @@ function useRoutingDrag() {
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end) }
   }, [])
   const start = (event: React.PointerEvent, kind: Drag['kind'], provider: string, id: string) => {
-    if (event.button !== 0 || snapshot().busy || snapshot().search.trim()
-      || kind === 'account' && accountOrderLocked(provider)) return
+    if (event.button !== 0 || snapshot().busy) return
+    if (kind === 'account' && accountOrderLocked(provider)) {
+      event.preventDefault()
+      notify(manualOrderBlockedMessage(accountOrderRules(provider)), 'err')
+      return
+    }
+    if (snapshot().search.trim()) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
     const workspace = snapshot().workspace
@@ -159,6 +168,7 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
   }
   const query = search.trim().toLocaleLowerCase()
   const groupedProviders = orderedProviders(workspace)
+  const activeProviderRanks = new Map(groupedProviders.active.map((provider, index) => [provider, index + 1]))
   const providers = [...groupedProviders.active, ...groupedProviders.inactive].filter(id => {
     if (!query || id.toLocaleLowerCase().includes(query)) return true
     const provider = workspace.providers.find(provider => provider.id === id)
@@ -213,9 +223,10 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
           const displayGroup = inactive ? visibleInactive : visibleActive
           const providerIndex = displayGroup.indexOf(provider)
           const ids = accountOrder(provider).filter(id => accounts.has(id))
-          const orderLocked = accountOrderLocked(provider)
-          const rank = workspace.model && workspace.customized ? profile.providers.indexOf(provider) + 1
-            : workspace.sorting.providerOrder.indexOf(provider) + 1
+          const orderRules = accountOrderRules(provider)
+          const orderLocked = orderRules.length > 0
+          const orderLockMessage = orderLocked ? manualOrderBlockedMessage(orderRules) : ''
+          const rank = activeProviderRanks.get(provider)
           const effectiveRank = providerRanks.get(provider)
           const accountStates = ids.map(id => {
             const account = accounts.get(id)!
@@ -244,8 +255,8 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
                 onPointerDown={event => drag.start(event, 'provider', provider, provider)}><RouteIcon name='gripVertical' size={14} /></Button>
               <CollapsibleTrigger className='routing-provider-toggle' title={expanded ? t('折叠这一组') : t('展开这一组')}>
                 <ProviderMark id={provider} label={label} /><span className='routing-provider-name'><b>{label}</b><span>{t('{n} 个账号', { n: ids.length })} · {t('{n} 个请求', { n: running })}</span></span>
-                <ProviderRouteBadge rank={rank > 0 ? rank : undefined} effectiveRank={effectiveRank} unavailable={unavailable} disabled={disabled} states={accountStates} />
-                {orderLocked ? <Badge shape='tag' variant='secondary' title={t('与账号页共用全局消耗规则')}>{groupSortSummary(workspace.sorting.rules[provider] || [])}</Badge> : null}
+                <ProviderRouteBadge rank={rank} effectiveRank={effectiveRank} unavailable={unavailable} disabled={disabled} states={accountStates} />
+                {orderLocked ? <Badge shape='tag' variant='secondary' title={orderLockMessage}>{groupSortSummary(orderRules)}</Badge> : null}
                 <RouteIcon name='chevronDown' size={14} />
               </CollapsibleTrigger>
               <IconButton name='arrowUp' title={t('提高优先级')} disabled={busy || providerIndex === 0 || !!query} onClick={() => void moveProvider(provider, -1)} />
@@ -267,7 +278,9 @@ export function RoutingCanvas({ workspace, search, zoom, selected, onAccount, on
                 const name = displayNameOf(account)
                 return <React.Fragment key={id}>{account.enabled === false && id === disabledIds[0] ? disabledToggle : null}<div className={cn('routing-account-row', picked && 'is-picked', disabled && 'is-muted', drag.dragging === id && 'is-dragging', drag.drop?.id === id && (drag.drop.after ? 'drop-after' : 'drop-before'))}
                   data-routing-account={id} data-provider={provider} data-account-disabled={account.enabled === false} title={entry?.reason}>
-                  <Button variant='ghost' size='icon' className='routing-grip' disabled={busy || !!query || orderLocked} aria-label={t('拖动调整账号顺序')} title={orderLocked ? t('自动消耗排序已启用，请先关闭规则再手动调整') : t('拖动调整账号顺序')}
+                  <Button variant='ghost' size='icon' className={cn('routing-grip', orderLocked && 'is-locked')} disabled={busy || (!!query && !orderLocked)}
+                    aria-disabled={orderLocked || undefined} aria-label={t('拖动调整账号顺序')} title={orderLockMessage || t('拖动调整账号顺序')}
+                    onClick={event => { if (orderLocked && event.detail === 0) notify(orderLockMessage, 'err') }}
                     onPointerDown={event => drag.start(event, 'account', provider, id)}><RouteIcon name='gripVertical' size={14} /></Button>
                   <span className='routing-account-rank'>{(profile.accountOrder[provider] || []).indexOf(id) + 1}</span><span className='routing-account-avatar'>{name.slice(0, 1).toUpperCase()}</span>
                   <div className='routing-account-name'><b>{name}</b><span>{description}</span></div>

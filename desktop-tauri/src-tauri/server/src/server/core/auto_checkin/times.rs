@@ -19,13 +19,9 @@
 //! 用户想改就改条目上那一格，不必动代码。
 //!
 //! ── 补签（第二轮）──────────────────────────────────────────
-//! 主轮在各自时刻签一遍，补签轮再签一遍，但**只签今天还没签上的账号**
-//! （`checkinAt` 不在今天）。这是用户明确要的「0:01 之后 0:10 再补一次」——
-//! 主轮撞上风控 / 网络抖动时，不必等到第二天。
-//!
-//! 补签点**逐家算**：`max(retryTime, 该家主轮时刻 + 重试间隔)`。00:01 那批家在
-//! 00:11 补；Qoder（10:01）在 10:11、ZCode（19:01）在 19:11 —— 对它们 00:10 的
-//! 窗口都还没开，补了只会白撞。详见 [`provider_retry_time`]。
+//! 补签点逐家按 `max(retryTime, 主签到区间结束 + 等待间隔)` 算，且只处理当天未签到账号。
+//! 默认区间 00:01–00:10、间隔 10 分钟时，普通平台 00:20 补，Qoder 10:20、ZCode 19:20。
+//! 补签不会提前执行仍在等待随机主轮的账号，也不会把超出当天的时间绕回凌晨。
 //!
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
@@ -38,8 +34,35 @@ use crate::server::core::auto_checkin::{normalize_time, today_at};
 use crate::server::core::beijing;
 use crate::server::core::checkin_schedules::Schedule;
 
-/// 缺省补签时刻：主轮之后 9 分钟，只补今天还没签上的账号。
+/// 补签不早于的缺省时刻；实际补签仍从各家区间结束后计算。
 pub const DEFAULT_RETRY_TIME: &str = "00:10";
+pub const DEFAULT_SPREAD_MINUTES: i64 = 9;
+
+pub fn valid_range(start: &str, end: &str) -> bool {
+    matches!((today_at_minutes(start), today_at_minutes(end)), (Some(start), Some(end)) if end >= start)
+}
+
+pub fn end_with_spread(start: &str, spread: i64) -> String {
+    format_minutes((today_at_minutes(start).unwrap_or(1) + spread.max(0)).min(1439))
+}
+
+pub fn default_time_end(start: &str) -> String {
+    end_with_spread(start, DEFAULT_SPREAD_MINUTES)
+}
+
+pub fn spread_minutes(schedule: &Schedule) -> i64 {
+    (today_at_minutes(&schedule.time_end).unwrap_or(10)
+        - today_at_minutes(&schedule.time).unwrap_or(1)).max(0)
+}
+
+pub fn effective_end(schedule: &Schedule, provider: &str) -> String {
+    end_with_spread(&effective_time(schedule, provider), spread_minutes(schedule))
+}
+
+pub fn provider_window(schedule: &Schedule, provider: &str, now: DateTime<FixedOffset>) -> Option<(i64, i64)> {
+    Some((today_at(&effective_time(schedule, provider), now)?.timestamp_millis(),
+        today_at(&effective_end(schedule, provider), now)?.timestamp_millis()))
+}
 
 /// 提供商专属的每日窗口时刻（北京时间，窗口开启后 1 分钟）。
 ///
@@ -82,7 +105,10 @@ fn fired_on(map: &BTreeMap<String, String>, provider: &str, date: &str) -> bool 
 /// 一个 `lastFiredDate`，一旦是今天就代表「全跑过了」。这条兜底只影响升级当天
 /// （第二天起逐家标记就有了），但它必须存在 —— 否则升级那一刻会把当天已经签过
 /// 的家全部重签一遍。
-fn main_fired(schedule: &Schedule, provider: &str, today: &str) -> bool {
+pub(crate) fn main_fired(schedule: &Schedule, provider: &str, today: &str) -> bool {
+    if schedule.account_plan.date == today {
+        return !schedule.account_plan.pending_for(provider);
+    }
     if !schedule.last_fired_providers.is_empty() {
         return fired_on(&schedule.last_fired_providers, provider, today);
     }
@@ -108,31 +134,19 @@ pub fn due_providers(
         .collect()
 }
 
-/// 某家的**补签时刻**：`max(配置的补签时刻, 该家主轮时刻 + 重试间隔)`。
-///
-/// ── 为什么不是全局一个点 ────────────────────────────────────
-/// 「00:01 主轮、00:10 补签」是 00:01 那批家的形状。Qoder 的主轮在 10:01、
-/// ZCode 在 19:01 —— 对它们，00:10 的补签轮窗口都还没开，补了只会白撞；
-/// 而主轮跑完若不补，当天失败就只能等第二天。所以补签时刻按**每家自己的
-/// 主轮**顺延：主轮时刻 + 重试间隔（缺省 10 分钟），且不早于配置的补签时刻。
-///
-/// 默认配置下的实际补签点：
-///   00:01 的家 → 00:11（配置的 00:10 与「主轮 + 10 分钟」取晚的那个）
-///   Qoder      → 10:11
-///   ZCode      → 19:11
-///
-/// 用户把重试间隔调小（比如 1 分钟）就变成「主轮后 1 分钟补」；把补签时刻清空
-/// 则整条条目关掉补签轮。
+/// 某家的补签时刻：`max(配置的补签时刻, 该家主签到区间结束 + 等待间隔)`。
+/// 补签和活动窗口重试共用间隔；间隔为 0 时补签仍至少等 1 分钟，跨天则取消当天补签。
 pub fn provider_retry_time(schedule: &Schedule, provider: &str) -> Option<String> {
     if schedule.retry_time.is_empty() {
         return None;
     }
     let base = today_at_minutes(&schedule.retry_time)?;
-    let main = today_at_minutes(&effective_time(schedule, provider))?;
+    let main = today_at_minutes(&effective_end(schedule, provider))?;
     // 间隔取重试间隔；它被配成 0（关掉重试）时仍给 1 分钟 —— 补签轮与「等窗口
     // 重试」是两件事，关掉后者不该顺手把补签也关掉
     let gap = schedule.retry_gap_minutes.max(1);
-    Some(format_minutes(base.max(main + gap)))
+    let target = base.max(main + gap);
+    (target < 1440).then(|| format_minutes(target))
 }
 
 /// 今天的补签轮该补哪些家：该家的补签时刻已到、今天还没补过。
@@ -147,7 +161,9 @@ pub fn retry_due_providers(
     schedule
         .providers
         .iter()
+        .filter(|provider| crate::server::core::plugin_host::serves_provider(provider))
         .filter(|provider| !fired_on(&schedule.last_retried_providers, provider, today))
+        .filter(|provider| main_fired(schedule, provider, today))
         .filter(|provider| {
             provider_retry_time(schedule, provider)
                 .is_some_and(|time| time_passed(&time, now))
@@ -191,9 +207,13 @@ pub fn next_run_at(
     now: DateTime<FixedOffset>,
     today: &str,
 ) -> Option<i64> {
-    let mut earliest: Option<i64> = None;
+    let mut earliest: Option<i64> = if schedule.account_plan.date == today {
+        schedule.account_plan.next_at().map(|at| at.max(now.timestamp_millis()))
+    } else { None };
     for provider in &schedule.providers {
+        if !crate::server::core::plugin_host::serves_provider(provider) { continue; }
         let fired = main_fired(schedule, provider, today);
+        if !fired && schedule.account_plan.date == today { continue; }
         let Some(at) = next_occurrence(&effective_time(schedule, provider), fired, now) else {
             continue;
         };
@@ -219,6 +239,7 @@ pub fn retry_next_at(
     // 逐家算补签点，取最近的那个「今天还没补过」的；都已补过就顺延到明天
     let mut earliest: Option<i64> = None;
     for provider in &schedule.providers {
+        if !crate::server::core::plugin_host::serves_provider(provider) { continue; }
         let Some(time) = provider_retry_time(schedule, provider) else {
             continue;
         };
@@ -226,6 +247,7 @@ pub fn retry_next_at(
             continue;
         };
         let pending = !fired_on(&schedule.last_retried_providers, provider, today);
+        if pending && !main_fired(schedule, provider, today) && target <= now { continue; }
         let next = if pending {
             // 已到点还没补（等下一个 tick）→ 就是现在
             if target > now { target.timestamp_millis() } else { now.timestamp_millis() }
@@ -239,8 +261,9 @@ pub fn retry_next_at(
 
 /// `HH:MM` → 当天零点起的分钟数（非法返回 None）
 fn today_at_minutes(time_text: &str) -> Option<i64> {
-    let (hour, minute) = time_text.split_once(':')?;
-    Some(hour.trim().parse::<i64>().ok()? * 60 + minute.trim().parse::<i64>().ok()?)
+    let normalized = normalize_time(Some(&serde_json::Value::String(time_text.to_string()))).ok()?;
+    let (hour, minute) = normalized.split_once(':')?;
+    Some(hour.parse::<i64>().ok()? * 60 + minute.parse::<i64>().ok()?)
 }
 
 /// 分钟数 → `HH:MM`（跨天时按 24 小时取模）

@@ -151,7 +151,7 @@ Linux 에서는 `/etc/agent2api/agent2api.env` 에, Windows 에서는 서비스 
 
 ## Docker
 
-이미지 태그: `latest`는 최신 정식 버전을, `beta`는 최신 beta 사전 출시 버전을 따릅니다. `3.3.0-beta.3` 같은 전체 버전 번호로 버전을 고정할 수도 있습니다. beta를 사용하려면 아래 명령이나 Compose 설정의 `aimodcc/agent2api:latest`를 `aimodcc/agent2api:beta`로 바꾸고, 업데이트할 때 `docker compose pull && docker compose up -d`를 실행하세요. beta 출시 시 `latest`는 변경되지 않으며, 수동 개발 빌드는 `dev`만 업데이트합니다.
+이미지 태그: `latest`는 최신 정식 버전을, `beta`는 최신 beta 사전 출시 버전을 따릅니다. `3.3.0-beta.3` 같은 전체 버전 번호로 버전을 고정할 수도 있습니다. beta를 사용하려면 아래 명령이나 Compose 설정의 `aimodcc/agent2api:latest`를 `aimodcc/agent2api:beta`로 바꾸고, 업데이트할 때 `docker compose pull && docker compose up -d`를 실행하세요. beta 출시 시 `latest`는 변경되지 않으며, 수동 개발 빌드는 `dev`만 업데이트합니다. 동일한 이미지가 GitHub Container Registry에도 게시됩니다. 이미지 이름을 `ghcr.io/aimod-cc/agent2api`로 바꾸면 됩니다(태그 규칙은 동일합니다).
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
@@ -323,7 +323,7 @@ Release의 `Agent2API-<버전>.ipa`는 **기본이 미서명 패키지**입니�
 | 원탭 체크인, 체크인 기록 조회 | 신규 혜택과 플랜 개별 수령 |
 | 모델 활성화/비활성화, 제공자별 필터 | 모델 매핑, 추론 수준, 기능 플래그 편집 |
 | 게이트웨이 키 복사, 키 활성화/비활성화 | 키 생성, 제공자/모델 허용 목록 설정 |
-| 프록시 활성화/비활성화, 연결 테스트 | 프록시 추가, 구독 관리, 커널 다운로드 |
+| 수동 HTTP / SOCKS5 프록시 추가·편집·삭제, Clash Verge 엔드포인트 동기화, 활성화/비활성화 및 연결 테스트 | — (프록시 구독과 내장 커널은 제공 종료) |
 | 예약 작업 활성화/비활성화, 간격 변경 | 포트, 라우팅, 재시도, 타임아웃, 데이터 보존 변경 |
 | 어시스턴트 빠른 조회 (잔액 / 중복 모델 / 오늘 사용량 / 속도 제한 계정) | 어시스턴트 자유 대화와 도구 호출 |
 | Agent 테이크오버 상태 확인, 복원 | 클라이언트 설정 변경 (휴대폰은 로컬 파일을 읽을 수 없음) |

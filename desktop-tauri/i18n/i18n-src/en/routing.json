@@ -51,6 +51,8 @@
   "可用账号按请求轮换；开启会话粘性时同一会话优先留在原账号。": "Rotate available accounts per request. With session stickiness enabled, the same session prefers its previous account.",
   "同号重试 {n} 次": "{n} same-account retries",
   "同账号内部重试": "Internal retries on the same account",
+  "启用提供商中的第 {rank} 顺位；当前可用候选第 {effective} 顺位。": "Priority {rank} among enabled providers; current available-candidate priority {effective}.",
+  "启用提供商中的第 {rank} 顺位；当前没有可用候选账号。": "Priority {rank} among enabled providers; no candidate accounts are currently available.",
   "后备账号": "Backup account",
   "后过期": "until expiry",
   "命中 {n} 次": "{n} hits",

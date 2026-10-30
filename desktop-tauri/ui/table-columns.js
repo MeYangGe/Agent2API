@@ -154,9 +154,13 @@
        */
       columnsOf: visibleColumnsOf(() => window.wbRequestsPanel?.visibleColumns?.()),
     },
-    // 签到记录那张表**不在**这里登记了：它已随签到中心搬进插件包（页面在
-    // iframe 里，跨源，宿主的列宽拖动脚本碰不到它的 DOM）。插件页自带列宽与
-    // 筛选，与宿主这套表头机制无关。
+    {
+      id: 'checkin-records',
+      mode: 'table',
+      root: '.page[data-page="checkin"] table.ck-records-table',
+      columns: ['time', 'account', 'provider', 'source', 'outcome', 'detail'].map(key => ({ key })),
+      columnsOf: visibleColumnsOf(() => window.wbCheckinRecords?.visibleColumns?.()),
+    },
     // 「获取模型」弹窗的表（islands/models-fetch-modal.tsx 动态创建，关闭即移除）。
     // 两个形态各一张表、各存一份列宽：列集合不同（内置家七列 / 自定义家三列），
     // 混用一份覆盖值会让「拖过的 provider 列宽」串到自定义家去（那边没有这列）。

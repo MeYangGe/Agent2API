@@ -86,6 +86,7 @@
 .routing-grip { touch-action: none; cursor: grab; color: var(--text-3); width: 22px; height: 26px; padding: 0; border-radius: var(--r-xs); flex: none; }
 .routing-grip:active { cursor: grabbing; }
 .routing-grip:disabled { cursor: default; }
+.routing-grip.is-locked, .routing-grip.is-locked:active { cursor: not-allowed; opacity: .45; }
 .routing-account-list { padding: 4px 6px; }
 .routing-account-row { display: flex; align-items: center; gap: 6px; min-height: 61px; border-radius: var(--r-sm); padding: 6px 4px; position: relative; }
 .routing-account-row + .routing-account-row { border-top: 1px solid var(--hairline); }

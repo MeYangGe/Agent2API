@@ -61,7 +61,7 @@ export const ACCOUNT_COLUMNS: AccountColumn[] = [
   { key: 'account', label: t('账号'), align: 'center', legacyAlign: 'left' },
   {
     key: 'proxy', label: t('代理'),
-    title: t('该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改'),
+    title: t('该账号出网走的代理（已保存的代理 / 自定义 / 直连）；点击可修改'),
     align: 'center',
   },
   {

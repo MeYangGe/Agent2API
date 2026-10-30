@@ -110,19 +110,12 @@ fn account_features() -> Value {
     Value::Object(crate::server::core::plugin_host::account_features())
 }
 
-/// Clash 摘要（Node 版这里只带三项，完整形态在 /api/proxies）。
-/// 三项的含义：是否读到 Clash Verge 配置 / 读不到的原因 / 可选项数量
-/// （混合端口 + 各监听器）。切片 3 起是真实值。
 fn proxies_summary() -> Value {
     let clash = crate::server::core::proxies::clash_proxy_options();
     json!({
-        "clashAvailable": clash.get("available").and_then(Value::as_bool).unwrap_or(false),
-        "clashError": clash.get("error").cloned().unwrap_or(Value::Null),
-        "optionCount": clash
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|items| items.len())
-            .unwrap_or(0),
+        "clashAvailable": clash["available"],
+        "clashError": clash["error"],
+        "optionCount": clash.get("options").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
     })
 }
 

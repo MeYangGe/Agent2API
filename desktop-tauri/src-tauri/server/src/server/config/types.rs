@@ -75,29 +75,6 @@ pub const KEY_UPDATE_PROXY: &str = "updateProxy";
 /// beta 版本号必须与 tag 的语义化版本一致，否则无法判断更新先后。
 pub const KEY_UPDATE_BETA: &str = "updateBeta";
 
-/// 代理内核（mihomo）的**存放目录**（config.json 键）。
-///
-/// 值是**绝对路径**；缺省 / 空串 / 相对路径（读侧视为写坏）都回落
-/// `{config_dir}/proxy-kernel` —— 与 `logDir` 那几个键同一口径。
-/// 目录由内核下载弹窗选择（「网络代理」页 →「下载内核」），里面放二进制、
-/// `config.yaml`、`kernel-state.json`（节点 → 端口映射）与 provider 缓存，
-/// **整份都跟着这个键走**：改目录 = 换一整套内核数据的位置。
-/// 所以它只在「未安装」时可改（弹窗只在此时出现）—— 已装之后改键会让
-/// `installed()` 指向一个空目录，界面上看着像「内核没装」而旧文件仍在原处。
-pub const KEY_KERNEL_DIR: &str = "kernelDir";
-
-/// 代理内核的**下载出网线路**（config.json 键，缺省 = 默认链）。
-///
-/// 形状与 `updateProxy` 完全相同（归一后的账号代理配置对象 / null），
-/// 归一与解析复用同一套实现。**与 `updateProxy` 是两个独立的键**：下载内核
-/// 走哪条线路与「软件更新」走哪条线路是两件事（前者是订阅功能的前置条件，
-/// 后者是壳自己的更新），互不覆盖。
-///
-/// 缺省（未设置 / null）= 默认链：直连失败自动借 Clash 混合端口重试一次
-/// （见 `core::sub_kernel::download` 的出口候选）。**显式选定后只走选的那条**
-/// —— 用户专门选了出口，静默改走别的（尤其改走直连）会让失败信息变得不可信。
-pub const KEY_KERNEL_PROXY: &str = "kernelProxy";
-
 /// GitHub 令牌的密文信封（config.json 键，**存的不是明文**）。
 ///
 /// 值是 `core::update::token` 用 AES-256-GCM 加密出来的 `enc1:<base64>` 信封，

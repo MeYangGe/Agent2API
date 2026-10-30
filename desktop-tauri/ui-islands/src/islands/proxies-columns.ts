@@ -36,10 +36,11 @@ export type ProxyColumn = { key: string; label: string; align?: Align }
  */
 export const PROXY_COLUMNS: readonly ProxyColumn[] = [
   { key: 'pick', label: t('选择'), align: 'center' },
-  { key: 'name', label: t('节点') },
+  { key: 'name', label: t('代理名称') },
   { key: 'addr', label: t('地址') },
+  { key: 'usage', label: t('使用情况') },
   { key: 'state', label: t('启用'), align: 'center' },
-  { key: 'test', label: t('连通性') },
+  { key: 'test', label: t('最近检测') },
   { key: 'act', label: t('操作'), align: 'right' },
 ]
 
@@ -48,6 +49,7 @@ export const COL_CLASS: Record<string, string> = {
   pick: 'p-pick',
   name: '',
   addr: 'p-addr',
+  usage: 'p-usage',
   state: 'p-state',
   test: 'p-test',
   act: 'p-act',
@@ -72,6 +74,7 @@ type ColumnsWindow = {
       label?: string
       columns: readonly { key: string; label?: string; align?: Align }[]
       mount?: () => Element | null
+      buttonPlacement?: 'first' | 'last'
       onChange?: () => void
     }): ColSettingsHandle
     close?(): void
@@ -126,6 +129,7 @@ export function setupColumns(onChange: () => void): boolean {
       align: column.align ?? 'left',
     })),
     mount: () => document.querySelector('.page[data-page="proxies"] .panel-head .head-actions'),
+    buttonPlacement: 'last',
     // 改动落地：整页重画一次，表头与表体按同一份可见列产出（列宽层由页面那侧的
     // repaintColumnWidths 跟上，见 proxies-page 的布局副作用）
     onChange: () => onColumnsChanged?.(),

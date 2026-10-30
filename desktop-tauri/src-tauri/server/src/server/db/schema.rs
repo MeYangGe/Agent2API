@@ -169,14 +169,9 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // 它不是配置项（配置写入绝不能动它，否则用户配好的代理会被改一次 API Key
     // 清空）。条目不落独立表、只整份读写，理由见那个模块头。
     "proxyPool",
-    // 代理设置（core::proxy_settings）：`{listenerPortBase, listenerPortEnd,
-    // testUrl}` 一个键 —— 「网络代理」页设置弹窗维护的节点监听端口范围与
-    // 出口测试网址。与 proxyPool 同类零散状态：不是配置项，配置写入绝不能
-    // 动它（否则用户改一次 API Key 端口范围就退回默认、大订阅又分配不出端口）。
+    // 测试目标与旧端口范围共存于历史记录，配置写入不能清掉这份数据。
     "proxySettings",
-    // 订阅（core::subscriptions）：整份 `{items: [...]}` 一个键 —— 「网络代理」
-    // 页「订阅管理」维护的订阅链接，内核（sub_kernel）拉起时从 api 层拿启用
-    // 清单。与 proxyPool 同类零散状态：不是配置项，配置写入绝不能动它。
+    // 订阅功能已下线；保留旧数据，不因修改网关配置而删除。
     "subscriptions",
     // models.dev 模型元数据的刷新结果（core::model_meta::snapshot）：整份
     // 「上次成功拉到的精简索引」一个键（文件形态与内嵌快照逐字相同，生成口径见

@@ -1,26 +1,22 @@
 import * as React from 'react'
-import { Badge, Button, Input, SegmentedControl, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Card, CardHeader, Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@ui'
+import {
+  Badge, Button, Card, CardHeader, Empty, Input, SegmentedControl, Select, SelectContent,
+  SelectItem, SelectTrigger, SelectValue, Table, TableBody, TableCell, TableHead, TableHeader,
+  TableRow, confirmDialog,
+} from '@ui'
 import { clearRecords, loadRecords, patch, store } from './checkin-store'
 import {
   OUTCOME_VIEW, SOURCE_LABEL, formatShort, formatTime,
   type RecordRow,
 } from './checkin-types'
-import { confirmDialog } from '@ui'
-import { Empty } from '@ui'
+import {
+  RECORDS_TABLE_ID, closeRecordColumns, repaintRecordColumns, setupRecordColumns,
+  visibleRecordColumns, type RecordColumn,
+} from './checkin-records-columns'
+import { SERVER_PAGE_SIZES, TableFooter, writePageSize, type PageSizeChoice } from './table-shell'
+import { t } from '../i18n'
 
-/**
- * 「签到记录」标签页：每账号一行的明细台账。
- *
- * ── 这页回答什么 ────────────────────────────────────────────
- * 「到底领到了没、失败的话错在哪」。每执行一次签到（定时 / 启动补签 / 手动批量 /
- * 单账号 / 国际版活动），每个账号落一行。判据在后端唯一（复用签到执行体的同一对
- * 函数），这里只按 `outcome` 上色，不自己再判一遍。
- *
- * ── 分页 ────────────────────────────────────────────────────
- * 服务端真分页（`limit` / `offset` + 同条件 `total`）。筛选变化时 offset 归零。
- */
-
-/** 时间档位 */
+/** 签到记录采用服务端分页；筛选变化时回到第一页。 */
 const RANGES = [
   { value: 'all', label: '全部' },
   { value: 'today', label: '今天' },
@@ -29,17 +25,15 @@ const RANGES = [
   { value: 'month', label: '本月' },
 ]
 
-/** 结果档位（后端 `outcome` 的取值域） */
 const OUTCOME_OPTIONS = [
   { value: '', label: '全部结果' },
   { value: 'success', label: '成功领取' },
   { value: 'already', label: '今日已领' },
+  { value: 'pending', label: t('未领取') },
   { value: 'failed', label: '失败' },
 ]
 
-const PAGE_SIZE = 50
-
-/** 时间档位 → 毫秒下界（含今天在内的 N 个自然日；`all` = 不限） */
+/** 时间档位 → 毫秒下界（含今天在内的 N 个自然日；all = 不限）。 */
 function rangeStart(value: string): number | null {
   const now = new Date()
   const midnight = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
@@ -52,7 +46,6 @@ function rangeStart(value: string): number | null {
   }
 }
 
-/** 说明列：上游文案优先，失败时用错误原文 */
 function detailText(row: RecordRow): string {
   if (row.message) return row.message
   if (row.error) return row.error
@@ -60,50 +53,132 @@ function detailText(row: RecordRow): string {
   return '—'
 }
 
+function RecordCell({ row, column }: { row: RecordRow; column: RecordColumn & { align: string } }): React.ReactElement {
+  let content: React.ReactNode
+  let title: string | undefined
+  const classes = [`ta-${column.align}`, `ck-record-${column.key}`]
+  switch (column.key) {
+    case 'time':
+      title = t('本次签到结果的记录时间：{time}（本机时区）', { time: formatTime(row.ts) })
+      content = <>
+        <span>{formatShort(row.ts)}</span>
+        {row.date ? <span className="ck-record-date" title={t('签到日期按北京时间计算')}>{row.date}</span> : null}
+      </>
+      break
+    case 'account':
+      title = row.accountName || row.accountId || '—'
+      content = title
+      break
+    case 'provider':
+      content = row.provider || '—'
+      break
+    case 'source':
+      title = t('来源说明中的时刻是定时条目的名称或基准时刻，不是本次执行时间')
+      content = <>
+        <span>{SOURCE_LABEL[row.source ?? ''] ?? row.source ?? '—'}</span>
+        {row.reason ? <span className="ck-record-reason">{row.reason}</span> : null}
+      </>
+      break
+    case 'outcome': {
+      const view = OUTCOME_VIEW[row.outcome ?? '']
+      content = <>
+        {view
+          ? <Badge variant={view.variant} shape="tag">{view.label}</Badge>
+          : <Badge variant="outline" shape="tag">{row.outcome || '—'}</Badge>}
+        {row.keptActive ? <Badge variant="outline" shape="tag">保活</Badge> : null}
+      </>
+      break
+    }
+    case 'detail':
+      title = detailText(row)
+      if (row.error) classes.push('ck-record-detail-fail')
+      content = title
+      break
+  }
+  return <TableCell data-col={column.key} className={classes.join(' ')} title={title}>{content}</TableCell>
+}
+
 export function RecordsTab(): React.ReactElement {
   const query = store.recordsQuery
-  const [range, setRange] = React.useState('all')
+  const [range, setRange] = React.useState(() => RANGES.find(option => rangeStart(option.value) === (query.start ?? null))?.value ?? 'all')
   const [keyword, setKeyword] = React.useState(query.keyword)
+  const [columnRetry, setColumnRetry] = React.useState(0)
+  const [, redrawColumns] = React.useReducer((version: number) => version + 1, 0)
+  const columnMount = React.useRef<HTMLSpanElement | null>(null)
+  const scrollRef = React.useRef<HTMLDivElement | null>(null)
+  const pageKey = `${query.offset}:${query.limit}`
+  const previousPage = React.useRef(pageKey)
 
+  React.useLayoutEffect(() => {
+    if (!setupRecordColumns(columnMount.current, redrawColumns)) {
+      const timer = window.setTimeout(() => setColumnRetry(version => version + 1), 50)
+      return () => window.clearTimeout(timer)
+    }
+    redrawColumns()
+  }, [columnRetry])
+
+  React.useLayoutEffect(() => { repaintRecordColumns() })
+  React.useEffect(() => () => { closeRecordColumns() }, [])
+  React.useLayoutEffect(() => {
+    if (store.recordsLoading || previousPage.current === pageKey) return
+    previousPage.current = pageKey
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
+  }, [pageKey, store.recordsLoading])
+
+  const columns = visibleRecordColumns()
   const total = store.recordsTotal
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const page = Math.min(Math.floor(query.offset / PAGE_SIZE) + 1, pageCount)
+  const pageSize = query.limit
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const page = Math.min(Math.floor(query.offset / pageSize) + 1, pageCount)
 
   const apply = (next: Partial<typeof query>) => {
-    patch({ recordsQuery: { ...query, ...next, offset: 0 } })
+    const current = store.recordsQuery
+    const changed = Object.entries(next).some(([key, value]) => current[key as keyof typeof current] !== value)
+    if (!changed) return
+    patch({ recordsQuery: { ...current, ...next, offset: 0 } })
     void loadRecords()
   }
 
   const changeRange = (value: string) => {
     setRange(value)
-    const start = rangeStart(value)
-    patch({ recordsQuery: { ...query, start: start ?? undefined, offset: 0 } })
-    void loadRecords()
+    apply({ start: rangeStart(value) ?? undefined })
   }
 
   const goPage = (target: number) => {
     const clamped = Math.max(1, Math.min(target, pageCount))
-    patch({ recordsQuery: { ...query, offset: (clamped - 1) * PAGE_SIZE } })
+    const offset = (clamped - 1) * pageSize
+    if (offset === store.recordsQuery.offset) return
+    patch({ recordsQuery: { ...store.recordsQuery, offset } })
+    void loadRecords()
+  }
+
+  const changePageSize = (size: PageSizeChoice) => {
+    if (typeof size !== 'number' || !SERVER_PAGE_SIZES.includes(size) || size === pageSize) return
+    writePageSize(RECORDS_TABLE_ID, size)
+    const offset = Math.floor(store.recordsQuery.offset / size) * size
+    patch({ recordsQuery: { ...store.recordsQuery, limit: size, offset } })
     void loadRecords()
   }
 
   return (
-    <div className="ck-main">
-      <Card render={<section />} className="panel">
+    <div className="ck-main ck-records-main">
+      <Card render={<section />} className="panel ck-records-panel">
         <CardHeader className="panel-head">
           <h2>签到记录</h2>
           <span className="panel-sub">每执行一次签到 · 每个账号一条明细 · 结果与收益以后端落账为准</span>
-          <Button
-            size="sm"
-            variant="destructive"
-            className="ml-auto flex-none"
-            onClick={async () => {
-              if (!await confirmDialog('确定清空全部签到记录？清空后无法恢复。')) return
-              void clearRecords(true)
-            }}
-          >
-            清空全部
-          </Button>
+          <div className="head-actions">
+            <span ref={columnMount} className="contents" />
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={async () => {
+                if (!await confirmDialog('确定清空全部签到记录？清空后无法恢复。')) return
+                void clearRecords(true)
+              }}
+            >
+              清空全部
+            </Button>
+          </div>
         </CardHeader>
 
         <div className="ck-filters">
@@ -113,7 +188,7 @@ export function RecordsTab(): React.ReactElement {
             onValueChange={changeRange}
             aria-label="时间范围"
           />
-          <Select value={query.outcome} onValueChange={value => apply({ outcome: String(value) })}>
+          <Select value={query.outcome} onValueChange={value => apply({ outcome: String(value ?? '') })}>
             <SelectTrigger aria-label='签到结果'>
               <SelectValue>{OUTCOME_OPTIONS.find(option => option.value === query.outcome)?.label || '全部结果'}</SelectValue>
             </SelectTrigger>
@@ -128,91 +203,60 @@ export function RecordsTab(): React.ReactElement {
             value={keyword}
             onChange={event => setKeyword(event.currentTarget.value)}
             onKeyDown={event => {
-              // 回车才查：每敲一个字都打一次网关没必要
               if (event.key === 'Enter') apply({ keyword: keyword.trim() })
             }}
             onBlur={() => apply({ keyword: keyword.trim() })}
           />
           <span className="ck-filters-count">共 {total} 条</span>
-          <Button size="sm" variant="ghost" onClick={() => void loadRecords()}>刷新</Button>
+          <Button size="sm" variant="ghost" disabled={store.recordsLoading} onClick={() => void loadRecords()}>刷新</Button>
         </div>
 
         {store.recordsError ? (
           <div className="ck-fold-note">读取失败：{store.recordsError}</div>
         ) : null}
 
-        {store.recordsLoading && store.records.length === 0 ? (
-          <Empty className="ck-empty">正在读取签到记录…</Empty>
-        ) : store.records.length === 0 ? (
-          <Empty className="ck-empty">这段时间里还没有签到记录。</Empty>
-        ) : (
-          <div className="ck-records-scroll">
+        <div className="ck-records-scroll" ref={scrollRef} aria-busy={store.recordsLoading}>
+          {store.recordsLoading && store.records.length === 0 ? (
+            <Empty className="ck-empty">正在读取签到记录…</Empty>
+          ) : store.records.length === 0 ? (
+            <Empty className="ck-empty">这段时间里还没有签到记录。</Empty>
+          ) : (
             <Table container={false} className="ck-table ck-records-table">
               <colgroup>
-                <col className="ck-col-time" />
-                <col className="ck-col-account" />
-                <col className="ck-col-provider" />
-                <col className="ck-col-source" />
-                <col className="ck-col-outcome" />
-                <col className="ck-col-detail" />
+                {columns.map(column => <col key={column.key} data-col={column.key} className={`ck-col-${column.key}`} />)}
               </colgroup>
               <TableHeader>
                 <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>账号</TableHead>
-                  <TableHead>提供商</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>结果</TableHead>
-                  <TableHead>说明</TableHead>
+                  {columns.map(column => (
+                    <TableHead key={column.key} data-col={column.key} className={`ta-${column.align}`}>{column.label}</TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {store.records.map((row, index) => {
-                  const view = OUTCOME_VIEW[row.outcome ?? '']
-                  return (
-                    <TableRow key={`${row.ts}-${row.accountId ?? index}`} className={row.outcome === 'failed' ? 'ck-row-fail' : undefined}>
-                      <TableCell className="ck-col-time">
-                        <span>{formatShort(row.ts)}</span>
-                        {row.date ? <span className="ck-record-date">{row.date}</span> : null}
-                      </TableCell>
-                      <TableCell>{row.accountName || row.accountId || '—'}</TableCell>
-                      {/* 后端读侧已把 provider id 换成展示名（`qoder-intl`
-                          → 「Qoder 国际版」），这里直接显示 */}
-                      <TableCell className="ck-record-source">{row.provider || '—'}</TableCell>
-                      <TableCell>
-                        <span>{SOURCE_LABEL[row.source ?? ''] ?? row.source ?? '—'}</span>
-                        {row.reason ? <span className="ck-record-reason">{row.reason}</span> : null}
-                      </TableCell>
-                      <TableCell>
-                        {view
-                          ? <Badge variant={view.variant} shape="tag">{view.label}</Badge>
-                          : <Badge variant="outline" shape="tag">{row.outcome || '—'}</Badge>}
-                        {row.keptActive ? <Badge variant="outline" shape="tag">保活</Badge> : null}
-                      </TableCell>
-                      <TableCell className={row.error ? 'ck-record-detail-fail' : undefined}>
-                        {detailText(row)}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
+                {store.records.map((row, index) => (
+                  <TableRow key={row.rowId ?? `${row.ts}-${row.accountId ?? index}`} className={row.outcome === 'failed' ? 'ck-row-fail' : undefined}>
+                    {columns.map(column => <RecordCell key={column.key} row={row} column={column} />)}
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
-          </div>
-        )}
+          )}
+        </div>
 
-        {total > PAGE_SIZE ? (
-          <div className="ck-pager">
-            <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => goPage(1)}>首页</Button>
-            <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => goPage(page - 1)}>上一页</Button>
-            <span className="ck-pager-label">{page} / {pageCount}</span>
-            <Button size="sm" variant="outline" disabled={page >= pageCount} onClick={() => goPage(page + 1)}>下一页</Button>
-            <Button size="sm" variant="outline" disabled={page >= pageCount} onClick={() => goPage(pageCount)}>末页</Button>
-          </div>
-        ) : null}
+        <TableFooter
+          total={total}
+          range={{ start: total ? query.offset + 1 : 0, end: total ? Math.min(total, query.offset + store.records.length) : 0 }}
+          page={page}
+          pageCount={pageCount}
+          size={pageSize}
+          sizes={SERVER_PAGE_SIZES}
+          onSizeChange={changePageSize}
+          onPageChange={goPage}
+          disabled={store.recordsLoading}
+        />
       </Card>
     </div>
   )
 }
 
-/** 供外部读的格式化（`checkin-page` 的顶栏用得上时间戳） */
 export { formatTime }

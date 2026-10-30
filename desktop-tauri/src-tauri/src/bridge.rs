@@ -156,16 +156,9 @@ const BRIDGE_JS: &str = r#"
     // 同时跑时界面上一眼能分清。
     title: '__AGENT2API_TITLE__',
 
-    // ── 直连网关的凭证（AI 助手页专用）────────────────────────
-    // 助手页为了流式对话直接 fetch 网关基址、不经桥（见 ui-islands 的
-    // assistant-state.ts）。桌面形态下页面来自 Tauri 自定义协议、网关在
-    // 127.0.0.1:{port}：跨源 + 不带 cookie，那条请求里一个凭证都没有；
-    // 面板认证开启后（设置页开过局域网访问就会注册管理员）会被 401
-    // `panel_login_required` 挡下，界面只能显示「请先登录管理面板」——
-    // 而桌面上并没有登录页。桥的其它方法不受影响，是因为壳统一给它们补了
-    // 第一把 Key（见 gateway::request_builder）；这里把**同一把**交给页面。
-    // 返回 `{ 头名: 值 }`：网页端 shim 的同名方法回面板令牌 / 用户输入的
-    // Key（见 web_shim.rs），助手页对两端一视同仁，只负责合并进请求头。
+    // ── 界面直连网关的管理凭证 ────────────────────────────────
+    // 桌面页面与 HTTP 网关跨源，不能靠 cookie；桥返回本机壳的短效会话。
+    // 模型调用仍由界面显式选择 Key，管理会话不能替代模型授权。
     directCredentials: () => invoke('direct_credentials'),
     saveAssistantImage: id => invoke('save_assistant_image', { id: String(id || '') }),
 
@@ -434,24 +427,7 @@ const BRIDGE_JS: &str = r#"
     // 与 `server/src/web_shim.rs` 的同名方法成对存在（那个文件是 headless
     // 面板的桥）：只加一边时，另一形态下的页面会报「桥接方法缺失」——
     // 标题栏那一族方法有同样的教训，见 zcode-claim 那段的说明。
-    // 契约（详见 `api::proxies` 的模块头）：
-    //   · getProxyPool           列表 `{items, clash}`；item 带 `usedBy`
-    //                            （引用它的账号）与 `lastTest`（上次测试结果）。
-    //                            **进来时后端会自动同步一次 Clash 出口**
-    //   · create/update/remove   写操作都返回同一份最新列表（就地替换）；
-    //                            Clash 同步来的条目是只读镜像，update/remove
-    //                            会被后端拒绝（400 + 一句可读的中文）
-    //   · setProxyPoolItemEnabled 启用 / 禁用一条（三种来源都放行：manual 写它
-    //                            自己的 enabled，镜像条目写本地禁用位）。订阅
-    //                            节点禁用时后端走「关闭监听端口」流程、启用时
-    //                            走补建，响应里多一个 `listener`
-    //                            （none / closing / opening）—— 页面按它轮询列表
-    //                            看端口落地，不在请求里等内核重建
-    //   · testProxyPoolItem      测一条并把结果记进条目；测试失败也是**成功响应**
-    //                            （`success:false` + error 文案）
-    //   · syncClashToProxyPool   手动同步 Clash Verge 出口，返回里多一个
-    //                            `changes`（本次变更数）与 `syncError`
-    //                            （Clash 不可用时的原因；那不算失败）
+    // 写操作返回最新代理列表；测试失败以 success:false 表达。
     getProxyPool: () => call('GET', '/api/proxies/pool'),
     createProxyPoolItem: payload => call('POST', '/api/proxies/pool', payload || {}),
     updateProxyPoolItem: payload => call('POST', '/api/proxies/pool/update', payload || {}),
@@ -459,51 +435,13 @@ const BRIDGE_JS: &str = r#"
     removeProxyPoolItem: id => call('POST', '/api/proxies/pool/remove', { id: String(id || '') }),
     testProxyPoolItem: id => call('POST', '/api/proxies/pool/test', { id: String(id || '') }),
     syncClashToProxyPool: () => call('POST', '/api/proxies/pool/sync-clash', {}),
-    // ── 代理设置（「网络代理」页的设置弹窗：节点端口范围 + 测试网址）──
+    // ── 代理设置（「网络代理」页的设置弹窗：测试目标网址）──
     // 与 web_shim.rs 的同名方法成对存在（教训同上）。契约见 `api::proxies`
     // 的模块头 settings 两条：GET 带 `defaults`（弹窗的默认值读它），
     // POST 是整份表单、非法形状 400 + 一句可读的中文。
     getProxySettings: () => call('GET', '/api/proxies/settings'),
     saveProxySettings: payload => call('POST', '/api/proxies/settings', payload || {}),
 
-    // ── 订阅（「网络代理」页的订阅区块）──
-    // 与 web_shim.rs 的同名方法成对存在（教训同上）。契约（详见
-    // `api::subscriptions` 的模块头）：
-    //   · getSubscriptions        列表 `{items, kernel}`；item 带 nodeCount，
-    //                             kernel 是内核状态（下载进度 / 运行状态）
-    //   · add/save/remove         写操作都返回同一份列表 + kernel（就地替换）；
-    //                             后端投一条内核命令（异步），节点数与运行状态
-    //                             由轮询 kernel 看结果
-    //   · refreshSubscription     强制拉取一条订阅的内容（节点变了后端自动
-    //                             重启内核）
-    //   · getKernelStatus         单独读内核状态（下载进度的轮询走它）
-    //   · downloadKernel          开始下载内核（后台任务，state=downloading →
-    //                             done/error/canceled）；下载完有启用的订阅会自动拉起。
-    //                             参数是下载弹窗的两个选择 `{proxy, dir}`（都可省；
-    //                             dir 空串 = 恢复默认目录），后端**先落配置再下载**
-    //   · cancelKernelDownload    停止正在进行的下载（删掉半截文件；不在下载中时
-    //                             回 `{canceled: false}`，不假装停成功了）
-    //   · restartKernel           手动启动 / 重启内核（重建配置）
-    //   · stopKernel              手动关闭内核（只停进程；订阅与端口注册表保留，
-    //                             「启动内核」后原位恢复 —— 与「最后一条订阅没了」
-    //                             那条自动停不同，那条会清空订阅节点镜像）
-    //   · removeKernel            删除已下载的内核（停进程 + 清内核目录；订阅
-    //                             与账号引用保留，订阅节点端口被回收成「未分配」）
-    //   · pickFolder              弹系统文件夹选择框（下载弹窗的「选择目录…」）
-    //   · decodeQrImage           从图片解二维码 `{imageBase64}` → `{url}`
-    getSubscriptions: () => call('GET', '/api/subscriptions'),
-    addSubscription: payload => call('POST', '/api/subscriptions/add', payload || {}),
-    saveSubscription: payload => call('POST', '/api/subscriptions/save', payload || {}),
-    refreshSubscription: id => call('POST', '/api/subscriptions/refresh', { id: String(id || '') }),
-    removeSubscription: id => call('POST', '/api/subscriptions/remove', { id: String(id || '') }),
-    decodeQrImage: payload => call('POST', '/api/subscriptions/decode-qr', payload || {}),
-    getKernelStatus: () => call('GET', '/api/subscriptions/kernel'),
-    downloadKernel: payload => call('POST', '/api/subscriptions/kernel/download', payload || {}),
-    importKernel: payload => call('POST', '/api/subscriptions/kernel/import', payload || {}),
-    cancelKernelDownload: () => call('POST', '/api/subscriptions/kernel/download/cancel', {}),
-    restartKernel: () => call('POST', '/api/subscriptions/kernel/restart', {}),
-    stopKernel: () => call('POST', '/api/subscriptions/kernel/stop', {}),
-    removeKernel: () => call('POST', '/api/subscriptions/kernel/remove', {}),
     // 桌面壳的文件夹选择框：参数名与命令签名一致（camelCase ← Rust 的 snake_case）
     pickFolder: defaultDir => invoke('pick_folder', { defaultDir: defaultDir == null ? null : String(defaultDir) }),
 
@@ -953,12 +891,9 @@ const BRIDGE_JS: &str = r#"
         username: String(username || '').trim(),
         password: String(password || ''),
       }),
-    // ── 面板会话（桌面端的登录通道，见 panel_session 模块头）──
-    // 窗口启动时查一次：未注册管理员 → 免登录直进主界面；注册过且当前没有
-    // 有效会话 → 加载登录页。登录页把拿到的令牌交给 panelSessionStore。
+    // ── 本机管理会话 ──────────────────────────────────────────
+    // 登录相关方法保留给旧页面；本机壳不依赖网页管理员令牌。
     panelSessionStatus: () => invoke('panel_session_status'),
-    // 第三个参数是 access 的剩余秒数（服务端 `expiresIn`）：壳据此提前续期，
-    // 不必等 401 才发现过期（见 panel_session::refresh_if_expiring）。
     panelSessionStore: (accessToken, refreshToken, expiresIn) =>
       invoke('panel_session_store', {
         accessToken: String(accessToken || ''),
@@ -1026,8 +961,8 @@ const BRIDGE_JS: &str = r#"
     // ── 整库备份 / 恢复（设置页「整库备份 / 恢复」）──
     // 文件由后端按壳选的路径直读直写（见 api/backup_api.rs），壳只负责
     // 系统对话框；参数名 includeLogs 必须与 Rust 侧 export_database 的形参一致
-    exportDatabase: includeLogs => invoke('export_database', { includeLogs }),
-    importDatabase: () => invoke('import_database'),
+    exportDatabase: (includeLogs, password) => invoke('export_database', { includeLogs, password }),
+    importDatabase: password => invoke('import_database', { password }),
     // 恢复进度（设置页的不可关闭弹窗每 500ms 拉一次）。走通用 call 而不是
     // invoke：这条是纯读、无参数，后端已经有 GET /api/backup/progress，
     // 不必为它再加一条壳命令。

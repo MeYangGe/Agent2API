@@ -31,6 +31,7 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
   const [preview, setPreview] = useState<PreviewResult | null>(null)
   const [usage, setUsage] = useState<UsageRow | null>(null)
   const [previewError, setPreviewError] = useState('')
+  const [receiptError, setReceiptError] = useState('')
   const [usageError, setUsageError] = useState('')
   const [loading, setLoading] = useState(true)
   const [querying, setQuerying] = useState(false)
@@ -101,6 +102,7 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
       const result = await claimPlan(entry.id, id, controller.signal, phase => { if (mounted.current) setClaimPhase(phase) })
       if (controller.signal.aborted || !mounted.current || serverIdentity() !== identity) return
       if (result.ok || result.failure === 'already_claimed') {
+        setReceiptError(result.marketingError || '')
         const settled = result.planId || id
         setClaimedNow(list => [...new Set([...list, settled])])
         store.toast(result.ok ? t('领取成功：{planId}', { planId: settled }) : result.failureLabel || t('今日已领'))
@@ -149,24 +151,41 @@ export function CheckinPlansSheet({ entry, onClose }: { entry: PlanEntry; onClos
           </div>
           {previewError ? <p className='m-ck-error'>{previewError}</p> : null}
           {loading ? <p className='m-ck-note'>{t('正在探测可领取的套餐…')}</p>
-            : !preview?.plans?.length ? <p className='m-ck-note'>{t('当前没有可领取的套餐')}</p> : null}
+            : !previewError && !preview?.plans?.length ? <p className='m-ck-note'>
+              {preview?.previewError || preview?.marketingError
+                ? t('部分套餐来源查询失败，暂不能确认是否有可领取套餐')
+                : t('当前没有可领取的套餐')}
+            </p> : null}
           {preview?.plans?.map(plan => {
             const id = plan.planId || ''
+            const taken = claimed.includes(id) || plan.claimed === true
+            const future = (plan.entitlements || []).map(item => Number(item.effectiveAt))
+              .filter(at => Number.isFinite(at) && at > Date.now() / 1000)
+            const effectiveAt = future.length ? Math.min(...future) : 0
             return <div className='m-ck-account' key={id || plan.name}>
               <div className='m-ck-toolbar'>
                 <div className='m-ck-title m-ck-grow'>{plan.name || id}</div>
-                {claimed.includes(id) ? <Badge tone='ok'>{t('今日已领')}</Badge> : null}
+                {taken ? <Badge tone='ok'>{t('已领取')}</Badge> : null}
               </div>
+              {effectiveAt ? <p className='m-ck-note'>{t('待生效 {time}', { time: stamp(effectiveAt) })}</p> : null}
               {plan.endsAt ? <p className='m-ck-note'>{t('到期 {time}', { time: stamp(plan.endsAt) })}</p> : null}
               {plan.entitlements?.map((item, index) => <p key={index} className='m-ck-note'>{entitlementText(item)}</p>)}
               {plan.description ? <p className='m-ck-note'>{plan.description}</p> : null}
-              <div className='m-ck-actions'><Button size='sm' disabled={Boolean(claiming) || verifyingChannel || claimed.includes(id) || !id} onClick={() => void claim(id)}>
-                {claiming === id ? t('领取中…') : claimed.includes(id) ? t('今日已领') : t('领取')}
+              <div className='m-ck-actions'><Button size='sm' disabled={Boolean(claiming) || verifyingChannel || taken || !id} onClick={() => void claim(id)}>
+                {claiming === id ? t('领取中…') : taken ? t('已领取') : t('领取')}
               </Button></div>
             </div>
           })}
+          {preview?.previewError || preview?.marketingError ? <p className='m-ck-note'>
+            {t('部分套餐来源查询失败，已保留其他来源的结果：{message}', {
+              message: [preview.previewError, preview.marketingError].filter(Boolean).join('；'),
+            })}
+          </p> : null}
+          {receiptError ? <p className='m-ck-note'>
+            {t('套餐已领取，但营销回执未完成，不会重复领取：{message}', { message: receiptError })}
+          </p> : null}
           {preview?.activationError ? <p className='m-ck-note'>{preview.activationError}</p> : null}
-          <p className='m-ck-note'>{t('领取需要时会打开官方人机验证；活动套餐额度与编码套餐额度独立。')}</p>
+          <p className='m-ck-note'>{t('可领取清单合并每日赠送与限时营销活动；按套餐去重，已领取的不重复提交。只有主动领取时才会进行人机验证。')}</p>
           <div className='m-ck-toolbar'>
             <div className='m-ck-title m-ck-grow'>{t('我的套餐')}</div>
             <Button variant='outline' size='sm' disabled={querying || Boolean(claiming)} onClick={() => void queryUsage()}>

@@ -33,7 +33,7 @@
 //! 一次解析、两个属性同源，这是「A 家的等级不会用到 B 家」的**全部**保证：
 //! 跨家串味唯一可能的来源是两处各自解析一次映射，而这里只有一个解析点。
 //!
-//! ── 各家的翻译规则（有证据的两家才接）────────────────────────
+//! ── 各家的翻译规则（有证据的家才接）────────────────────────
 //! ```text
 //!   catpaw   reasoning_effort ∈ {low, high, max}（上游 resolve_effort 硬校验，
 //!            别的值当场 400）。6 档两两归并：
@@ -44,8 +44,17 @@
 //!            —— 它按模型自己声明的 efforts 归一与回退（minimal→low、
 //!            high|max→xhigh、模型不支持的档位退回该模型默认档）。「这一家收
 //!            哪个档位」在 Qoder 是模型级知识，翻译留在那边一份。
-//!   workbuddy / raccoon / autoclaw / cline
-//!            **不接**：四家都不注入档位字段（autoclaw 会改写 `model` 与 system
+//!   workbuddy（插件家）
+//!            写 `reasoning_effort`（由**插件**回答 `reasoning.patch`，值不做归并；
+//!            目录里那条模型声明了 supportedEfforts 而绑定值不在其中时跳过并说明）。
+//!            旧注释把它列在「不接」里，理由是「没有证据表明上游认识档位字段」——
+//!            现在有证据了：上游按 `reasoning_effort` 收发档位，`/v3/config` 每条
+//!            模型都带 `reasoning.defaultEffort` / `supportedEfforts`。适配器与
+//!            「客户端没给档位就补模型默认档」的归一都在插件
+//!            （`agent2api-providers` 的 `providers/workbuddy/reasoning.rs`，
+//!            依据与 issue 见那里）。
+//!   raccoon / autoclaw / cline
+//!            **不接**：三家都不注入档位字段（autoclaw 会改写 `model` 与 system
 //!            提示前缀，但那两处与档位无关，见它的 `adapter` / `prompt`），项目里
 //!            没有任何证据表明上游认识档位字段。塞一个上游不认识的键不叫
 //!            「生效」，只是把未知参数推给上游 —— 适配器的默认实现就是

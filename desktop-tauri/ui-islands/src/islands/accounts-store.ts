@@ -1,31 +1,7 @@
-/**
- * 账号页的**状态 store**（非岛：`.ts` 不被 import.meta.glob 当岛加载）：快照、筛选、
- * 勾选、行内面板展开态、账号名隐藏、以及从快照派生的各种读法。
- *
- * ── 从 accounts-data.ts 拆出来的理由 ──────────────────────────
- * 「状态怎么存」与「动作怎么发」是两件事，混在一个文件里已经九百多行（约定单文件 ≤800）。
- * 拆开之后：本文件只回答「现在是什么状态、怎么改」，actions（余额 / 连接数 /
- * Clash 缓存 / 行内动作 / 弹窗 / 对外契约）在 accounts-data.ts —— 那个文件再
- * `export * from './accounts-store'`，于是视图侧的 import 路径一行不用改。
- *
- * ── 为什么是模块级 store + useSyncExternalStore ────────────────
- * 对外契约（`wbAccountsView.render()` / `refreshCaches()` / `syncConnections()` /
- * `syncBalancesSnapshot()`）从 React 之外调用，且必须与界面共用同一份状态 ——
- * 组件内部的 useState 做不到这一点。所以状态是一份模块级快照，改动一律走 patch()
- * （换新对象再通知订阅者）。
- *
- * ── 两种持有方式（刻意不同）──────────────────────────────
- *   · 高频小改动（连接数每 2 秒一轮）走 `patch({...})` 换新 Map / Set；
- *   · 少量原地可变的结构由各自的动作层维护（见 accounts-data.ts 的说明）。
- * 两条路都经过同一个订阅者集合，React 侧看不出差别。
- *
- * （签到相关状态曾在这里：`checkinBusy` 与新手任务弹窗 `onboarding`。签到动作
- * 迁到「签到中心」后两样都随之离开 —— 新手任务的查询 / 领取缓存现在在
- * checkin-state.ts，签到完成后自动处理的那条链也在那边。）
- */
+
 
 import {
-  shared, type AccountRecord, type AccountsSnapshot, type ClashSnapshot, type AccountSorting,
+  shared, type AccountRecord, type AccountsSnapshot, type AccountSorting,
   type HiddenAccountProvider, type HiddenAccountsSummary,
 } from './accounts-shared'
 import {
@@ -51,9 +27,6 @@ export type AccountsStore = {
   collapsed: ReadonlySet<string>
   selected: ReadonlySet<string>
   connections: ReadonlyMap<string, number>
-  /** Clash 出口列表缓存（`null` = 还没读到）；**只有代理表单的 Clash 直引档用**
-   *  （存量配置专用）—— 账号页的代理下拉列的是「网络代理」页的池条目 */
-  clash: ClashSnapshot | null
   dialog: AccountsDialog
   namesHidden: boolean
   /** 批量查询余额在途（工具条按钮的文案与禁用态） */
@@ -187,7 +160,6 @@ let store: AccountsStore = {
   collapsed: loadCollapsed(),
   selected: new Set<string>(),
   connections: new Map<string, number>(),
-  clash: null,
   dialog: null,
   namesHidden: loadNamesHidden(),
   usageBusy: false,
@@ -209,7 +181,6 @@ export function getStore(): AccountsStore {
   return store
 }
 
-/** 换一份快照并通知订阅者（React 侧 getSnapshot 的引用比较靠它） */
 export function patch(partial: Partial<AccountsStore>): void {
   store = { ...store, ...partial, version: store.version + 1 }
   listeners.forEach(listener => listener())
@@ -513,12 +484,6 @@ export function syncGroupTotalPreference(): void {
   patch({ groupTotalFiltered: next })
 }
 
-/**
- * 写入合计口径（设置页的开关调它；账号页订阅同一份 store，因此立即重画）。
- *
- * 落盘与内存两件事一起做：只落盘的话，同文档里已经挂载的账号页收不到
- * `storage` 事件（那个事件只在**别的**文档 / 窗口里触发），切回去还是旧口径。
- */
 export function setGroupTotalFiltered(next: boolean): void {
   try { localStorage.setItem(GROUP_TOTAL_FILTERED_KEY, next ? '1' : '0') } catch { /* 存不了只影响下次启动 */ }
   patch({ groupTotalFiltered: next })

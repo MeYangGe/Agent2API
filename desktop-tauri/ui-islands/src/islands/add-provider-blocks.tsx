@@ -74,9 +74,7 @@ import {
   type WebLoginController,
   type WebLoginView,
 } from './add-account-bridge'
-// 二进制文件 → base64 的读取工具（订阅导入在用，同一份足够：FileReader +
-// readAsDataURL）；`add-provider-blocks` 只借这一个函数，不引订阅那边的状态
-import { readFileAsBase64 } from './proxies-sub-state'
+import { readFileAsDataUrl } from '../../../ui-shared/file-read'
 import { accountFilePayload, accountExportEdition, isAccountExport } from './add-account-file'
 import { draftOfProxy, ProxyForm, readProxyDraft } from './accounts-proxy-form'
 import { t } from '../i18n'
@@ -366,13 +364,7 @@ function GuestSection({
 
 /* ─── 导入凭证文件（通用版；WorkBuddy 那段是另一套 payload，不要合并）─── */
 
-/**
- * `readFileAsBase64` 返回的是**完整 data URL**（`data:…;base64,<正文>`）——
- * 订阅那条链的服务端会自己 `split_once("base64,")`，而 `POST /api/accounts`
- * 的 `authFileB64` 走的是裸 `BASE64.decode(encoded)`，**不认 data URL 前缀**。
- * 因此这里剥掉逗号前的头部再交出去，否则 KukuAI 的文件导入会得到
- * 「authFileB64 不是合法的 base64」。
- */
+
 function base64BodyOf(dataUrl: string): string {
   const comma = dataUrl.indexOf(',')
   return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
@@ -423,7 +415,7 @@ function FileImportSection({
             }
             Object.assign(payload, accountFilePayload(parsed, config.provider, remark))
           } else {
-            payload.authFileB64 = base64BodyOf(await readFileAsBase64(file))
+            payload.authFileB64 = base64BodyOf(await readFileAsDataUrl(file, t('文件读取失败')))
           }
         } else {
           const text = await file.text()

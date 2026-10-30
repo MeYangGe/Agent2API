@@ -121,9 +121,6 @@ pub mod scheduled_tasks;
 // 布局的合法形状由前端 `ui/sidebar-layout.js` 拥有，后端只当不透明文档，
 // 见该模块头
 pub mod sidebar_layout;
-pub mod sub_kernel;
-#[path = "subscriptions.rs"]
-pub mod subscriptions;
 // 运行环境探测（系统 / 架构 / 容器 / 服务形态 / 路径脱敏）：设置页「版本信息」
 // 的数据底座，见该模块头。纯读，不依赖 ServerState。
 pub mod system_info;

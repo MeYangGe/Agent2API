@@ -705,31 +705,6 @@ async function installSelfUpdate(): Promise<void> {
   }
 }
 
-/**
- * 回滚到上一版本（用上次更新留下的备份），同样走「重启 + 倒计时 + 探活」。
- * 备份不存在时后端 400，这里原样透出原因。
- */
-async function rollbackSelfUpdate(): Promise<void> {
-  const api = shared().workbuddyDesktop
-  if (!api?.rollbackUpdate || busy) return
-  busy = true
-  publish({ actionBusy: true })
-  try {
-    setBadge(t('回滚中'), 'warn')
-    setState(t('正在回滚到上一版本…'))
-    await api.rollbackUpdate()
-    setState(t('已还原上一版本，正在重启服务…'))
-    await api.restartService?.().catch(() => undefined)
-    beginRestartCountdown('')
-  } catch (error) {
-    setBadge(t('回滚失败'), 'bad')
-    setState(t('回滚失败：{error}', { error: errorMessage(error) }), true)
-  } finally {
-    busy = false
-    publish({ actionBusy: false })
-  }
-}
-
 /** 重启倒计时：走完就开始探活 */
 function beginRestartCountdown(version: string): void {
   stopPolling()
@@ -1134,10 +1109,6 @@ function UpdatePanel() {
   const repo = snap.sourceRepository ? `https://github.com/${snap.sourceRepository}` : ''
   const owner = snap.sourceRepository ? `https://github.com/${snap.sourceRepository.split('/')[0]}` : ''
   const selfUpdate = isSelfUpdate(snap.info)
-  // 回滚入口：只有容器内更新、且上一次更新留下了备份时才出现。
-  // 下载 / 安装途中不给（那两条流程各自持有按钮语义，混在一起只会误点）
-  const canRollback = selfUpdate && snap.info?.backupAvailable === true
-    && snap.phase !== 'downloading' && snap.phase !== 'ready' && snap.phase !== 'restarting'
   const latestLabel = snap.info?.latestVersion
     ? (snap.info.prerelease
       ? t('{version}（预发布）', { version: snap.info.latestVersion })
@@ -1155,7 +1126,7 @@ function UpdatePanel() {
         <span
           className='tip-q'
           data-tip={selfUpdate
-            ? t('容器内更新：更新包从 GitHub 发布页下载，校验 sha256 后由面板替换容器内的程序与界面文件，再重启服务（容器由 restart 策略拉起，页面会自动刷新）。更新的是容器里的文件，compose 里的镜像标签不变 —— 之后执行 docker compose pull && up -d 会回到镜像里的版本；更新失败可一键回滚到上一版本。检查更新与下载的出网线路、GitHub 令牌都在「更新设置」里。')
+            ? t('容器内更新：更新包从 GitHub 发布页下载，校验 sha256 后由面板替换容器内的程序与界面文件，再重启服务（容器由 restart 策略拉起，页面会自动刷新）。更新的是容器里的文件，compose 里的镜像标签不变 —— 之后执行 docker compose pull && up -d 会使用镜像里的版本。检查更新与下载的出网线路、GitHub 令牌都在「更新设置」里。')
             : t('更新包从 GitHub Release 获取，下载后交给本平台安装器。GitHub 访问方式、加速前缀、出网代理和令牌在「更新设置」中配置。默认官方优先，连接失败后尝试加速源；镜像安装包必须匹配官方校验值，取不到时仅使用原始源。指定代理失效会明确报错，不会静默改走直连。')}
         ></span>
         {/* id 保留：app.js 的 renderTopbarStatus 按 id 镜像徽章文案与语义色（配色经
@@ -1191,18 +1162,6 @@ function UpdatePanel() {
           <Button id='btn-update-check' variant='outline' disabled={snap.checking || snap.phase === 'restarting'} onClick={() => void check()}>
             {snap.checking ? t('检查中…') : t('检查更新')}
           </Button>
-          {/* 回滚：只在容器内更新、且有上一版备份时出现（点击后同样会重启服务） */}
-          {canRollback ? (
-            <Button
-              id='btn-update-rollback'
-              variant='outline'
-              disabled={snap.actionBusy}
-              title={t('把容器内的程序与界面文件还原到更新前的版本，并重启服务')}
-              onClick={() => void rollbackSelfUpdate()}
-            >
-              {t('回滚到上一版本')}
-            </Button>
-          ) : null}
           {button ? (
             <Button
               id='btn-update-download'

@@ -18,6 +18,9 @@ export type PreviewPlan = {
   startsAt?: number | null
   endsAt?: number | null
   entitlements?: Entitlement[]
+  claimed?: boolean
+  claimedAt?: number | null
+  source?: 'preview' | 'marketing'
 }
 
 export type OwnedPlan = PreviewPlan & {
@@ -29,6 +32,8 @@ export type PreviewResult = {
   deployed?: boolean
   plans?: PreviewPlan[]
   activationError?: string | null
+  previewError?: string | null
+  marketingError?: string | null
 }
 
 export type ClaimResult = {
@@ -40,6 +45,7 @@ export type ClaimResult = {
   claimedAt?: number
   startsAt?: number
   endsAt?: number
+  marketingError?: string | null
 }
 
 export type CaptchaPhase = 'preparing' | 'verifying' | 'submitting'

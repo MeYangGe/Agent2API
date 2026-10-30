@@ -4,7 +4,7 @@ import { Badge, Button, Empty, FieldGroup, Label, SegmentedControl, Spinner, cn,
 import { t } from '../i18n'
 import { AccountSettingsDialog } from './accounts-settings-dialog'
 import { providerOf } from './accounts-domain'
-import { GroupSettingsDialog } from './accounts-group-settings'
+import { GroupSettingsDialog, manualOrderBlockedMessage } from './accounts-group-settings'
 import { RoutingCanvas } from './routing-canvas'
 import { ModelGatewayLink } from './routing-links'
 import {
@@ -13,7 +13,7 @@ import {
 import { RoutingTracePage } from './routing-trace-page'
 import { RoutingStickyDialog } from './routing-sticky'
 import {
-  accountOrder, accountOrderLocked, addModel, cloneProfile, loadWorkspace, moveAccount, patch, saveProfile,
+  accountOrder, accountOrderLocked, accountOrderRules, addModel, cloneProfile, loadWorkspace, moveAccount, patch, saveProfile,
   selectModel, snapshot, subscribe,
 } from './routing-state'
 import { IconButton, RouteIcon } from './routing-ui'
@@ -36,7 +36,7 @@ function AccountRoutePosition({ id }: { id: string }) {
     <Label>{t('当前路由位置')}</Label><span className='text-xs'>{state.model || t('全局配置')} · {t('第 {n} 位', { n: index + 1 })}</span>
     <IconButton name='arrowUp' title={t('提高优先级')} disabled={state.busy || index <= 0 || locked} onClick={() => void moveAccount(provider, id, -1)} />
     <IconButton name='arrowDown' title={t('降低优先级')} disabled={state.busy || index >= ids.length - 1 || locked} onClick={() => void moveAccount(provider, id, 1)} />
-    <span className='detail'>{locked ? t('自动消耗排序已启用，请先关闭规则再手动调整') : state.model ? t('顺序修改即时保存，仅作用于当前视图。') : t('全局顺序与账号页联动，修改即时保存。')}</span>
+    <span className='detail'>{locked ? manualOrderBlockedMessage(accountOrderRules(provider)) : state.model ? t('顺序修改即时保存，仅作用于当前视图。') : t('全局顺序与账号页联动，修改即时保存。')}</span>
   </FieldGroup>
 }
 

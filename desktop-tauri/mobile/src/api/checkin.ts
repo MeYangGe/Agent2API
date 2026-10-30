@@ -19,6 +19,7 @@ export type SchedulePatch = {
   label?: string
   enabled: boolean
   time: string
+  timeEnd?: string
   providers: string[]
   /** 逐家的时刻覆盖（不传 = 保持原样；空对象 = 全部撤销） */
   providerTimes?: Record<string, string>

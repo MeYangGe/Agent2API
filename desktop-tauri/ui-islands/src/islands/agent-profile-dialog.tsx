@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Field, FieldLabel, Switch } from '@ui'
+import { Alert, Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Field, FieldDescription, FieldLabel, Switch } from '@ui'
 import { t } from '../i18n'
 import { applyProfile, confirm, errorMessage, requestPreview, saveProfiles, toast } from './agent-state'
 import { cloneProfile, defaultOperation, profileSignature, validateDraft } from './agent-model'
@@ -32,7 +32,7 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
   }, [])
   const update = (values: Partial<AgentProfile>) => {
     previewGeneration.current += 1
-    setDraft(current => ({ ...current, ...values })); setPreview(null); setPreviewing(false); setError('')
+    setDraft(current => ({ ...current, ...values })); setPreview(null); setConfirming(false); setPreviewing(false); setError('')
   }
   const close = async () => {
     if (saving) return
@@ -76,22 +76,31 @@ export function ProfileDialog({ client, profile, creating, native = false, onClo
       <DialogBody>
         <Alert>{native ? t('保存会直接修改客户端配置；确认前展示差异，写入前自动备份。') : t('保存只记录方案，不修改客户端。应用时会另外展示文件差异并请求确认。')}</Alert>
         {!confirming && <>
-        <TextField label={t('方案名称')} fieldKey='' value={draft.name} onChange={name => update({name})} disabled={saving || previewing || (native && ['claude-code','gemini-cli','kimi-code','zed','cline','workbuddy'].includes(client.id))} />
-        <ConnectionFields client={client} draft={draft} update={update} disabled={saving || previewing} />
-        {catalogError && draft.kind === 'gateway' && <Alert variant='warning'>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}</Alert>}
+        <section className='agent-profile-connection flex min-w-0 flex-col gap-4'>
+          <h3 className='text-sm font-semibold'>{t('连接配置')}</h3>
+          <TextField label={t('方案名称')} fieldKey='' value={draft.name} onChange={name => update({name})} disabled={saving || previewing || (native && ['claude-code','gemini-cli','kimi-code','zed','cline','workbuddy'].includes(client.id))} />
+          <ConnectionFields client={client} draft={draft} update={update} disabled={saving || previewing} />
+          {catalogError && draft.kind === 'gateway' && <Alert variant='warning'>{t('模型目录读取失败，可手动填写真实模型 ID。')} {catalogError}</Alert>}
+        </section>
         {client.supportsModels ? <ModelsFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} native={native} />
-          : <SingleModelFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} />}
-        {client.supportsToggle && <Field><FieldLabel>{t('客户端条目启用状态')}</FieldLabel><Switch checked={draft.enabled} disabled={saving || previewing} onCheckedChange={enabled => update({enabled})} aria-label={t('客户端条目启用状态')} />
-          <p className='text-xs text-subtle'>{t('这是待应用状态；保存不会立即改变客户端开关。')}</p></Field>}
-        {!native && <TextField label={t('备注')} fieldKey='' value={draft.note} onChange={note => update({note})} disabled={saving || previewing} />}
+          : <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'><h3 className='text-sm font-semibold'>{t('模型配置')}</h3>
+            <SingleModelFields client={validationClient} draft={draft} update={update} catalog={catalog} disabled={saving || previewing} /></section>}
+        {(client.supportsToggle || !native) && <section className='flex min-w-0 flex-col gap-4 border-t border-hairline pt-4'>
+          {client.supportsToggle && <Field className='rounded-md border border-border bg-surface-inset p-3'>
+            <div className='flex items-center justify-between gap-3'><FieldLabel>{t('客户端条目启用状态')}</FieldLabel>
+              <Switch checked={draft.enabled} disabled={saving || previewing} onCheckedChange={enabled => update({enabled})} aria-label={t('客户端条目启用状态')} /></div>
+            <FieldDescription>{native ? t('确认写入后会同步修改客户端开关；取消不会生效。') : t('这是待应用状态；保存不会立即改变客户端开关。')}</FieldDescription>
+          </Field>}
+          {!native && <TextField label={t('备注')} fieldKey='' value={draft.note} onChange={note => update({note})} disabled={saving || previewing} />}
+        </section>}
         </>}
         {preview && <WritePreview preview={preview} />}
         {error && <Alert variant='destructive'>{error}</Alert>}
       </DialogBody>
-      <DialogFooter>
+      <DialogFooter className='agent-config-footer'>
         <Button variant='ghost' disabled={saving || previewing} onClick={() => confirming ? setConfirming(false) : void showPreview()}>{confirming ? t('返回编辑') : previewing ? t('生成中…') : t('预览草稿改动')}</Button><span className='mr-auto' />
         <Button variant='outline' disabled={saving || previewing} onClick={() => void close()}>{t('取消')}</Button>
-        <Button disabled={saving || previewing || (confirming && !preview?.hasChanges)} onClick={() => void (confirming ? apply() : save())}>{saving ? t('保存中…') : confirming ? t('确认写入') : native ? t('保存修改') : t('保存方案')}</Button>
+        <Button disabled={saving || previewing || (!creating && !dirty) || (confirming && !preview?.hasChanges)} onClick={() => void (confirming ? apply() : save())}>{saving ? t('保存中…') : confirming ? t('确认写入') : native ? t('保存修改') : t('保存方案')}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

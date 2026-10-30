@@ -2,7 +2,8 @@ import { t } from '../i18n'
 import { inactiveProvider } from './routing-display'
 import { bridge, errorMessage, host, notify, type RouteOrderChange, type RouteProfile, type RoutingWorkspace } from './routing-types'
 import { adoptAccountSorting, syncAccountSorting } from './accounts-sort'
-import { supportsCreditExpiry } from './accounts-domain'
+import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
+import type { GroupSortRule } from './accounts-shared'
 
 export type RoutingState = {
   model: string
@@ -111,13 +112,19 @@ export function accountOrder(provider: string, profile = current.workspace?.prof
   return (profile.accountOrder[provider] || []).filter(id => !profile.excludedAccounts.includes(id)
     && current.workspace?.accounts.some(account => account.id === id))
 }
+export function accountOrderRules(provider: string): GroupSortRule[] {
+  if (current.model && current.workspace?.customized) return []
+  return activeGroupSortRules(provider, current.workspace?.sorting?.rules[provider] || [])
+}
 export function accountOrderLocked(provider: string): boolean {
-  if (current.model && current.workspace?.customized) return false
-  return (current.workspace?.sorting?.rules[provider] || []).some(rule => rule.on
-    && (rule.key !== 'credit' || supportsCreditExpiry(provider)))
+  return accountOrderRules(provider).length > 0
 }
 export async function reorderAccount(provider: string, id: string, before: string): Promise<void> {
-  if (accountOrderLocked(provider)) return
+  const orderRules = accountOrderRules(provider)
+  if (orderRules.length > 0) {
+    notify(manualOrderBlockedMessage(orderRules), 'err')
+    return
+  }
   if (id === before || !current.workspace || current.busy) return
   const profile = cloneProfile()
   const ids = profile.accountOrder[provider] || []

@@ -66,7 +66,7 @@ export function CheckinPage() {
     }
   }
 
-  usePolling(load, center?.auto?.running || center?.travel?.running ? 3000 : 30_000)
+  usePolling(load, center?.auto?.running || center?.travel?.running || tab === 'schedule' && center?.auto?.enabled ? 3000 : 30_000)
   const pull = usePullToRefresh({ onRefresh: load })
   const tabs = [
     { value: 'center' as const, label: t('签到中心') },

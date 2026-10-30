@@ -289,21 +289,6 @@ pub async fn accounts_entry(State(state): State<ServerState>, request: axum::ext
     dispatch(state, method, rest.as_deref(), &full_path, &query, &body).await
 }
 
-/// 账号写、批量改代理 / 删除账号后的**监听器对账**（lazy listeners 的触发点，
-/// 见 `api::proxies::reconcile_listeners`）。
-///
-/// 用「改动前后引用 id 集合」的差集来判：改个备注名 / 改密钥不该付一次内核
-/// 重启的等待（重启要重建全部监听器，几秒）。引用增加要补监听器、引用减少
-/// 要回收端口（删账号 / 改走别的代理 / 改直连）—— 两个方向都交给对账的缺口
-/// 检测收敛，这里不猜方向，只拦「没变化」这一种白重启。
-pub(super) fn reconcile_kernel_listeners(state: &ServerState, before: &std::collections::HashSet<String>) {
-    let after = state.store().referenced_pool_ids();
-    if &after == before {
-        return; // 引用集合没变（纯改配置），不重启
-    }
-    super::proxies::reconcile_listeners(state);
-}
-
 /// `/api/proxies*` 的入口（同样接受任意方法）。
 ///
 /// 已注册路径：`/api/proxies`、`/api/proxies/test`（Node 版原有的出口能力）与
@@ -579,9 +564,6 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    // 引用集合快照（成功落账号后对账，见 `reconcile_kernel_listeners`）。
-    // 只有插件家的落库路径会走到收尾，所以快照在那里现取（见 `add_plugin_account`
-    // 的调用点）；内置分支全部直接返回 503，这里不再需要。
     let provider = payload
         .get("provider")
         .and_then(Value::as_str)
@@ -1311,8 +1293,6 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
     if !patch.is_object() {
         return management_error(400, "请求内容必须是 JSON 对象");
     }
-    // 引用集合快照（改代理成功后对账，见 `reconcile_kernel_listeners`）
-    let refs_before = state.store().referenced_pool_ids();
     // CatPaw 的余额查询凭证（`balanceToken`）先落盘：它是**这一家独有**的字段，
     // 通用 `update_account` 不认识它（见 `update_catpaw_balance_token` 的说明：
     // 不把它塞进四家共用的 apply_patch）。放在通用 patch 之前做，于是同一次
@@ -1447,7 +1427,6 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
         Ok((account, mut changes)) => {
             changes.extend(balance_changes);
             // 改代理成功后对账：新引用的补监听器、旧引用失去的回收端口
-            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({
                 "account": account,
                 "changes": changes,
@@ -1572,10 +1551,8 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
     }
     // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
     // （最后一个引用消失 → 这个节点的监听器该收了）
-    let refs_before = state.store().referenced_pool_ids();
     match state.store().remove_account(id) {
         Ok(()) => {
-            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({ "list": state.store().list_visible_accounts() }))
         }
         Err(error) => store_error(error),

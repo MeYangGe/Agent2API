@@ -151,7 +151,7 @@ No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave 
 
 ## Docker
 
-Tags da imagem: `latest` acompanha a versão estável mais recente, enquanto `beta` acompanha a pré-versão beta mais recente. Use uma versão completa, como `3.3.0-beta.3`, para fixá-la. Para usar beta, troque `aimodcc/agent2api:latest` por `aimodcc/agent2api:beta` no comando ou na configuração do Compose abaixo; atualize com `docker compose pull && docker compose up -d`. Versões beta não alteram `latest`, e builds manuais de desenvolvimento atualizam apenas `dev`.
+Tags da imagem: `latest` acompanha a versão estável mais recente, enquanto `beta` acompanha a pré-versão beta mais recente. Use uma versão completa, como `3.3.0-beta.3`, para fixá-la. Para usar beta, troque `aimodcc/agent2api:latest` por `aimodcc/agent2api:beta` no comando ou na configuração do Compose abaixo; atualize com `docker compose pull && docker compose up -d`. Versões beta não alteram `latest`, e builds manuais de desenvolvimento atualizam apenas `dev`. A mesma imagem também é publicada no GitHub Container Registry: troque o nome da imagem por `ghcr.io/aimod-cc/agent2api` (as regras de tag são idênticas).
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
@@ -323,7 +323,7 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Check-in com um toque, ver histórico de check-in | Resgatar recompensas de integração e planos individualmente |
 | Ativar/desativar modelos, filtrar por provedor | Editar mapeamentos de modelo, níveis de raciocínio, flags de capacidade |
 | Copiar gateway keys, ativar/desativar keys | Criar keys, definir listas de provedores/modelos permitidos |
-| Ativar/desativar proxies, testar conectividade | Adicionar proxies, gerenciar assinaturas, baixar o kernel |
+| Adicionar, editar e excluir proxies HTTP / SOCKS5 manuais; sincronizar endpoints do Clash Verge; ativar/desativar e testar conectividade | — (assinaturas de proxy e o kernel integrado foram descontinuados) |
 | Ativar/desativar tarefas agendadas, alterar intervalos | Alterar porta, roteamento, retry, timeouts, retenção de dados |
 | Consultas rápidas do assistente (saldos / modelos duplicados / uso de hoje / contas limitadas) | Conversa livre e chamada de ferramentas do assistente |
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |

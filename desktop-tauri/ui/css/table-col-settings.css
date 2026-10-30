@@ -67,8 +67,9 @@ body.colset-dragging { cursor: grabbing; user-select: none; }
 .req-head > .ta-center, .req-row > .ta-center { text-align: center; }
 .req-head > .ta-right, .req-row > .ta-right { text-align: right; }
 
-/* 签到记录那张表的对齐规则已随页面搬进插件包（它现在在 iframe 里，
-   跨源，这套列设置机制碰不到它）。 */
+.ck-records-table th.ta-left, .ck-records-table td.ta-left { text-align: left; }
+.ck-records-table th.ta-center, .ck-records-table td.ta-center { text-align: center; }
+.ck-records-table th.ta-right, .ck-records-table td.ta-right { text-align: right; }
 
 /* ── 2. 块级 flex 容器的主轴对齐 ── */
 

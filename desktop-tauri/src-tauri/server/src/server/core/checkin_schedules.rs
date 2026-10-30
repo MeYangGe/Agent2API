@@ -1,18 +1,19 @@
 //! 定时签到的**多条目**配置（`autoCheckin.schedules` 数组）。
 //!
 //! ── 形状 ────────────────────────────────────────────────────
-//! 每条条目是一次「定点签到」的完整配置：
-//!   `{id, label, enabled, time, providers, providerTimes, retryTime,
+//! 每条条目是一次「区间签到」的完整配置：
+//!   `{id, label, enabled, time, timeEnd, accountPlan, providers, providerTimes, retryTime,
 //!     retryGapMinutes, retryLimit, lastFiredDate, lastFiredProviders,
 //!     lastRetriedProviders, lastResult}`
 //!   - `id`     稳定标识（界面按它 upsert / 删除 / 立即执行；合成条目是 "default"）
 //!   - `label`  展示名（可空；空时展示退到 `time`）
 //!   - `enabled` 条目自己的开关
-//!   - `time`   HH:MM，北京时间口径（见 `core::beijing`，issue #138）
+//!   - `time` / `timeEnd` HH:MM，北京时间同一天的区间；相同表示固定时刻。
+//!   - `accountPlan` 当天逐账号的随机时刻和尝试标记，重启后沿用。
 //!   - `providers` 这条要签的提供商（`CHECKIN_PROVIDERS` 子集，至少一家）
-//!   - `providerTimes` 逐家的时刻覆盖（`{providerId: "HH:MM"}`；空串 = 撤销覆盖）。
-//!     **没写这一格的家跟随内置专属时刻或 `time`**，见 `auto_checkin::times`
-//!   - `retryTime` 补签轮时刻（缺省 00:10；空串 = 关掉补签轮）
+//!   - `providerTimes` 逐家的区间起点覆盖（`{providerId: "HH:MM"}`；空串 = 撤销覆盖）。
+//!     沿用默认区间长度，没覆盖的家跟随内置专属起点或 `time`。
+//!   - `retryTime` 补签不早于的时刻（缺省 00:10；空串 = 关掉补签轮）；实际不早于区间结束加间隔。
 //!   - `retryGapMinutes` 中性未领取的账号多久后重试（缺省 10 分钟；0 = 不重试）
 //!   - `retryLimit` 每个账号每天最多重试几次（缺省 3；0 = 不重试）
 //!   - `lastFiredDate` / `lastFiredProviders` / `lastRetriedProviders` / `lastResult`
@@ -34,11 +35,13 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::server::config;
 use crate::server::core::auto_checkin;
 use crate::server::core::auto_checkin::times;
+
+pub mod account_plan;
 
 /// 条目上限：再多列表难以扫读，定点签到的语义也不需要更多
 pub const MAX_SCHEDULES: usize = 10;
@@ -56,6 +59,7 @@ pub struct Schedule {
     pub label: String,
     pub enabled: bool,
     pub time: String,
+    pub time_end: String,
     pub providers: Vec<String>,
     /// 逐家的时刻覆盖（空串 = 撤销覆盖，回落到内置 / 条目时刻）
     pub provider_times: BTreeMap<String, String>,
@@ -70,6 +74,7 @@ pub struct Schedule {
     pub last_fired_providers: BTreeMap<String, String>,
     /// 逐家的补签轮完成日期
     pub last_retried_providers: BTreeMap<String, String>,
+    pub account_plan: account_plan::AccountPlan,
     pub last_result: Option<Value>,
 }
 
@@ -120,12 +125,17 @@ fn normalize_schedule(raw: &Value) -> Schedule {
         .filter(|value| !value.is_null())
         .and_then(|value| auto_checkin::normalize_time(Some(value)).ok())
         .unwrap_or_else(auto_checkin::default_time);
+    let time_end = raw.get("timeEnd")
+        .and_then(|value| auto_checkin::normalize_time(Some(value)).ok())
+        .filter(|end| times::valid_range(&time, end))
+        .unwrap_or_else(|| times::default_time_end(&time));
     let providers = auto_checkin::normalize_providers(raw.get("providers"));
     Schedule {
         id,
         label,
         enabled,
         time,
+        time_end,
         providers,
         provider_times: times::normalize_overrides(raw.get("providerTimes")),
         retry_time: times::normalize_retry_time(raw.get("retryTime")),
@@ -137,6 +147,7 @@ fn normalize_schedule(raw: &Value) -> Schedule {
             .map(str::to_string),
         last_fired_providers: date_map(raw.get("lastFiredProviders")),
         last_retried_providers: date_map(raw.get("lastRetriedProviders")),
+        account_plan: account_plan::AccountPlan::from_value(raw.get("accountPlan")),
         last_result: raw.get("lastResult").filter(|value| value.is_object()).cloned(),
     }
 }
@@ -165,11 +176,16 @@ fn date_map(value: Option<&Value>) -> BTreeMap<String, String> {
 
 /// 存量兼容：用旧字段合成的那条默认条目（`schedules` 键缺失时）
 fn legacy_schedule() -> Schedule {
-    let raw = auto_checkin::raw_object();
+    legacy_schedule_of(&auto_checkin::raw_object())
+}
+
+fn legacy_schedule_of(raw: &Map<String, Value>) -> Schedule {
     normalize_schedule(&json!({
         "id": DEFAULT_SCHEDULE_ID,
         "enabled": raw.get("enabled").cloned().unwrap_or(Value::Null),
         "time": raw.get("time").cloned().unwrap_or(Value::Null),
+        "timeEnd": raw.get("timeEnd").cloned().unwrap_or(Value::Null),
+        "accountPlan": raw.get("accountPlan").cloned().unwrap_or(Value::Null),
         "providers": raw.get("providers").cloned().unwrap_or(Value::Null),
         "providerTimes": raw.get("providerTimes").cloned().unwrap_or(Value::Null),
         "retryTime": raw.get("retryTime").cloned().unwrap_or(Value::Null),
@@ -196,9 +212,7 @@ pub fn list() -> Vec<Schedule> {
 
 /// 条目数组写回 `autoCheckin.schedules`（其余字段原样保留）
 fn write_entries(entries: Vec<Value>) {
-    let mut merged = auto_checkin::raw_object();
-    merged.insert("schedules".to_string(), Value::Array(entries));
-    config::update_raw_field(auto_checkin::CONFIG_KEY, Value::Object(merged));
+    auto_checkin::write_state(json!({ "schedules": entries }));
 }
 
 /// 条目 → 存储原文（保留 lastFiredDate / lastResult，条目级的去重状态跨重启）
@@ -208,6 +222,8 @@ fn to_value(schedule: &Schedule) -> Value {
         "label": schedule.label,
         "enabled": schedule.enabled,
         "time": schedule.time,
+        "timeEnd": schedule.time_end,
+        "accountPlan": schedule.account_plan,
         "providers": schedule.providers,
         "providerTimes": schedule.provider_times,
         "retryTime": schedule.retry_time,
@@ -256,14 +272,15 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         .unwrap_or("")
         .to_string();
 
-    let mut entries = stored_entries().unwrap_or_default();
+    let entries = stored_entries().unwrap_or_default();
     let existing = entries.iter().position(|raw| {
         raw.get("id").and_then(Value::as_str) == Some(id.as_str())
     });
     if existing.is_none() && entries.len() >= MAX_SCHEDULES {
         return Err(format!("定时条目最多 {MAX_SCHEDULES} 条"));
     }
-    let existing_entry = existing.map(|index| normalize_schedule(&entries[index]));
+    let existing_entry = existing.map(|index| normalize_schedule(&entries[index]))
+        .or_else(|| (!stored_key_exists() && id == DEFAULT_SCHEDULE_ID).then(legacy_schedule));
     let enabled = match payload.get("enabled").and_then(Value::as_bool) {
         Some(flag) => flag,
         // 缺省：更新保持原开关；新建默认开 —— 但第一次固化**合成条目**时，
@@ -322,11 +339,21 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         .map(|value| value.clamp(0, MAX_RETRY_LIMIT))
         .or_else(|| existing_entry.as_ref().map(|old| old.retry_limit))
         .unwrap_or(3);
+    let time_end = match payload.get("timeEnd") {
+        Some(value) => auto_checkin::normalize_time(Some(value)).map_err(|error| error.message)?,
+        None => existing_entry.as_ref().map(|old| {
+            times::end_with_spread(&time, times::spread_minutes(old))
+        }).unwrap_or_else(|| times::default_time_end(&time)),
+    };
+    if !times::valid_range(&time, &time_end) {
+        return Err("签到区间结束时间不能早于开始时间；暂不支持跨天区间".to_string());
+    }
     let schedule = Schedule {
         id,
         label,
         enabled,
         time,
+        time_end,
         providers: picked,
         provider_times,
         retry_time,
@@ -335,32 +362,56 @@ pub fn upsert(payload: &Value) -> Result<Schedule, String> {
         last_fired_date,
         last_fired_providers,
         last_retried_providers,
+        account_plan: existing_entry.as_ref().map(|old| old.account_plan.clone()).unwrap_or_default(),
         last_result,
     };
-    match existing {
-        Some(index) => entries[index] = to_value(&schedule),
-        None => entries.push(to_value(&schedule)),
-    }
-    write_entries(entries);
-    Ok(schedule)
+    let mut outcome = Err("定时条目保存失败".to_string());
+    auto_checkin::update_state(|state| {
+        let mut entries = state.get("schedules").and_then(Value::as_array).cloned().unwrap_or_default();
+        let index = entries.iter().position(|raw| raw.get("id").and_then(Value::as_str) == Some(schedule.id.as_str()));
+        if index.is_none() && entries.len() >= MAX_SCHEDULES {
+            outcome = Err(format!("定时条目最多 {MAX_SCHEDULES} 条"));
+            return;
+        }
+        let current = index.map(|index| normalize_schedule(&entries[index]))
+            .or_else(|| (!state.contains_key("schedules") && schedule.id == DEFAULT_SCHEDULE_ID).then(|| legacy_schedule_of(state)));
+        let mut schedule = schedule;
+        if let Some(current) = current {
+            if payload.get("enabled").is_none() { schedule.enabled = current.enabled; }
+            if payload.get("providerTimes").is_none() { schedule.provider_times = current.provider_times; }
+            if payload.get("retryTime").is_none() { schedule.retry_time = current.retry_time; }
+            if payload.get("retryGapMinutes").is_none() { schedule.retry_gap_minutes = current.retry_gap_minutes; }
+            if payload.get("retryLimit").is_none() { schedule.retry_limit = current.retry_limit; }
+            schedule.last_fired_date = current.last_fired_date;
+            schedule.last_fired_providers = current.last_fired_providers;
+            schedule.last_retried_providers = current.last_retried_providers;
+            schedule.account_plan = current.account_plan;
+            schedule.last_result = current.last_result;
+        }
+        match index {
+            Some(index) => entries[index] = to_value(&schedule),
+            None => entries.push(to_value(&schedule)),
+        }
+        state.insert("schedules".to_string(), Value::Array(entries));
+        outcome = Ok(schedule);
+    });
+    outcome
 }
 
 /// 删除一条条目。删除合成条目（或最后一条）写 `[]`：条目键自此存在，
 /// 「从旧字段合成」不再发生——删光了就是删光了，不该再长回来。
 pub fn remove(id: &str) -> Result<(), String> {
-    let mut entries = stored_entries().unwrap_or_default();
-    let before = entries.len();
-    entries.retain(|raw| raw.get("id").and_then(Value::as_str) != Some(id));
-    if entries.len() == before {
-        // 存量兼容：删除的可能是旧字段合成的默认条目（不在存储里）
-        if !stored_key_exists() && id == DEFAULT_SCHEDULE_ID {
-            write_entries(Vec::new());
-            return Ok(());
+    let mut outcome = Err(format!("定时条目不存在：{id}"));
+    auto_checkin::update_state(|state| {
+        let mut entries = state.get("schedules").and_then(Value::as_array).cloned().unwrap_or_default();
+        let before = entries.len();
+        entries.retain(|raw| raw.get("id").and_then(Value::as_str) != Some(id));
+        if entries.len() < before || (!state.contains_key("schedules") && id == DEFAULT_SCHEDULE_ID) {
+            state.insert("schedules".to_string(), Value::Array(entries));
+            outcome = Ok(());
         }
-        return Err(format!("定时条目不存在：{id}"));
-    }
-    write_entries(entries);
-    Ok(())
+    });
+    outcome
 }
 
 /// 条目级的当天去重标记：`fire` 在执行前落（先落再执行，进程被杀也不会反复补签）。
@@ -418,31 +469,24 @@ pub fn mark_result(id: &str, result: Option<Value>) {
 /// 改一条条目的去重状态（只动 `apply` 碰的字段）。
 /// 条目键不存在（老配置）且删的是默认条目时落到旧字段，不引入结构变更。
 fn patch_entry<F: FnOnce(&mut Schedule)>(id: &str, apply: F) {
-    if !stored_key_exists() {
-        if id != DEFAULT_SCHEDULE_ID {
+    auto_checkin::update_state(|state| {
+        if !state.contains_key("schedules") {
+            if id != DEFAULT_SCHEDULE_ID { return; }
+            let mut schedule = legacy_schedule_of(state);
+            apply(&mut schedule);
+            let value = to_value(&schedule);
+            for key in ["accountPlan", "lastFiredDate", "lastFiredProviders", "lastRetriedProviders", "lastResult"] {
+                state.insert(key.to_string(), value[key].clone());
+            }
             return;
         }
-        let mut schedule = legacy_schedule();
+        let mut entries = state.get("schedules").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(index) = entries.iter().position(|raw| raw.get("id").and_then(Value::as_str) == Some(id)) else { return; };
+        let mut schedule = normalize_schedule(&entries[index]);
         apply(&mut schedule);
-        auto_checkin::write_state(json!({
-            "lastFiredDate": schedule.last_fired_date,
-            "lastFiredProviders": schedule.last_fired_providers,
-            "lastRetriedProviders": schedule.last_retried_providers,
-            "lastResult": schedule.last_result,
-        }));
-        return;
-    }
-    let mut entries = stored_entries().unwrap_or_default();
-    let Some(index) = entries
-        .iter()
-        .position(|raw| raw.get("id").and_then(Value::as_str) == Some(id))
-    else {
-        return;
-    };
-    let mut schedule = normalize_schedule(&entries[index]);
-    apply(&mut schedule);
-    entries[index] = to_value(&schedule);
-    write_entries(entries);
+        entries[index] = to_value(&schedule);
+        state.insert("schedules".to_string(), Value::Array(entries));
+    });
 }
 
 /* ─── 一次性补齐：新加入的家默认在范围内 ───────────────────

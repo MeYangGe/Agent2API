@@ -2,7 +2,7 @@
 //!
 //! 职责：
 //!   - 等待本进程后端就绪，再读取凭证并发送管理请求
-//!   - 从配置目录读 API Key 并自动带上（网关开启鉴权时否则全是 401）
+//!   - 使用本机壳的独立管理会话，模型测试单独携带显式选择的 Key
 //!   - 统一解包 `{ success, data }` 信封，只把 data 交给前端
 //!   - 超时保护：签到、批量查询这类接口本身较慢，给足 60 秒
 //!
@@ -175,51 +175,6 @@ pub fn config_dir() -> PathBuf {
     agent2api_server::paths::config_dir()
 }
 
-/// 读取本地 API Key。仅在本机内存里取；未配置时返回 None。
-/// 优先读取可用且不受限的本机管理 Key，缺少时取环境变量 Key。
-///
-/// ── 为什么不再读文件（本切片改掉的一处真实开销）──────────────
-/// 改造前这里是 `fs::read_to_string(config.json)` —— 而本函数在**每一个**管理
-/// API 请求上都会被调用（`request_builder` 里加 `X-API-Key` 头），于是每次
-/// 点界面都是一次「打开文件 + 读全文 + 解析 JSON」。配置进了统一库之后，
-/// 再照原样读库会更糟：那要开连接、抢那把全局连接锁（与转发记账、日志写入
-/// 互斥），把管理 API 的每次请求都排到数据库串行队列里。
-/// 改为走**进程内配置快照**（`RuntimeConfig::active_api_keys`，解析实现是
-/// `core::api_keys::active_keys_from`）：与鉴权中间件、`keys_api` 读的是
-/// **同一份**值（`config::current()` 的克隆），因此「刚保存的新 Key 下一个
-/// 请求就生效」这条性质不变，且壳侧不再依赖 `config.json` 文件存在。
-///
-/// ── 未初始化时的行为 ────────────────────────────────────────
-/// `config::current()` 在快照未装入时按「空配置 + 环境变量」临时构造一份。
-/// 管理请求和直连凭证出口必须先等待本进程启动完成，不能把临时空值带进页面缓存。
-fn read_api_key() -> Option<String> {
-    let snapshot = crate::server::config::current();
-    let entries = crate::server::core::api_keys::entries_from(snapshot.raw());
-    entries.iter()
-        .find(|entry| entry.is_usable() && entry.allowed_models.is_empty() && entry.allowed_providers.is_empty())
-        .map(|entry| entry.key.clone())
-        .or_else(|| snapshot.active_api_keys().into_iter().find(|key| !entries.iter().any(|entry| entry.key == *key)))
-}
-
-/// 壳自己发管理请求时用的那把 Key —— 供**界面直连网关**时取用
-/// （`commands::direct_credentials` → 桥的 `directCredentials` → AI 助手页）。
-///
-/// ── 为什么界面需要它 ────────────────────────────────────────
-/// 助手页为了流式对话直接 fetch 网关、不走桥（见 ui-islands 的
-/// `assistant-state.ts`）。桌面形态下页面来自 Tauri 自定义协议、网关在
-/// `127.0.0.1:{port}`：跨源且不带 cookie，于是那条请求里一个凭证都没有 ——
-/// 面板认证开启后（设置页开过局域网访问就会注册管理员，见
-/// `commands::panel_register`）会被 401 `panel_login_required` 挡下。
-/// 桥的其它方法不受影响，正是因为壳统一给它们补了这把 Key（见
-/// [`request_builder`]）；这里把**同一把**交给页面，两种通道的凭证口径才
-/// 一致，不会出现「壳能操作、助手页连配置都读不到」。
-///
-/// 不动面板认证本身：桌面与 headless 共用一套准入判定（见
-/// `server::access` 的模块头），这里只是让直连那条通道也带上凭证。
-pub fn management_key() -> Option<String> {
-    read_api_key()
-}
-
 /// 指定总超时的本机直连 Client。
 ///
 /// 本机管理请求携带凭据，必须绕过系统与环境变量代理。
@@ -236,10 +191,6 @@ pub(crate) fn local_client(timeout: Duration) -> Result<reqwest::Client, String>
         .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))
 }
 
-fn request_builder(method: &str, path: &str, body: Option<&Value>) -> Result<reqwest::RequestBuilder, String> {
-    request_builder_with_timeout(method, path, body, REQUEST_TIMEOUT_MS)
-}
-
 fn request_builder_with_timeout(
     method: &str,
     path: &str,
@@ -247,7 +198,6 @@ fn request_builder_with_timeout(
     timeout_ms: u64,
 ) -> Result<reqwest::RequestBuilder, String> {
     let url = format!("http://127.0.0.1:{}{path}", proxy_port());
-    crate::panel_session::ensure_local_access()?;
     let base = local_client(Duration::from_millis(timeout_ms))?;
     let mut builder = match method.to_uppercase().as_str() {
         "GET" => base.get(&url),
@@ -258,11 +208,7 @@ fn request_builder_with_timeout(
         other => return Err(format!("不支持的请求方法: {other}")),
     };
     builder = builder.header("Accept", "application/json");
-    if let Some(key) = read_api_key() {
-        builder = builder.header("X-API-Key", key);
-    }
-    // 管理会话与 Key 并存；模型入口仍必须校验显式携带的 Key。
-    builder = crate::panel_session::attach(builder);
+    builder = crate::panel_session::attach(builder)?;
     // 与原实现一致：POST/PUT/PATCH 即使无参数也发一个空对象，
     // 后端部分路由按「有 body」判定，省略会让它们走错分支
     if let Some(payload) = body {
@@ -279,11 +225,7 @@ fn request_builder_with_timeout(
 
 /// 发一次管理请求，返回解包后的 data。
 ///
-/// ── 401 的自动续期 ──────────────────────────────────────────
-/// 面板会话的 access 只有 2 小时；过期后服务端回 401 + `panel_login_required`。
-/// 这时先用 refresh 静默换一组新令牌、把同一请求重发一次 —— 用户不该每两小时
-/// 被弹一次登录页。续期也失败（会话链真没了）才把错误交给调用方，界面据此
-/// 提示「登录已过期」。重试只做一次，不会无限循环。
+/// 明确的管理鉴权失败只恢复本机会话并重试一次；模型 Key 错误与网络错误不重试。
 pub async fn call(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
     call_with_timeout(method, path, body, REQUEST_TIMEOUT_MS).await
 }
@@ -293,25 +235,22 @@ pub async fn call_with_api_key(method: &str, path: &str, body: Option<&Value>, a
         return Err("显式 API Key 仅用于模型测试".to_string());
     }
     crate::startup::wait().await?;
-    crate::panel_session::refresh_if_expiring().await;
     let send = || async {
-        let mut request = request_builder(method, path, body)?.build()
+        let mut request = request_builder_with_timeout(method, path, body, REQUEST_TIMEOUT_MS)?.build()
             .map_err(|error| format!("构造模型测试请求失败: {error}"))?;
         let key = reqwest::header::HeaderValue::from_str(api_key)
             .map_err(|_| "API Key 包含无效的请求头字符".to_string())?;
         request.headers_mut().insert("x-api-key", key);
+        let credentials = request.headers().clone();
         let response = local_client(Duration::from_millis(REQUEST_TIMEOUT_MS))?.execute(request).await
             .map_err(|error| describe_transport_error(&error))?;
         let status = response.status().as_u16();
         let text = response.text().await.map_err(|error| format!("读取响应失败: {error}"))?;
         let payload = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
-        Ok::<_, String>(RawResponse { status, text, payload })
+        Ok::<_, String>(RawResponse { status, text, payload, credentials })
     };
     let first = send().await?;
-    if first.status == 401
-        && first.payload.pointer("/error/type").and_then(Value::as_str) == Some("panel_login_required")
-        && crate::panel_session::refresh().await
-    {
+    if recover_management_session(&first, path)? {
         let retried = send().await?;
         return unwrap_envelope(&retried.text, retried.status);
     }
@@ -330,30 +269,33 @@ pub async fn call_with_timeout(
     timeout_ms: u64,
 ) -> Result<Value, String> {
     crate::startup::wait().await?;
-    // 到期前先把令牌换掉：这一步让「access 过期 → 401 → 续期」不再发生。
-    // 只靠下面那个 401 分支的话，每次过期都必然产生一条 401（壳里后台轮询
-    // 每 20 秒一轮，服务端每 2 小时准时记一条）。失败静默，交给 401 分支兜底。
-    crate::panel_session::refresh_if_expiring().await;
     let first = send_once(method, path, body, timeout_ms).await?;
-    if first.status == 401 && crate::panel_session::has_tokens() {
-        let detail = first.payload.get("error");
-        let needs_login = detail
-            .and_then(|error| error.get("type"))
-            .and_then(Value::as_str)
-            == Some("panel_login_required");
-        if needs_login && crate::panel_session::refresh().await {
-            let retried = send_once(method, path, body, timeout_ms).await?;
-            return unwrap_envelope(&retried.text, retried.status);
-        }
+    if recover_management_session(&first, path)? {
+        let retried = send_once(method, path, body, timeout_ms).await?;
+        return unwrap_envelope(&retried.text, retried.status);
     }
     unwrap_envelope(&first.text, first.status)
 }
 
-/// 一次请求的原始结果（保留文本与解析值，供 401 判定与信封解包共用）。
+/// 一次请求的原始结果（保留文本与解析值，供鉴权判定与信封解包共用）。
 struct RawResponse {
     status: u16,
     text: String,
     payload: Value,
+    credentials: reqwest::header::HeaderMap,
+}
+
+fn recover_management_session(response: &RawResponse, path: &str) -> Result<bool, String> {
+    if response.status != 401 || !path.starts_with("/api/") {
+        return Ok(false);
+    }
+    let kind = response.payload.pointer("/error/type").and_then(Value::as_str);
+    let management_failure = kind == Some("panel_login_required")
+        || (kind == Some("invalid_api_key") && !response.credentials.contains_key("x-api-key"));
+    if !management_failure {
+        return Ok(false);
+    }
+    crate::panel_session::recover_rejected(&response.credentials)
 }
 
 async fn send_once(
@@ -362,9 +304,11 @@ async fn send_once(
     body: Option<&Value>,
     timeout_ms: u64,
 ) -> Result<RawResponse, String> {
-    let builder = request_builder_with_timeout(method, path, body, timeout_ms)?;
-    let response = builder
-        .send()
+    let request = request_builder_with_timeout(method, path, body, timeout_ms)?.build()
+        .map_err(|error| format!("构造管理请求失败: {error}"))?;
+    let credentials = request.headers().clone();
+    let response = local_client(Duration::from_millis(timeout_ms))?
+        .execute(request)
         .await
         .map_err(|error| describe_transport_error(&error))?;
     let status = response.status().as_u16();
@@ -377,26 +321,23 @@ async fn send_once(
         status,
         text,
         payload,
+        credentials,
     })
 }
 
 /// 取原始文本（导出日志用；call 会按 JSON 解析，不适合）。
-///
-/// 401 同样先续期再重试一次（与 [`call`] 同一取向）—— 导出日志的请求也走
-/// 管理面鉴权，access 过期时不该让用户看到一条莫名其妙的失败。
+/// 管理会话被拒时同样最多恢复并重试一次。
 pub async fn call_text(method: &str, path: &str) -> Result<String, String> {
     crate::startup::wait().await?;
-    // 与 call_with_timeout 同一取向：到期前先续期，别让这条请求去撞 401
-    crate::panel_session::refresh_if_expiring().await;
-    let first = send_text_once(method, path).await?;
-    if first.status == 401 && crate::panel_session::refresh().await {
-        let retried = send_text_once(method, path).await?;
+    let first = send_once(method, path, None, REQUEST_TIMEOUT_MS).await?;
+    if recover_management_session(&first, path)? {
+        let retried = send_once(method, path, None, REQUEST_TIMEOUT_MS).await?;
         return checked_text(retried);
     }
     checked_text(first)
 }
 
-fn checked_text(response: TextResponse) -> Result<String, String> {
+fn checked_text(response: RawResponse) -> Result<String, String> {
     if !(200..300).contains(&response.status) {
         return match unwrap_envelope(&response.text, response.status) {
             Err(message) => Err(message),
@@ -404,26 +345,6 @@ fn checked_text(response: TextResponse) -> Result<String, String> {
         };
     }
     Ok(response.text)
-}
-
-/// 一次文本请求的原始结果（保留状态码供 401 判定）。
-struct TextResponse {
-    status: u16,
-    text: String,
-}
-
-async fn send_text_once(method: &str, path: &str) -> Result<TextResponse, String> {
-    let builder = request_builder(method, path, None)?;
-    let response = builder
-        .send()
-        .await
-        .map_err(|error| describe_transport_error(&error))?;
-    let status = response.status().as_u16();
-    let text = response
-        .text()
-        .await
-        .map_err(|error| format!("读取响应失败: {error}"))?;
-    Ok(TextResponse { status, text })
 }
 
 fn describe_transport_error(error: &reqwest::Error) -> String {

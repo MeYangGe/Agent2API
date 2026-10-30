@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { hasProxyUsage, type ProxyUsage } from '../../../ui-shared/proxy-usage'
+import { type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { BalanceQueryPublic } from './balance-query'
 import type { LimiterGroup, LimiterSnapshot } from './accounts-limiter-types'
 import type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
@@ -358,11 +358,8 @@ export type AccountsBridge = {
     tokenUsage?: Record<string, unknown>
     sorting?: AccountSorting
   } | null | undefined>
-  getProxies(): Promise<{ clash?: ClashSnapshot } | null | undefined>
-  /** 代理池列表（「网络代理」页维护的命名代理）：账号代理表单的
-   *  「已保存的代理」下拉读它；写侧（增删改）只有那一页用，不在这份桥里。
-   *  `kernelInstalled` 决定没有端口的订阅节点说成「内核未安装」还是「未被使用」 */
-  getProxyPool(): Promise<{ items?: PoolItem[]; kernelInstalled?: boolean } | null | undefined>
+  getProxies(): Promise<{ clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot } | null | undefined>
+  getProxyPool(): Promise<{ items?: PoolItem[] } | null | undefined>
   /** 测一条池条目（账号表单里选中池引用时的「测试出口」）：
    *  结果会记进那条代理的「上次测试」，与代理页那颗按钮同一个动作 */
   testProxyPoolItem(id: string): Promise<{
@@ -400,20 +397,6 @@ export type AccountsBridge = {
   } | null | undefined>
 }
 
-/** `/api/proxies` 里 clash 那一段（出口列表 + 可用性） */
-export type ClashSnapshot = {
-  available?: boolean
-  error?: string
-  dir?: string
-  options?: Array<{
-    uid?: string
-    name?: string
-    port?: number
-    profileActive?: boolean
-    enabled?: boolean
-  }>
-}
-
 /**
  * 「网络代理」页（代理池）的一条条目 —— 只列账号表单用到的字段，
  * 完整形态见 ui-islands/src/islands/proxies-page.tsx 的 PoolItem。
@@ -422,120 +405,28 @@ export type ClashSnapshot = {
 export type PoolItem = ProxyUsage & {
   id: string
   name?: string
-  /** manual | clash（表单里按它标「手动 / Clash Verge」） */
   source?: string
   enabled?: boolean
-  /** 订阅节点的监听端口；null = 未分配（lazy listeners，见网络代理页） */
+  protocol?: string
+  host?: string
   port?: number | null
-  /** 解析后的出口（Clash 条目的端口在这里是实时值）；不受控字段按 unknown 收 */
   resolved?: { protocol?: string; host?: string; port?: number | null; label?: string } | null
-  /** 解析失败的原因（引用了已删除的 Clash 监听器等） */
   resolveError?: string | null
-  /** 孤儿订阅节点：所属订阅已不存在（后端标注） */
-  orphan?: boolean
 }
 
-/**
- * 订阅节点还没有监听端口 —— lazy listeners 下的**正常状态**，不是解析失败。
- *
- * 端口在账号或服务线路引用并保存后由内核分配；无引用或重建尚未完成时没有
- * 端口。下拉与网络代理页都按引用状态展示，不把这个中间态当成解析失败。
- */
-export function isPortlessSubscription(item: PoolItem): boolean {
-  return item.source === 'subscription' && (item.port === null || item.port === undefined)
-}
-
-/**
- * 内核装没装（池列表响应里的 `kernelInstalled`；`null` = 还不知道）。
- *
- * 放在这里而不是 `proxy-pool-cache.ts`：那边已经 import 本文件，反过来再
- * import 它就成了环。写入方只有 `proxy-pool-cache`（它拿到池列表时同步
- * 一次），读取方是所有拼下拉文案的地方 —— 都不必各自再传参数。
- */
-let kernelInstalledCache: boolean | null = null
-
-/** 写入内核安装状态（`proxy-pool-cache` 收到池列表时调） */
-export function setKernelInstalled(value: boolean | null): void {
-  kernelInstalledCache = value
-}
-
-/** 内核装没装（`null` = 还没读到池列表，此时不该下「没装」的结论） */
-export function kernelInstalled(): boolean | null {
-  return kernelInstalledCache
-}
-
-/**
- * 没有监听端口的订阅节点怎么说 —— 按成因分开讲，别一句话糊过去。
- * 判据顺序就是**用户该先处理哪件事**的顺序：
- *   · 内核没装 → 内核未安装（全局前提都没有，先下载内核）
- *   · 所属订阅已删（孤儿）→ 订阅已移除（不会再分配了，只能删条目）
- *   · 本页禁用中 → 已禁用（端口随禁用一起收掉，启用才会回来）
- *   · 有账号或服务线路引用、端口还没就位 → 端口准备中
- *   · 没有任何引用 → 未被使用
- *
- * `installed` 传 `null`/`undefined` = 还不知道（池列表没读到），此时
- * 不把「内核没装」当结论 —— 误报成「未安装」比不说更糟。
- *
- * 不论哪一种都**不是**「解析失败」：后端对这类条目也会带一条 resolveError
- * （「还没有监听端口」），照它画红会让整列看着像出了事故。
- */
-export function portlessSubscriptionLabel(
-  item: PoolItem,
-  installed: boolean | null = kernelInstalledCache,
-): string {
-  if (installed === false) return t('内核未安装')
-  if (item.orphan) return t('订阅已移除')
-  if (item.enabled === false) return t('已禁用')
-  if (hasProxyUsage(item)) return t('端口准备中')
-  return t('未被使用')
-}
-
-/**
- * 池条目的地址串：`HTTP 127.0.0.1:7910`（协议大写 + 主机 + 端口）。
- *
- * 与 OmniProxy 的名称列第二行同一口径（它的 ProxiesPage 就在名字下面写
- * `${protocol.toUpperCase()} ${host}:${port}`）。用解析后的 host/port 而不是
- * `resolved.label`：label 对 Clash 条目是「监控器名（:端口）」、对混合端口是
- * 「Clash 混合端口 7892」—— 都不含主机，且形态随来源变。这里统一成同一串，
- * 用户在下拉里能直接核对「这条连的是哪儿」。
- *
- * 取不到（解析失败 / 字段缺失）时回落 `resolved.label`，再没有就是空串。
- */
-export function poolItemAddress(item: PoolItem, installed: boolean | null = kernelInstalledCache): string {
-  // 没有端口不等于解析失败：按账号与服务线路的引用状态说明原因
-  if (isPortlessSubscription(item)) {
-    return portlessSubscriptionLabel(item, installed)
+/** 代理统一展示实时解析出的协议地址，供列表与下拉核对。 */
+export function poolItemAddress(item: PoolItem): string {
+  const proxy = item.resolved || item
+  if (proxy.protocol && proxy.host && proxy.port) {
+    const host = proxy.host.includes(':') && !proxy.host.startsWith('[') ? `[${proxy.host}]` : proxy.host
+    return `${String(proxy.protocol).toLowerCase()}://${host}:${proxy.port}`
   }
-  const resolved = item.resolved
-  if (resolved?.protocol && resolved.host && resolved.port) {
-    return `${String(resolved.protocol).toUpperCase()} ${resolved.host}:${resolved.port}`
-  }
-  return resolved?.label || ''
+  return item.resolved?.label || ''
 }
 
-/**
- * 池条目在下拉里的展示名：`香港HK-A（HTTP 127.0.0.1:7909）` /
- * `香港HK-A（HTTP 127.0.0.1:7909 · 已禁用）` / `香港HK-A（解析失败）` /
- * `香港HK-A（未被使用）`。
- *
- * 三个地方共用（账号表代理列 / 账号弹窗的代理表单 / 更新设置的出网线路）——
- * 各写一份迟早会漂移成本次这种事（有一处忘了写地址，用户下拉里只能看到名字）。
- * 条目的来源（手动 / Clash）不在这里标：下拉里已经有地址可比对，来源在
- * 「网络代理」页的类型列上。
- *
- * 没有端口的订阅节点**不能**按 `resolveError` 写成「解析失败」：后端对这类
- * 条目同样会带一条 `resolveError`（「还没有监听端口」），但它是 lazy listeners
- * 的正常状态。误报成失败会让用户去查节点 / 订阅，而该做的是选中它。
- */
-export function poolItemLabel(item: PoolItem, installed: boolean | null = kernelInstalledCache): string {
+export function poolItemLabel(item: PoolItem): string {
   const name = item.name || item.id
-  const address = item.resolveError && !isPortlessSubscription(item)
-    ? t('解析失败')
-    : poolItemAddress(item, installed)
-  // 地址串已经把「已禁用」的原因说出来了（见 portlessSubscriptionLabel），
-  // 再追加一个「· 已禁用」就是同一句话说两遍
-  const parts = [address, item.enabled === false && !isPortlessSubscription(item) ? t('已禁用') : '']
-    .filter(Boolean)
+  const parts = [item.source === 'clash' ? 'Clash Verge' : '', item.resolveError ? t('解析失败') : poolItemAddress(item), item.enabled === false ? t('已禁用') : ''].filter(Boolean)
   return parts.length ? t('{name}（{parts}）', { name, parts: parts.join(' · ') }) : name
 }
 

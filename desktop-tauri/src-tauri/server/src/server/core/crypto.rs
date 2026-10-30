@@ -109,7 +109,7 @@ impl SecretScope {
     ///
     /// `update-token.key` **必须逐字保持**：改名字等于换了密钥文件，已发布用户
     /// 机器上的 GitHub 令牌会全部解不开，而用户不会想到「升级一次就丢了令牌」。
-    fn key_file(self) -> &'static str {
+    pub(crate) fn key_file(self) -> &'static str {
         match self {
             SecretScope::UpdateToken => "update-token.key",
             SecretScope::Accounts => "account.key",
@@ -157,7 +157,7 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
 /// **不存在就现场生成**，生成失败（目录不可写等）不能把失败缓存成永久状态 ——
 /// 下次保存还能重试；同时首次并发的两个保存要串行（各自生成不同的密钥、互相
 /// 覆盖文件，先存的那份密文就再也解不开了）。
-fn secret_key(scope: SecretScope) -> Result<[u8; KEY_LEN], String> {
+pub(crate) fn secret_key(scope: SecretScope) -> Result<[u8; KEY_LEN], String> {
     let cell = cache_for(scope);
     let Ok(mut guard) = cell.lock() else {
         return Err("密钥锁中毒".to_string());
@@ -370,6 +370,25 @@ pub fn existing_key_bytes(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
     existing_key(scope)
 }
 
+pub(crate) fn backup_key(scope: SecretScope) -> Result<Option<[u8; KEY_LEN]>, String> {
+    let guard = cache_for(scope).lock().map_err(|_| "密钥锁不可用".to_string())?;
+    if let Some(key) = *guard {
+        return Ok(Some(key));
+    }
+    drop(guard);
+    if let Some(key) = env_key(scope) {
+        return Ok(Some(key));
+    }
+    let path = key_file_path(scope);
+    match std::fs::read(&path) {
+        Ok(bytes) => <[u8; KEY_LEN]>::try_from(bytes.as_slice())
+            .map(Some)
+            .map_err(|_| format!("密钥文件 {} 长度异常", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取密钥文件 {} 失败: {error}", path.display())),
+    }
+}
+
 // ─── 加密 / 解密（对外）─────────────────────────────────────
 
 /// 加密明文 → `enc1:<base64(nonce||密文+tag)>`。
@@ -378,12 +397,16 @@ pub fn existing_key_bytes(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
 /// 会互相泄底），随机性来自系统熵源；不用计数器 —— 进程重启后计数没有持久化，
 /// 随机 nonce 才是这里站得住的选择。
 pub fn seal(plaintext: &[u8], scope: SecretScope) -> Result<String, String> {
+    let key = secret_key(scope)?;
+    seal_with_key(plaintext, &key)
+}
+
+pub(crate) fn seal_with_key(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<String, String> {
     use aes_gcm::aead::{consts::U12, Aead as _};
     use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 
-    let key = secret_key(scope)?;
     let cipher =
-        Aes256Gcm::new_from_slice(&key).map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
+        Aes256Gcm::new_from_slice(key).map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce_bytes).map_err(|error| format!("系统随机源不可用: {error}"))?;
     let nonce =
@@ -403,6 +426,21 @@ pub fn seal(plaintext: &[u8], scope: SecretScope) -> Result<String, String> {
 /// 密钥不匹配那句会把**具体密钥文件名**带出去 —— 用户要知道该去找哪个文件，
 /// 这句会经 `status_json` 显示到界面上。
 pub fn open(envelope: &str, scope: SecretScope) -> Result<Vec<u8>, String> {
+    decrypt_envelope(envelope, || secret_key(scope), &format!(
+        "AES-GCM 解密失败（密钥文件 {} 是否被删除或更换？{}）",
+        scope.key_file(), scope.recovery_hint(),
+    ))
+}
+
+pub(crate) fn open_with_key(envelope: &str, key: &[u8; KEY_LEN]) -> Result<Vec<u8>, String> {
+    decrypt_envelope(envelope, || Ok(*key), "AES-GCM 解密失败（密文与备份密钥不匹配）")
+}
+
+fn decrypt_envelope(
+    envelope: &str,
+    resolve: impl FnOnce() -> Result<[u8; KEY_LEN], String>,
+    failure: &str,
+) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::{consts::U12, Aead as _};
     use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 
@@ -418,18 +456,13 @@ pub fn open(envelope: &str, scope: SecretScope) -> Result<Vec<u8>, String> {
         return Err("密文长度异常".to_string());
     }
     // 密钥在长度校验之后才取：坏信封不该触发「现场生成密钥文件」这类副作用
-    let key = secret_key(scope)?;
+    let key = resolve()?;
     let cipher =
         Aes256Gcm::new_from_slice(&key).map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
     let nonce = Nonce::<U12>::try_from(&blob[..NONCE_LEN])
         .map_err(|_| "密文 nonce 长度异常".to_string())?;
-    let plaintext = cipher.decrypt(&nonce, &blob[NONCE_LEN..]).map_err(|_| {
-        format!(
-            "AES-GCM 解密失败（密钥文件 {} 是否被删除或更换？{}）",
-            scope.key_file(),
-            scope.recovery_hint()
-        )
-    })?;
+    let plaintext = cipher.decrypt(&nonce, &blob[NONCE_LEN..])
+        .map_err(|_| failure.to_string())?;
     // UTF-8 闸门：旧实现 `token.rs::decrypt` 的这条文案会被界面原样展示，
     // 属于对外行为，不能因为返回值换成字节就漏掉（见模块头）
     std::str::from_utf8(&plaintext).map_err(|_| "解密结果不是合法 UTF-8 文本".to_string())?;

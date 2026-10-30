@@ -158,7 +158,6 @@ pub async fn get_system_info(
             "exePath": exe.as_deref().map(show).unwrap_or_default(),
             "installerKind": update::installer_kind(),
             "selfUpdate": selfupdate::supported(),
-            "backupAvailable": selfupdate::backup_available(),
         },
         "security": {
             "adminRegistered": access::admin_registered(),

@@ -290,48 +290,21 @@ pub async fn panel_register(username: String, password: String) -> Result<Value,
     }
 }
 
-// ── 面板登录（桌面壳的会话通道）──────────────────────────────
-//
-// ── 为什么桌面端也需要这套东西 ──────────────────────────────
-// 桌面窗口加载 `tauri://localhost`，网关在 `127.0.0.1:{port}`：跨源，登录响应
-// 的 HttpOnly cookie 到不了网关。所以桌面形态走网页端「中转模式」的同一条
-// 通道 —— 令牌进响应体、之后每个请求带 `x-panel-token` 头（实现见
-// `panel_session`）。这组命令只做三件事：查状态、存令牌、清令牌。
-//
-// 什么时候需要登录由 `admin_registered()` 决定：没注册过管理员时面板免鉴权
-// （桌面端「当正常软件用」的默认形态），注册过就必须登录 —— 注册本身发生在
-// 「开启局域网访问」的流程里，或用户主动从登录页注册。
+// ── 本机管理会话 ────────────────────────────────────────────
+// 桌面壳始终使用独立会话；网页管理员的注册状态不决定桌面端是否需要登录。
 
-/// 当前面板会话状态（窗口启动时、以及每次从登录页回来时查询）。
-///
-/// 返回 `{ registered, authenticated }`：
-///   · `registered = false` → 不需要登录，直接进主界面；
-///   · `registered = true && authenticated = false` → 窗口应加载登录页；
-///   · 两者都 true → 直接进主界面。
-///
-/// `authenticated` 的判断方式是**真的打一次 `/api/session`**：本地有没有令牌
-/// 不代表它还有效（可能过期、可能被改密码撤销），只有服务端说了才算。这里
-/// 顺带触发 `gateway::call` 的自动续期 —— access 过期但 refresh 还活着时，
-/// 这一次探测就会把新令牌换回来，用户完全无感。
+/// 后端与本机会话准备好后返回状态；连接失败原样上报，不能当成未登录。
 #[tauri::command]
 pub async fn panel_session_status() -> Result<Value, String> {
     crate::startup::wait().await?;
-    let registered = crate::server::access::admin_registered();
-    if !registered {
-        return Ok(json!({ "registered": false, "authenticated": false }));
-    }
-    let authenticated = crate::gateway::call("GET", "/api/session", None)
-        .await
-        .is_ok();
-    Ok(json!({ "registered": true, "authenticated": authenticated }))
+    crate::gateway::call("GET", "/api/session", None).await?;
+    Ok(json!({
+        "registered": crate::server::access::admin_registered(),
+        "authenticated": true,
+    }))
 }
 
-/// 保存登录页交来的令牌（登录 / 注册成功后由页面调用）。
-///
-/// 令牌加密后写进桌面设置（见 `panel_session`），壳随后每个管理请求自动带上。
-/// `expires_in` 是服务端下发的 access 剩余秒数：壳靠它判断什么时候该**提前**
-/// 续期，而不是等 401 才发现过期（见 `panel_session::refresh_if_expiring`）。
-/// 旧版页面不传（`Option`），按「不知道」处理，行为退回 401 被动续期。
+/// 兼容旧页面的令牌保存入口；网页令牌不再作为本机壳的管理凭证。
 #[tauri::command]
 pub async fn panel_session_store(
     access_token: String,
@@ -342,14 +315,12 @@ pub async fn panel_session_store(
     if access_token.is_empty() || refresh_token.is_empty() {
         return Err("令牌为空".to_string());
     }
-    crate::panel_session::store(&access_token, &refresh_token, expires_in.unwrap_or(0))?;
+    let _ = expires_in;
+    crate::panel_session::ensure_local_access()?;
     Ok(json!({ "saved": true }))
 }
 
-/// 清除本机的面板会话（登出 / 会话失效后由界面调用）。
-///
-/// 只清**本机**这份令牌；服务端那条会话链由界面另行调用 `/api/panel/logout`
-/// 撤销（那条请求会带上下面的令牌，所以必须在清之前发）。
+/// 撤销本机壳的会话；下一次管理操作会自动建立新的本机会话。
 #[tauri::command]
 pub async fn panel_session_clear() -> Result<Value, String> {
     crate::startup::wait().await?;
@@ -365,11 +336,8 @@ pub async fn panel_session_clear() -> Result<Value, String> {
 /// 后开启」，这里再挡一道防绕过。
 ///
 /// ── 为什么在开启时补一把默认 Key ────────────────────────────
-/// 闸门与桌面壳自身的管理通道都建立在「至少一把启用的 Key」上：壳对管理 API
-/// 的请求靠自动携带第一把 Key 认证（`gateway::read_api_key`），一把启用的
-/// Key 都没有时，注册过管理员的世界里壳会被自己的闸门挡在外面（用户还没
-/// 来得及建 Key）。开启流程顺手补一把名为「默认」的 Key，并通过返回值告诉
-/// 界面去提示 —— 用户在「网关 Key」页能看到它。
+/// 局域网模型调用必须携带启用的 Key；尚未配置时补一把并提示用户。
+/// 桌面管理使用独立的本机会话，不依赖这把 Key。
 ///
 /// 重启用 [`schedule_app_restart`]：监听地址在 bind 之后就改不了，
 /// 与 `change_port` 同一条铁律。
@@ -408,31 +376,11 @@ pub async fn change_lan_access(app: AppHandle, enabled: bool, panel: bool) -> Re
     }))
 }
 
-/// 界面直连网关时该带的凭证头（AI 助手的配置读写与流式对话）。
-///
-/// ── 为什么需要单独一条命令 ──────────────────────────────────
-/// 助手页为了流式对话/不受桥 60 秒超时限制，直接 fetch 网关基址（见
-/// ui-islands/src/islands/assistant-state.ts）。桌面形态下页面来自 Tauri
-/// 自定义协议、网关在 `127.0.0.1:{port}`：跨源 + 不带 cookie，请求里没有
-/// 任何凭证；面板认证一旦开启（设置页开过局域网访问就会注册管理员），
-/// `/api/*` 要求「面板会话或一把启用的 Key」，那条裸请求就会被 401
-/// `panel_login_required` 拒绝 —— 用户看到的就是「加载助手设置失败：请先
-/// 登录管理面板」，而桌面上并没有登录页。把壳自己用的那把 Key 交给页面，
-/// 直连通道与桥通道的凭证口径就一致了。
-///
-/// 返回 `{ 头名: 值 }`（桌面端只有 `x-api-key`）：网页端 shim 的同名方法回
-/// 面板令牌 / 用户输入的 Key，助手页对两端一视同仁，只负责合并。面板认证
-/// 没开启时多带一个头也不会被拒 —— 中间件的鉴权分支只在开启后才看它。
+/// 界面直连网关时的管理凭证；模型调用必须另外选择并携带模型 Key。
 #[tauri::command]
 pub async fn direct_credentials() -> Result<Value, String> {
     crate::startup::wait().await?;
-    crate::panel_session::refresh_if_expiring().await;
-    crate::panel_session::ensure_local_access()?;
-    let mut headers = crate::panel_session::credential_headers();
-    if let Some(key) = crate::gateway::management_key() {
-        headers.insert("x-api-key".to_string(), Value::String(key));
-    }
-    Ok(Value::Object(headers))
+    Ok(Value::Object(crate::panel_session::credential_headers()?))
 }
 
 /// 本机在局域网里的地址（给「局域网访问」面板显示 `http://<IP>:<端口>/v1` 用）。
@@ -799,7 +747,7 @@ fn unwrap_envelope_file(parsed: Value) -> Value {
     }
 }
 
-/// 整库备份：弹系统保存框，后端把整库导出为 SQL 文本直接写到该路径。
+/// 整库备份：用户选择路径，后端直写密码加密完整包。
 ///
 /// 与账号导出（`export_accounts`）不同：**没有「空库不导」分支** —— 整库
 /// 语义下 kv 表至少有配置项，空库同样值得备份。文件内容不经壳中转，
@@ -808,16 +756,19 @@ fn unwrap_envelope_file(parsed: Value) -> Value {
 pub async fn export_database(
     app: AppHandle,
     #[allow(non_snake_case)] includeLogs: Option<bool>,
+    password: String,
 ) -> Result<Value, String> {
+    if password.chars().count() < 12 || password.len() > 1024 {
+        return Err("备份密码需要至少 12 位，且不能超过 1024 字节".into());
+    }
     let stamp = timestamp_for_filename();
-    let default_name = format!("agent2api-backup-{stamp}.sql");
+    let default_name = format!("agent2api-backup-{stamp}.a2ab");
     let file = app
         .dialog()
         .file()
         .set_title("整库备份")
         .set_file_name(&default_name)
-        .add_filter("SQL", &["sql"])
-        .add_filter("全部文件", &["*"])
+        .add_filter("Agent2API 加密备份", &["a2ab"])
         .blocking_save_file();
     let Some(target) = file else {
         return Ok(json!({ "canceled": true }));
@@ -829,6 +780,7 @@ pub async fn export_database(
         "filePath": path.to_string_lossy(),
         // 前端不传（旧壳直调）时按完整导出
         "includeLogs": includeLogs.unwrap_or(true),
+        "password": password,
     });
     let mut data = gateway::call_with_timeout(
         "POST",
@@ -852,17 +804,17 @@ pub async fn export_database(
 /// 「连接本地代理超时」，还误以为数据没进去。
 const BACKUP_TRANSFER_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
-/// 整库恢复：弹系统打开框，后端校验该 SQL 文件后整体替换数据库。
+/// 整库恢复：选择加密包或旧 SQL，后端校验后整体替换数据库。
 ///
 /// 覆盖前的确认弹窗由前端负责（文案里说明「本机数据会先自动备份到
 /// backups/ 目录」「恢复后需重新登录面板」）；这里只做选文件与转发。
 #[tauri::command]
-pub async fn import_database(app: AppHandle) -> Result<Value, String> {
+pub async fn import_database(app: AppHandle, password: Option<String>) -> Result<Value, String> {
     let file = app
         .dialog()
         .file()
         .set_title("整库恢复")
-        .add_filter("SQL", &["sql"])
+        .add_filter("Agent2API 备份", &["a2ab", "sql"])
         .add_filter("全部文件", &["*"])
         .blocking_pick_file();
     let Some(target) = file else {
@@ -871,7 +823,7 @@ pub async fn import_database(app: AppHandle) -> Result<Value, String> {
     let path = target
         .into_path()
         .map_err(|error| format!("文件路径无效: {error}"))?;
-    let payload = json!({ "filePath": path.to_string_lossy() });
+    let payload = json!({ "filePath": path.to_string_lossy(), "password": password.unwrap_or_default() });
     // 即便放宽到 30 分钟，请求仍可能先于后端收尾而超时（超大库 / 极慢盘）。
     // 那时**不能**报失败：后端照旧在跑，进度弹窗还在轮询。所以超时后去问一次
     // 进度快照 —— 它带着真实阶段，界面据此继续显示「正在替换主数据库…」，
@@ -893,6 +845,11 @@ pub async fn import_database(app: AppHandle) -> Result<Value, String> {
                     Err("恢复仍在进行中，请等待进度弹窗里的结果".to_string())
                 }
                 Ok(snapshot) => {
+                    if snapshot.get("done").and_then(Value::as_bool) == Some(true) {
+                        if let Some(result) = snapshot.get("result") {
+                            return Ok(result.clone());
+                        }
+                    }
                     let failed = snapshot.get("failed").and_then(Value::as_bool) == Some(true);
                     let detail = snapshot
                         .get("error")

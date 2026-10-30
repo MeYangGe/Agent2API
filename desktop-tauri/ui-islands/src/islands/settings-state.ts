@@ -258,12 +258,13 @@ export type StorageState = {
   available: boolean
   file: string
   bytes: number
-  /** 五个计数：null = 后端没给可用的数（展示「—」） */
+  /** null 表示后端未提供可用读数。 */
   accounts: number | null
   logs: number | null
   requests: number | null
   dailyDays: number | null
-  debug: number | null
+  downstreamRaw: number | null
+  upstreamRaw: number | null
 }
 
 /** 导入失败明细（只列前 3 条，more 表示还有更多） */
@@ -331,6 +332,7 @@ export type SettingsSnapshot = {
    * `dbBackupConfirm` 非空 = 恢复确认弹窗开着（记录的是确认时要执行的参数集）。
    */
   dbIncludeLogs: boolean
+  dbExportConfirm: boolean
   dbBackupConfirm: { includeLogs: boolean } | null
   /**
    * 整库恢复返回的密钥警告原文（`DatabaseImportResult.warning`；null = 没有警告）。
@@ -383,6 +385,8 @@ export type DbRestoreProgress = {
   safetyBackup: string
   /** 密钥指纹不匹配的警告原文（`done` 时可能有） */
   warning: string
+  reencryptedSecrets: number
+  localKeysPreserved: boolean
   startedAt: number
   finishedAt: number
 }
@@ -450,7 +454,8 @@ const INITIAL: SettingsSnapshot = {
     logs: null,
     requests: null,
     dailyDays: null,
-    debug: null,
+    downstreamRaw: null,
+    upstreamRaw: null,
   },
   captcha: { available: true, desktop: false, web: false, localPanel: false },
   account: { status: 'loading', registered: false, username: '', password: null },
@@ -459,6 +464,7 @@ const INITIAL: SettingsSnapshot = {
   retentionConfirm: null,
   // 整库备份：默认包含日志与调试报文（完整备份）；恢复确认弹窗默认关闭
   dbIncludeLogs: true,
+  dbExportConfirm: false,
   dbBackupConfirm: null,
   dbWarning: null,
   dbRestore: null,
@@ -891,8 +897,18 @@ export function toggleDbIncludeLogs(on: boolean): void {
  * 整库备份：桌面端由后端直写到壳选的路径（文件不过壳中转），网页端由浏览器
  * 下载附件（见 web_shim.rs），两侧返回值同形。导出没有「空库不导」分支。
  */
-export async function exportDatabase(): Promise<void> {
-  if (busyScope) return
+export function confirmDbExport(): void {
+  if (busyScope || snapshot.dbRestore?.active) return
+  publish({ dbExportConfirm: true })
+}
+
+export function cancelDbExport(): void {
+  publish({ dbExportConfirm: false })
+}
+
+export async function exportDatabase(password: string): Promise<void> {
+  if (busyScope || snapshot.dbRestore?.active) return
+  publish({ dbExportConfirm: false })
   beginBusy('dbExport')
   try {
     const api = shared().workbuddyDesktop
@@ -900,11 +916,11 @@ export async function exportDatabase(): Promise<void> {
       toast(t('当前环境不支持整库备份'), 'err')
       return
     }
-    const result = await api.exportDatabase(snapshot.dbIncludeLogs)
+    const result = await api.exportDatabase(snapshot.dbIncludeLogs, password)
     if (result?.canceled) { toast(t('已取消导出')); return }
     const size = Number(result?.bytes) || 0
     const tables = Array.isArray(result?.tables) ? result.tables.length : 0
-    toast(t('✅ 已备份 {n} 张表（{size}）到 {file}', {
+    toast(t('✅ 已加密备份 {n} 张表（{size}），包含恢复密钥：{file}', {
       n: tables,
       size: formatBytes(size),
       file: result?.file || '',
@@ -918,14 +934,14 @@ export async function exportDatabase(): Promise<void> {
 
 /** 点「恢复」：先弹确认框（整库恢复是替换语义，二次确认后才开始） */
 export function confirmDbRestore(): void {
-  if (busyScope) return
+  if (busyScope || snapshot.dbRestore?.active) return
   publish({ dbBackupConfirm: { includeLogs: snapshot.dbIncludeLogs } })
 }
 
 /** 确认框出口（与 resolveRetentionConfirm 同形）：确认后才执行恢复 */
-export function resolveDbBackupConfirm(accepted: boolean): void {
+export function resolveDbBackupConfirm(accepted: boolean, password = ''): void {
   publish({ dbBackupConfirm: null })
-  if (accepted) void proceedDbRestore()
+  if (accepted) void proceedDbRestore(password)
 }
 
 /**
@@ -943,7 +959,7 @@ export function resolveDbBackupConfirm(accepted: boolean): void {
  * 成功给「恢复了 N 张表」+ 安全备份文件名；失败给原因。密钥指纹不匹配的警告
  * 同时写进 `dbWarning`（面板里常驻），因为用户关掉弹窗之后仍需要看到它。
  */
-async function proceedDbRestore(): Promise<void> {
+async function proceedDbRestore(password: string): Promise<void> {
   if (busyScope) return
   const api = shared().workbuddyDesktop
   if (!api?.importDatabase) {
@@ -965,7 +981,7 @@ async function proceedDbRestore(): Promise<void> {
   const attemptStartedAt = Date.now()
   const stop = watchRestoreProgress(attemptStartedAt)
   try {
-    const result = await api.importDatabase()
+    const result = await api.importDatabase(password)
     // 取消（桌面壳的文件框 / 网页端的文件选择器都回 {canceled:true}）：
     // 不是失败也不是「恢复了 0 张表」，静默收场即可
     if (result?.canceled) {
@@ -993,6 +1009,8 @@ async function proceedDbRestore(): Promise<void> {
         tables,
         safetyBackup: typeof result?.safetyBackup === 'string' ? result.safetyBackup : '',
         warning,
+        reencryptedSecrets: Number(result?.reencryptedSecrets) || 0,
+        localKeysPreserved: result?.localKeysPreserved === true,
         startedAt: snapshot.dbRestore?.startedAt ?? Date.now(),
         finishedAt: Date.now(),
       },
@@ -1012,6 +1030,10 @@ async function proceedDbRestore(): Promise<void> {
     }
   } catch (error) {
     const message = errorMessage(error)
+    if (snapshot.dbRestore?.done) {
+      stop()
+      return
+    }
     // ── 先别急着报失败 ────────────────────────────────────────
     // 恢复是一次长调用：壳侧的 HTTP 预算、浏览器的 fetch 都可能先于后端收尾
     // 而断开（实测 61 秒撞上 60 秒预算）。那时后端照旧在跑，主库正被替换 ——
@@ -1045,6 +1067,8 @@ async function proceedDbRestore(): Promise<void> {
         tables: 0,
         safetyBackup: '',
         warning: '',
+        reencryptedSecrets: 0,
+        localKeysPreserved: false,
         startedAt: snapshot.dbRestore?.startedAt ?? Date.now(),
         finishedAt: Date.now(),
       },
@@ -1075,6 +1099,8 @@ const EMPTY_RESTORE: DbRestoreProgress = {
   tables: 0,
   safetyBackup: '',
   warning: '',
+  reencryptedSecrets: 0,
+  localKeysPreserved: false,
   startedAt: 0,
   finishedAt: 0,
 }
@@ -1100,6 +1126,7 @@ const RESTORE_POLL_MAX_MS = 40 * 60 * 1000
  */
 function watchRestoreProgress(attemptStartedAt: number): () => void {
   let stopped = false
+  let querying = false
   // 上限：壳侧预算已放宽到 30 分钟，这里再多给一段余量。到点还等不到收口
   // 就不再轮询（重建时页面本来也会重来）—— 免得一个没有终点的 interval
   // 一直挂在后台打接口。
@@ -1112,6 +1139,8 @@ function watchRestoreProgress(attemptStartedAt: number): () => void {
       window.clearInterval(timer)
       return
     }
+    if (querying) return
+    querying = true
     try {
       const data = await shared().workbuddyDesktop?.getBackupProgress?.()
       if (stopped || !data) return
@@ -1127,10 +1156,11 @@ function watchRestoreProgress(attemptStartedAt: number): () => void {
       // 后端仍在跑，靠这一次轮询才能等到真正的结局，否则弹窗会永远停在
       // 「恢复仍在进行中…」。
       if (data.active !== true) {
-        const body = (data.result ?? {}) as { tables?: unknown; warning?: unknown; safetyBackup?: unknown }
+        const body = (data.result ?? {}) as { tables?: unknown; warning?: unknown; safetyBackup?: unknown; reencryptedSecrets?: unknown; localKeysPreserved?: unknown }
         const tables = Array.isArray(body.tables) ? body.tables.length : 0
         const warning = typeof body.warning === 'string' ? body.warning.trim() : ''
         const failed = data.failed === true
+        if (!failed && data.done !== true) return
         if (failed && !(typeof data.error === 'string' && data.error.trim())) {
           // 既没收口理由、也不在跑：多半是刚开始就被打断，等下一次轮询
           return
@@ -1148,6 +1178,8 @@ function watchRestoreProgress(attemptStartedAt: number): () => void {
             tables,
             safetyBackup: typeof body.safetyBackup === 'string' ? body.safetyBackup : '',
             warning,
+            reencryptedSecrets: Number(body.reencryptedSecrets) || 0,
+            localKeysPreserved: body.localKeysPreserved === true,
             startedAt: startedAt || current?.startedAt || attemptStartedAt,
             finishedAt: Number(data.finishedAt) || Date.now(),
           },
@@ -1187,6 +1219,8 @@ function watchRestoreProgress(attemptStartedAt: number): () => void {
       })
     } catch {
       /* 静默：见函数头的说明 */
+    } finally {
+      querying = false
     }
   }
   void tick()
@@ -1194,6 +1228,16 @@ function watchRestoreProgress(attemptStartedAt: number): () => void {
   return () => {
     stopped = true
     window.clearInterval(timer)
+  }
+}
+
+async function reconnectDbRestore(): Promise<void> {
+  if (busyScope || snapshot.dbRestore) return
+  try {
+    const progress = await shared().workbuddyDesktop?.getBackupProgress?.()
+    if (progress?.active) watchRestoreProgress(Number(progress.startedAt) || Date.now())
+  } catch {
+    /* 恢复进度不可用不影响其他设置加载。 */
   }
 }
 
@@ -2511,13 +2555,14 @@ export async function clearDegrade(): Promise<void> {
 
 /** 数值归一：非有限数一律 null（视图据此显示「—」） */
 function finiteOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
   const num = Number(value)
   return Number.isFinite(num) ? num : null
 }
 
 /**
  * 渲染概况。形状是后端的**单库语义**：
- * `{ configDir, database: { file, bytes, available, accounts, logs, requests, dailyDays, debug } }`。
+ * `{ configDir, database: { file, bytes, available, accounts, logs, requests, dailyDays, downstreamRaw, upstreamRaw } }`。
  * 后端起不来（网络 / 桥失败）与库打不开是两件事，但对这一页的结论相同：读不到存储概况就
  * 展示「不可用」而不是一排看着正常的 0。
  */
@@ -2541,7 +2586,8 @@ export function renderStorage(data?: unknown): void {
       logs: finiteOrNull(record.logs),
       requests: finiteOrNull(record.requests),
       dailyDays: finiteOrNull(record.dailyDays),
-      debug: finiteOrNull(record.debug),
+      downstreamRaw: finiteOrNull(record.downstreamRaw),
+      upstreamRaw: finiteOrNull(record.upstreamRaw ?? record.debug),
     },
   })
 }
@@ -2609,6 +2655,7 @@ export async function load(): Promise<void> {
     loadCaptcha(),
     loadAccount(),
     loadModelsDev(),
+    reconnectDbRestore(),
     // 软件更新面板是另一个岛（update-panel.tsx），切进设置页时让它自己刷新一次
     shared().wbUpdatePanel?.load?.(),
     // 「版本信息」也是独立岛（system-info-pane.tsx）：同样在切进设置页时重拉 ——

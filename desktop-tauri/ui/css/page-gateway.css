@@ -145,8 +145,8 @@
 /* 表格（模型管理 / 网关 Key 共用）：贴面板左右边缘，表头粘顶。
    overflow-anchor 同 .page.active：tbody 重建时不做锚定补偿，行内点开关视口不动 */
 /* 表格滚动盒（模型管理 / 网关 Key 共用）。max-height 是**内容撑高、超过才收**的
-   语义，网关 Key 页就按这个来（那页没有自己的高度骨架）。模型管理页要的是固定
-   高度（与账号页一致），由 `.mm-main > .models-table-wrap` 覆盖成 flex 吃满剩余。 */
+   语义，网关 Key 页就按这个来（那页没有自己的高度骨架）。模型管理与网络代理页
+   由页面的 flex 布局覆盖成吃满剩余高度。 */
 .models-table-wrap { overflow: auto; overflow-anchor: none; max-height: min(62vh, 720px); border-top: 1px solid var(--border); }
 
 .models-table {
@@ -235,10 +235,15 @@
 .keys-table .k-state { width: 8%; }
 .keys-table .k-act { width: 10%; }
 .proxies-table .p-pick { width: 36px; }
-.proxies-table .p-addr { width: 196px; }
+.proxies-table .p-addr { width: 24%; }
+.proxies-table .p-usage { width: 14%; }
 .proxies-table .p-state { width: 58px; }
-.proxies-table .p-test { width: 28%; }
-.proxies-table .p-act { width: 168px; }
+.proxies-table .p-test { width: 23%; }
+.proxies-table .p-act { width: 150px; }
+.page[data-page="proxies"] .models-table th { font-size: 11px; }
+.page[data-page="proxies"] .models-table td { padding: 14px 12px; }
+.page[data-page="proxies"] .models-table th[data-col="pick"],
+.page[data-page="proxies"] .models-table th[data-col="state"] { text-align: center; }
 
 /* 禁用 / 已删除的行整体压淡，开关与操作列保持可点 */
 .models-table tr.off td { opacity: .5; }
@@ -470,14 +475,15 @@
 #key-restrict-summary { margin-top: 2px; }
 
 /* ─────────────────────────────────────────────
-   模型管理页：占满剩余高度，滚动只发生在列表内部
+   模型管理与网络代理页：占满剩余高度，滚动只发生在列表内部
 
    与账号页（layout.css 的 .page.active[data-page="accounts"]）同一套骨架：
    页面本身不滚，面板吃满剩余高度，面板里只有「列表」那一块滚 —— 表格高度因此
    与窗口绑定，而不是随模型条数伸缩（模型少时表格矮成一条、多时把整页顶长，
    两种都不该发生）。同一页里的左栏是列表，所以它也自己滚。
    ───────────────────────────────────────────── */
-.page.active[data-page="gateway"] {
+.page.active[data-page="gateway"],
+.page.active[data-page="proxies"] {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -485,7 +491,8 @@
   overflow: hidden;
   padding-bottom: var(--pad);
 }
-.page[data-page="gateway"] .panel {
+.page[data-page="gateway"] .panel,
+.page[data-page="proxies"] .panel {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -522,10 +529,15 @@
 }
 /* 面板头 / 表尾：都是固定高度的两块，不参与压缩 */
 .mm-main > .panel-head,
-.mm-main > .panel-foot { flex: 0 0 auto; }
+.mm-main > .panel-foot,
+.page[data-page="proxies"] .panel > .panel-head,
+.page[data-page="proxies"] .panel > .panel-foot,
+.page[data-page="proxies"] .panel > .batch-bar,
+.page[data-page="proxies"] .panel > [data-slot='responsive-sheet-inline'] { flex: 0 0 auto; }
 /* 表格区：吃掉剩余高度。内容少时它照旧占满（表格下方是空白，不是滚动条），
    内容多时自己滚 —— 「固定高度」的判据是**它不随内容变**，而不是永远出滚动条 */
-.mm-main > .models-table-wrap {
+.mm-main > .models-table-wrap,
+.page[data-page="proxies"] .panel > .models-table-wrap {
   flex: 1 1 auto;
   min-height: 0;
   /* 清掉共用的内容上限：这一页的高度由上面那条 flex 链给，不由内容给 */

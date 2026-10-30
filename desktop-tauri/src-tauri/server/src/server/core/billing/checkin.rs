@@ -753,10 +753,11 @@ pub(crate) async fn run_checkin_selected(
     source: &str,
     selected: Option<&[String]>,
 ) -> Result<Value, CheckinError> {
-    let (mut targets, skipped) = resolve_checkin_targets(store, providers, id)?;
+    let (mut targets, mut skipped) = resolve_checkin_targets(store, providers, id)?;
     if let Some(selected) = selected {
         targets.retain(|account| account.get("id").and_then(Value::as_str)
             .is_some_and(|id| selected.iter().any(|selected| selected == id)));
+        skipped = selected.len().saturating_sub(targets.len());
     }
     // 「这次是用户在面板上点的吗」——只有 CodeArts 用得上（它的福利是写请求，
     // 有两道本地限流闸）。单账号 single 与批量 manual 都是点击触发；

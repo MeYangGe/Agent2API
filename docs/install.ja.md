@@ -151,7 +151,7 @@ Linux では `/etc/agent2api/agent2api.env` に、Windows ではサービスの�
 
 ## Docker
 
-イメージタグ：`latest` は最新の正式版、`beta` は最新の beta プレリリースを追従します。`3.3.0-beta.3` のような完全なバージョン番号で固定することもできます。beta を使うには、以下のコマンドまたは Compose 設定の `aimodcc/agent2api:latest` を `aimodcc/agent2api:beta` に変更し、更新時は `docker compose pull && docker compose up -d` を実行してください。beta の公開で `latest` は変更されず、手動の開発ビルドは `dev` のみ更新します。
+イメージタグ：`latest` は最新の正式版、`beta` は最新の beta プレリリースを追従します。`3.3.0-beta.3` のような完全なバージョン番号で固定することもできます。beta を使うには、以下のコマンドまたは Compose 設定の `aimodcc/agent2api:latest` を `aimodcc/agent2api:beta` に変更し、更新時は `docker compose pull && docker compose up -d` を実行してください。beta の公開で `latest` は変更されず、手動の開発ビルドは `dev` のみ更新します。同じイメージは GitHub Container Registry にも公開しています。イメージ名を `ghcr.io/aimod-cc/agent2api` に置き換えてください（タグ規則は同じです）。
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
@@ -323,7 +323,7 @@ Release の `Agent2API-<バージョン>.ipa` は**既定で未署名**です �
 | ワンタップチェックイン、チェックイン履歴の閲覧 | 新規特典とプランの個別受け取り |
 | モデルの有効化/無効化、プロバイダー別の絞り込み | モデルマッピング、推論レベル、ケイパビリティフラグの編集 |
 | ゲートウェイキーのコピー、キーの有効化/無効化 | キーの新規作成、プロバイダー/モデルの許可リスト設定 |
-| プロキシの有効化/無効化、接続テスト | プロキシの追加、サブスクリプション管理、カーネルのダウンロード |
+| 手動 HTTP / SOCKS5 プロキシの追加・編集・削除、Clash Verge エンドポイントの同期、有効化/無効化、接続テスト | —（プロキシのサブスクリプションと内蔵カーネルは提供終了） |
 | スケジュールタスクの有効化/無効化、間隔の変更 | ポート、ルーティング、リトライ、タイムアウト、データ保持の変更 |
 | アシスタントのクイック照会（残高 / 重複モデル / 本日の使用量 / レート制限中のアカウント） | アシスタントの自由対話とツール呼び出し |
 | Agent テイクオーバーの状態確認、復元 | クライアント設定の書き換え（スマートフォンからはローカルファイルを読めません） |

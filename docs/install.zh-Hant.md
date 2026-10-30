@@ -170,7 +170,7 @@ Linux 寫在 `/etc/agent2api/agent2api.env`；Windows 改服務登錄檔的
 
 ## Docker
 
-映像標籤：`latest` 跟隨最新正式版，`beta` 跟隨最新 beta 預發布版；也可使用完整版本號（例如 `3.3.0-beta.3`）固定版本。要使用 beta，將下方命令或 Compose 設定中的 `aimodcc/agent2api:latest` 改為 `aimodcc/agent2api:beta`；更新時執行 `docker compose pull && docker compose up -d`。beta 發布不會改動 `latest`，手動開發建置只更新 `dev`。
+映像標籤：`latest` 跟隨最新正式版，`beta` 跟隨最新 beta 預發布版；也可使用完整版本號（例如 `3.3.0-beta.3`）固定版本。要使用 beta，將下方命令或 Compose 設定中的 `aimodcc/agent2api:latest` 改為 `aimodcc/agent2api:beta`；更新時執行 `docker compose pull && docker compose up -d`。beta 發布不會改動 `latest`，手動開發建置只更新 `dev`。同一份映像也同步發布在 GitHub Container Registry：把映像名稱換成 `ghcr.io/aimod-cc/agent2api` 即可，標籤規則完全相同。
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
@@ -342,7 +342,7 @@ Release 裡的 `Agent2API-<版本>.ipa` **預設是未簽名包** —— 蘋果�
 | 一鍵簽到、看簽到記錄 | 逐項領取新手福利與套餐 |
 | 啟停模型、按提供商篩選 | 改模型對應、思考等級、能力位 |
 | 複製閘道 Key、啟停 Key | 新建 Key、設定可用範圍白名單 |
-| 啟停代理、測試連通性 | 新增代理、訂閱管理、核心下載 |
+| 新增、編輯、刪除手動 HTTP / SOCKS5 代理，同步 Clash Verge 端點，啟停與測試連通性 | —（代理訂閱與內建核心已下線） |
 | 啟停定時任務、改間隔 | 改連接埠、路由、重試、逾時、資料保留 |
 | 助手快捷查詢（餘額 / 重複模型 / 今日用量 / 限流帳號） | 助手的自由對話與工具呼叫 |
 | 檢視 Agent 接管狀態、還原 | 改寫用戶端設定（手機讀不到本機檔案） |

@@ -6,7 +6,7 @@
 //! GET    /api/stats/requests/filters   请求日志筛选下拉的候选清单（出现过的模型 / 提供商）
 //! GET    /api/stats/requests/raw       单条请求的原始正文（预览对话详情弹窗的数据源）
 //! GET    /api/stats/requests/clear-preview  清理弹窗的预览统计（将删明细数 / 带正文数 / 库占用 / 压缩状态）
-//! DELETE /api/stats/requests           清理（mode=raw 只删原始正文 / mode=all 删明细，默认 all）
+//! DELETE /api/stats/requests           清理（mode=raw 清两侧原文 / mode=all 同时删明细，默认 all）
 //! POST   /api/stats/requests/compact   压缩数据库（checkpoint + VACUUM，后台执行）
 //! GET    /api/retention                三档保留天数与日志 / 请求日志数量上限
 //! PUT    /api/retention                更新保留设置并**立即**触发清理
@@ -269,19 +269,13 @@ pub async fn stats_request_filters(State(state): State<ServerState>) -> Response
 
 /// DELETE /api/stats/requests?mode=raw|all&model=&provider=&status=&start=&end=&all=
 ///
-/// `mode`（本次新增）决定删什么：
-///   - `raw`：**只删原始正文**（`request_raw` 表中按当前筛选命中的行）。
-///     明细与按天聚合一律不动 —— 报表数字全部保留，抹掉的只是「预览对话」
-///     用的正文（对照 OmniProxy 的同名 mode）。
-///   - `all`（默认）：删明细。不带筛选时为**全量清空**（显式 `all=1` 护栏）：
-///     明细 + 按天聚合 + 原始正文 + 调试报文一起清；带筛选时只删命中的明细
-///     与对应正文，**不动日报** —— 日报是全量聚合，无法按筛选部分重算
-///     （完整取舍见 `RequestStats::clear_where` 的说明），后果由响应里的
-///     `note` 字段如实说明。
+/// `raw` 清理命中请求关联的上游调试报文与下游正文，保留明细与日报；
+/// `all` 同时删除命中的明细，无筛选时重置日报。有筛选时保留日报，因为
+/// 按剩余明细重算会抹掉此前已清理请求的历史贡献。
 ///
-/// 不带筛选时必须显式带 `all=1`（护栏对两种 mode 都生效：`mode=raw` 不带
-/// 筛选同样会把正文清光，漏传参数的代价一样不可逆 —— 与 `logs_api::clear_logs`
-/// 同一道护栏）。响应统一 `{success, mode, deleted}`（deleted = 实际删除条数）。
+/// 无筛选时两种模式都必须显式带 `all=1`，并清空两张报文表的全部记录。
+/// `deleted` 在 raw 模式为按 ID 去重的请求数，在 all 模式为明细行数；
+/// `raw` 始终为按 ID 去重的报文请求数，`upstreamRaw` / `downstreamRaw` 为两侧行数。
 pub async fn clear_stats_requests(
     State(state): State<ServerState>,
     Query(params): Query<Params>,
@@ -298,15 +292,7 @@ pub async fn clear_stats_requests(
         }
     };
     let filter = match checked_filter(&params) { Ok(value) => value, Err(response) => return response };
-    let has_filters = filter.model.is_some()
-        || filter.provider.is_some()
-        || filter.client.is_some()
-        || filter.api_key.is_some()
-        || filter.production_only
-        || filter.completed_only
-        || filter.status.is_some()
-        || filter.start.is_some()
-        || filter.end.is_some();
+    let has_filters = filter.has_filters();
     if !has_filters {
         let explicit_all = params.get("all").map_or(false, |value| {
             let text = value.trim();
@@ -320,39 +306,39 @@ pub async fn clear_stats_requests(
         }
     }
     let stats = state.request_stats();
-    let (deleted, note) = if mode == "raw" {
-        (stats.clear_raw_where(&filter), None)
-    } else if has_filters {
-        (
-            stats.clear_where(&filter),
-            Some("已删除命中的请求明细与对应原始报文；按天聚合是全量数据，未按筛选重算，报表数字仍包含已删除的请求".to_string()),
-        )
-    } else {
-        (stats.clear(), None)
+    let result = tokio::task::spawn_blocking(move || stats.clear_requests(&filter, mode == "raw")).await;
+    let cleared = match result {
+        Ok(Some(value)) => value,
+        Ok(None) => return errors::management_error(500, "请求数据清理失败：数据库不可用或事务执行失败"),
+        Err(error) => return errors::management_error(500, format!("请求数据清理任务失败: {error}")),
     };
-    // 全量清空时连调试模式的原始报文一起清：那些报文是按 id 关联到明细的，
-    // 明细没了它们就成了永远取不到的孤儿，白占磁盘。
-    // **带筛选时不动**（mode=raw 同理）：筛选清的是部分明细，报文可能还
-    // 对应着留下的行（取舍见 `debug_traffic` 的说明）。
-    if mode == "all" && !has_filters {
-        crate::server::core::debug_traffic::clear();
+    let deleted = cleared.deleted;
+    match (mode, has_filters) {
+        ("raw", _) => logging::log(
+            "[Stats]",
+            &format!(
+                "已清空 {deleted} 个请求的原始报文（上游 {} 条、下游 {} 条；明细与按天聚合不受影响）",
+                cleared.upstream_raw, cleared.downstream_raw,
+            ),
+        ),
+        ("all", true) => logging::log(
+            "[Stats]",
+            &format!("已按筛选条件删除 {deleted} 条请求明细与两侧原始报文（按天聚合未重算）"),
+        ),
+        _ => logging::log("[Stats]", "请求统计已清空（明细 + 按天聚合 + 两侧原始报文）"),
     }
-    match (mode, has_filters, deleted) {
-        ("raw", _, count) => {
-            logging::log("[Stats]", &format!("已清空 {count} 条原始报文（明细与按天聚合不受影响）"));
-        }
-        ("all", true, count) => {
-            logging::log("[Stats]", &format!("已按筛选条件清空 {count} 条请求明细（原始报文同步清空；按天聚合未重算）"));
-        }
-        _ => {
-            logging::log("[Stats]", "请求统计已清空（明细 + 按天聚合 + 原始报文）");
-        }
-    }
-    let mut body = json!({ "success": true, "mode": mode, "deleted": deleted });
-    if let Some(note) = note {
-        if let Some(object) = body.as_object_mut() {
-            object.insert("note".to_string(), Value::String(note));
-        }
+    let mut body = json!({
+        "success": true,
+        "mode": mode,
+        "deleted": deleted,
+        "raw": cleared.raw,
+        "downstreamRaw": cleared.downstream_raw,
+        "upstreamRaw": cleared.upstream_raw,
+    });
+    if mode == "all" && has_filters {
+        body["note"] = Value::String(
+            "已删除命中的请求明细与对应的上游、下游原始报文；按天聚合是全量数据，未按筛选重算，报表数字仍包含已删除的请求".to_string(),
+        );
     }
     ok_json(body)
 }
@@ -379,17 +365,20 @@ pub async fn stats_request_raw(
 
 /// GET /api/stats/requests/clear-preview —— 清理弹窗的预览统计。
 ///
-/// 与 DELETE **共用同一份筛选解析与 FilterPlan**：预览说删 N 条，点确认删掉的
-/// 就是 N 条。响应 `{all, raw, dbBytes, vacuumRunning, lastVacuum}`：
-/// `all` = 当前筛选下将删除的明细数；`raw` = 其中仍带原始报文的条数
-/// （mode=raw 实际会清空的量）；`dbBytes` = 库文件 + WAL 的磁盘占用（全量，
-/// 不按筛选计算 —— 库文件没有「这部分属于这批筛选」的边界）。
+/// 预览与 DELETE 共用同一份筛选计划。`all` 是命中明细行数，`raw` 是两侧
+/// 报文按 ID 去重的请求数，`upstreamRaw` / `downstreamRaw` 是各侧行数；
+/// `dbBytes` 是主文件 + WAL 的全库占用，不按筛选计算。
 pub async fn stats_clear_preview(
     State(state): State<ServerState>,
     Query(params): Query<Params>,
 ) -> Response {
     let filter = match checked_filter(&params) { Ok(value) => value, Err(response) => return response };
-    ok_json(state.request_stats().clear_preview(&filter))
+    let stats = state.request_stats();
+    match tokio::task::spawn_blocking(move || stats.clear_preview(&filter)).await {
+        Ok(Some(value)) => ok_json(value),
+        Ok(None) => errors::management_error(500, "清理预览读取失败：数据库不可用或查询失败"),
+        Err(error) => errors::management_error(500, format!("清理预览任务失败: {error}")),
+    }
 }
 
 /// POST /api/stats/requests/compact —— 压缩数据库（checkpoint + VACUUM）。

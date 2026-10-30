@@ -6,6 +6,8 @@ import {
 } from './checkin-store'
 import { CenterTab } from './checkin-center-tab'
 import { ScheduleTab } from './checkin-schedule-tab'
+import { MakeupTab } from './checkin-makeup-tab'
+import { t } from '../i18n'
 import { RecordsTab } from './checkin-records-tab'
 import { Badge } from '@ui'
 
@@ -28,25 +30,25 @@ import { Badge } from '@ui'
  * 签到是产品的一个功能，不是某个插件的附属品。没装插件时页面显示空态，告诉
  * 用户去哪儿装，而不是让整个菜单项凭空不见（那会让人以为功能被砍了）。
  *
- * ── 三个标签页 ──────────────────────────────────────────────
- *   中心   每日签到分组（逐账号签到 / 保活 / 领取）+ 新手福利 + 活动套餐 + 成长任务
- *   定时   总开关 + 条目列表 + 保活模型链 + 猫猫旅行（后两块由插件申报决定显不显示）
- *   记录   签到明细台账（筛选 / 分页 / 清空）
+ * 四个标签页共用快照；定时签到与定时补签分别管理各自的设置。
+ * 保活模型链和猫猫旅行由插件申报决定是否显示。
  *
  * ── 数据流 ──────────────────────────────────────────────────
- * 一次 `GET /api/checkin-center` 拉全（见 `checkin-store.ts`），三个标签页共用。
+ * 一次 `GET /api/checkin-center` 拉全（见 `checkin-store.ts`），四个标签页共用。
  * 切标签页不重新请求，只切视图。
  */
 
-const TABS = ['center', 'schedule', 'records'] as const
+const TABS = ['center', 'schedule', 'makeup', 'records'] as const
 type Tab = typeof TABS[number]
 
-/** 标签页文案与顺序：与旧插件页逐字一致 */
-const TAB_OPTIONS = [
-  { value: 'center', label: '签到中心' },
-  { value: 'schedule', label: '定时签到' },
-  { value: 'records', label: '签到记录' },
-]
+function tabOptions() {
+  return [
+    { value: 'center', label: t('签到中心') },
+    { value: 'schedule', label: t('定时签到') },
+    { value: 'makeup', label: t('定时补签') },
+    { value: 'records', label: t('签到记录') },
+  ]
+}
 
 /** 当前标签页（组件外也能读：自动签到执行中的轮询要用） */
 let activeTab: Tab = 'center'
@@ -75,7 +77,7 @@ function CheckinPage(): React.ReactElement {
   // 自动签到执行中短轮询：那是唯一「后台会自己变」的场景（与旧实现同一取舍）
   React.useEffect(() => {
     const timer = window.setInterval(() => {
-      if (store.center?.auto?.running) void loadCenter()
+      if (store.center?.auto?.running || activeTab === 'schedule' && store.center?.auto?.enabled) void loadCenter()
     }, 3000)
     return () => window.clearInterval(timer)
   }, [])
@@ -102,10 +104,10 @@ function CheckinPage(): React.ReactElement {
   const error = store.loadError
 
   return (
-    <div className="ck-page">
+    <div className={`ck-page${tab === 'records' ? ' ck-page-records' : ''}`}>
       <div className="ck-tabs">
         <SegmentedControl
-          options={TAB_OPTIONS}
+          options={tabOptions()}
           value={tab}
           onValueChange={switchTab}
           aria-label="签到中心标签页"
@@ -135,6 +137,7 @@ function CheckinPage(): React.ReactElement {
         <>
           {tab === 'center' && center ? <CenterTab center={center} /> : null}
           {tab === 'schedule' && center ? <ScheduleTab center={center} /> : null}
+          {tab === 'makeup' && center ? <MakeupTab center={center} /> : null}
           {tab === 'records' ? <RecordsTab /> : null}
         </>
       )}
@@ -150,11 +153,13 @@ function CheckinPage(): React.ReactElement {
 function AutoBadge(): React.ReactElement | null {
   const auto = store.center?.auto
   if (!auto) return null
-  if (auto.running) return <Badge variant='warning' shape='tag'>执行中…</Badge>
-  if (!auto.enabled) return <Badge variant='outline' shape='tag'>自动签到已关闭</Badge>
+  if (auto.running) return <Badge variant='warning' shape='tag'>{t('执行中…')}</Badge>
+  if (!auto.enabled) return <Badge variant='outline' shape='tag'>{t('自动执行已暂停')}</Badge>
+  const rows = (auto.schedules ?? []).filter(entry => entry.enabled).flatMap(entry => entry.providerRows ?? [])
+  const pending = rows.filter(row => !row.firedToday).length
   return (
-    <Badge variant='success' shape='tag'>
-      {auto.lastFiredToday ? '今日已执行' : '自动签到已开启'}
+    <Badge variant={pending ? 'brand' : 'success'} shape='tag'>
+      {pending ? t('还有 {n} 个平台未执行', { n: pending }) : t('自动执行已开启')}
     </Badge>
   )
 }

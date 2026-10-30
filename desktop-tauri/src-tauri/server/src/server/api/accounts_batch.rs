@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::response::Response;
 use serde_json::{json, Map, Value};
 
-use super::accounts::{parse_json_body, reconcile_kernel_listeners, store_error};
+use super::accounts::{parse_json_body, store_error};
 use crate::server::errors::management_error;
 use crate::server::http::ok_json;
 use crate::server::ServerState;
@@ -14,10 +14,6 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    // 引用集合快照（批量改代理成功后对账，见 `reconcile_kernel_listeners`）
-    let refs_before = matches!(payload.get("action").and_then(Value::as_str).map(str::trim),
-        Some("proxy" | "remove"))
-        .then(|| state.store().referenced_pool_ids());
     // ids 去重 + 过滤空串，逐字照抄 Node 版
     let mut ids: Vec<String> = Vec::new();
     if let Some(items) = payload.get("ids").and_then(Value::as_array) {
@@ -95,11 +91,6 @@ pub async fn batch_accounts(state: &ServerState, body: &Bytes) -> Response {
 
     match result {
         Ok(value) => {
-            // 批量改代理 / 删除成功后对账：补监听器与回收端口都由对账的
-            // 缺口检测收敛（见 `reconcile_kernel_listeners`）
-            if let Some(before) = refs_before.as_ref() {
-                reconcile_kernel_listeners(state, before);
-            }
             // 响应带上 action，与 Node 版 `{ action, ...result, list }` 一致
             let mut merged = Map::new();
             merged.insert("action".to_string(), Value::String(action));

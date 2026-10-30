@@ -11,7 +11,7 @@ export function AgentSelect({ value, options, onChange, disabled, label }: {
 }) {
   const selected = options.find(option => option.value === value)?.label || value || t('请选择')
   return <Select value={value} disabled={disabled} onValueChange={next => { if (typeof next === 'string') onChange(next) }}>
-    <SelectTrigger aria-label={label} className='w-full'><SelectValue>{selected}</SelectValue></SelectTrigger>
+    <SelectTrigger aria-label={label} title={selected} className='w-full'><SelectValue>{selected}</SelectValue></SelectTrigger>
     <SelectContent>{options.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
   </Select>
 }
@@ -39,15 +39,15 @@ export function ConnectionFields({ client, draft, update, disabled }: {
     const baseUrl = kind === 'gateway' ? draft.protocol === 'anthropic' ? store.gateway : `${store.gateway}/v1` : draft.baseUrl
     update({ kind, baseUrl, authMode: client.id === 'zed' ? 'preserve' : kind === 'gateway' ? 'gateway' : draft.authMode === 'gateway' ? 'key' : draft.authMode })
   }
-  return <>
+  return <div className='agent-connection-fields grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2'>
     <Field><FieldLabel>{t('配置来源')}</FieldLabel><AgentSelect label={t('配置来源')} value={draft.kind} disabled={disabled} onChange={switchSource}
       options={[...(client.supportsGateway ? [{ value: 'gateway', label: t('本网关') }] : []), { value: 'official', label: t('官方直连') }, { value: 'relay', label: t('第三方中转') }, { value: 'local', label: t('本机服务') }]} /></Field>
     <Field><FieldLabel>{t('客户端协议')}</FieldLabel><AgentSelect label={t('客户端协议')} value={draft.protocol} disabled={disabled || client.protocols.length === 1 && client.protocols.includes(draft.protocol)}
       onChange={protocol => update({ protocol, ...(draft.kind === 'gateway' ? { baseUrl: protocol === 'anthropic' ? store.gateway : `${store.gateway}/v1` } : {}) })}
       options={client.protocols.map(value => ({ value, label: protocolLabel(value) }))} />
       <FieldDescription>{t('这里只选择客户端实际支持的协议，不改变上游提供商协议。')}</FieldDescription></Field>
-    <TextField label={t('接口基址')} fieldKey={urlField(client.id)} value={draft.baseUrl} onChange={baseUrl => update({ baseUrl })} disabled={disabled}
-      hint={client.id === 'workbuddy' ? t('保存时自动写入完整的 /chat/completions 路径。') : draft.protocol === 'gemini' ? t('填写服务根地址，不要附加 /v1beta 或 generateContent 路径。') : draft.protocol === 'anthropic' ? t('不要添加 /v1/messages；客户端会自行追加请求路径。') : t('通常以 /v1 结尾，不要附加具体请求路径。')} />
+    <div className='sm:col-span-2'><TextField label={t('接口基址')} fieldKey={urlField(client.id)} value={draft.baseUrl} onChange={baseUrl => update({ baseUrl })} disabled={disabled}
+      hint={client.id === 'workbuddy' ? t('保存时自动写入完整的 /chat/completions 路径。') : draft.protocol === 'gemini' ? t('填写服务根地址，不要附加 /v1beta 或 generateContent 路径。') : draft.protocol === 'anthropic' ? t('不要添加 /v1/messages；客户端会自行追加请求路径。') : t('通常以 /v1 结尾，不要附加具体请求路径。')} /></div>
     <Field><FieldLabel>{t('认证方式')}</FieldLabel><AgentSelect label={t('认证方式')} value={draft.authMode} options={authOptions} onChange={authMode => update({ authMode })} disabled={disabled} /></Field>
     {draft.authMode === 'gateway' && store.requiresKey && <Field><FieldLabel>{t('网关 Key')}</FieldLabel>
       <AgentSelect label={t('网关 Key')} value={draft.gatewayKeyId} disabled={disabled} onChange={gatewayKeyId => update({ gatewayKeyId })}
@@ -59,7 +59,7 @@ export function ConnectionFields({ client, draft, update, disabled }: {
     {draft.authMode === 'env' && <TextField label={t('环境变量名')} fieldKey='env_key' value={draft.envKey} onChange={envKey => update({ envKey })} disabled={disabled}
       hint={t('只保存变量引用，不修改系统环境；请在启动客户端的环境里设置变量值。')} />}
     {client.id === 'zed' && <p className='text-xs leading-relaxed text-subtle'>{t('请在 Zed 提供商设置中保存 API Key；本页不修改系统凭证存储。')}</p>}
-  </>
+  </div>
 }
 
 function urlField(id: string): string {

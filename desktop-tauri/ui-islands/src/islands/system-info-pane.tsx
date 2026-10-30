@@ -418,7 +418,6 @@ function SystemInfoPanel() {
         [t('程序路径'), <span className='sysinfo-mono'>{text(deployment.exePath)}</span>],
         [t('安装包形态'), INSTALLER_LABEL[String(deployment.installerKind)] || text(deployment.installerKind)],
         [t('容器内更新'), onOff(deployment.selfUpdate)],
-        [t('可回滚到上一版本'), onOff(deployment.backupAvailable)],
       ],
     },
     {

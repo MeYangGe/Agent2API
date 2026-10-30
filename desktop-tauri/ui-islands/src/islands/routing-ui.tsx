@@ -38,8 +38,8 @@ export function ProviderRouteBadge({ rank, effectiveRank, unavailable, disabled,
 }) {
   if (unavailable || disabled) return <Badge shape='tag' variant='secondary'>{unavailable ? t('模型绑定不可用') : t('未参与')}</Badge>
   if (rank !== undefined) return <Badge shape='tag' variant={effectiveRank === undefined ? 'secondary' : 'brand'} title={effectiveRank === undefined
-    ? t('此为配置顺位，当前没有可用候选账号。')
-    : t('配置第 {rank} 顺位；当前可用候选第 {effective} 顺位。', { rank, effective: effectiveRank })}>{t('第 {n} 顺位', { n: rank })}</Badge>
+    ? t('启用提供商中的第 {rank} 顺位；当前没有可用候选账号。', { rank })
+    : t('启用提供商中的第 {rank} 顺位；当前可用候选第 {effective} 顺位。', { rank, effective: effectiveRank })}>{t('第 {n} 顺位', { n: rank })}</Badge>
   if (!states.length) return <Badge shape='tag' variant='secondary'>{t('没有参与路由的账号')}</Badge>
   const state = states[0]
   if (!states.every(value => value === state)) return <Badge shape='tag' variant='secondary'>{t('无可用账号')}</Badge>

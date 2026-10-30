@@ -134,23 +134,7 @@ pub struct AppSettings {
     /// 兑现。代价同上（令牌池在打开窗口前不补货）。
     /// 默认 false。
     pub lightweight_mode: bool,
-    /// 面板会话令牌（access + refresh）。**只在注册过管理员后才有值**。
-    ///
-    /// ── 为什么壳要自己存一份 ────────────────────────────────────
-    /// 桌面窗口加载的是 `tauri://localhost`，网关在 `127.0.0.1:{port}` —— 两者
-    /// 跨源，登录响应里的 HttpOnly cookie 到不了网关（也不该到：那个源不是
-    /// 网关）。所以桌面形态走的是网页端「中转模式」的同一条通道：令牌进响应体，
-    /// 之后每个请求带 `x-panel-token` / `x-panel-refresh` 头。壳必须在重启后
-    /// 还能拿到它们，否则每次开机都要重新登录。
-    ///
-    /// ── 为什么是加密的 ─────────────────────────────────────────
-    /// 这是一对**管理面凭据**（能改配置、导出全部账号）。`AppSettings` 整份是
-    /// 明文 JSON 写进 `kv` 表的 —— 直接放进去等于「拷走库就接管面板」。所以只
-    /// 存密文：用账号域同一把密钥（`crypto::SecretScope::Accounts`）封，
-    /// 与账号凭证同一个信任边界（能读 `account.key` 的人本来就能读账号）。
-    /// 解不开（密钥换过 / 文件丢了）按「没有令牌」处理 —— 重新登录即可自愈。
-    ///
-    /// 序列化成 `refresh`（密文）与 `access`（密文）两个字段；默认空串 = 未登录。
+    /// 旧版保存的网页会话；保留字段以兼容已有设置，本机壳不再读取它。
     #[serde(default)]
     pub panel_session: PanelSession,
 }
@@ -172,13 +156,6 @@ pub struct PanelSession {
     /// `serde(default)` 让升级前的设置（没有这个字段）按「不知道」读入 ——
     /// 那种情况退回「401 → 续期」的老路径，行为与改造前一致。
     pub expires_at: i64,
-}
-
-impl PanelSession {
-    /// 是否有一份可尝试的令牌（可能已过期，交给服务端判）
-    pub fn is_present(&self) -> bool {
-        !self.refresh.is_empty() || !self.access.is_empty()
-    }
 }
 
 impl Default for AppSettings {

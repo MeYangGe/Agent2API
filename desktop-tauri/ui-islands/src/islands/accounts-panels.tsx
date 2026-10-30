@@ -66,7 +66,7 @@ import {
   tokenUsageOf, toggleGroupCollapsed, toggleNamesHidden, usageEntryOf, usageFailureOf, usageFailureStatusOf, usageUpdatedAtOf,
 } from './accounts-data'
 import type { AccountGroup } from './accounts-domain'
-import { groupSortSummary } from './accounts-group-settings'
+import { activeGroupSortRules, groupSortSummary, manualOrderBlockedMessage } from './accounts-group-settings'
 import { exportAccountFiles } from './accounts-export'
 import { PROVIDER_ICONS } from './add-provider-pick'
 import { t } from '../i18n'
@@ -109,7 +109,7 @@ export function OrderCell({ account, rank, sortActive }: {
         aria-label={t('拖动调整组内顺序')}
         aria-disabled={sortActive || undefined}
         title={sortActive
-          ? t('这一组开着排序规则：关掉规则后才能手动拖')
+          ? manualOrderBlockedMessage(activeGroupSortRules(providerOf(account), groupSortRules(providerOf(account))))
           : t('按住拖动，调整这个账号在本组内的顺序')}
         dangerouslySetInnerHTML={{ __html: iconHtml('gripVertical', 14) }} />
       <span className='order-rank' title={label}>{`#${rank}`}</span>
@@ -1471,25 +1471,7 @@ export function AccountCell({ account, namesHidden }: { account: AccountRecord; 
   )
 }
 
-/**
- * 代理：这个账号出网走哪条线路。一格一个下拉，**选中即保存**。
- *
- * 选项**只有**直连 + 「网络代理」页的代理池条目（值是 `pool:<proxyId>`）——
- * 出口统一在那一页配 / 命名 / 测试（Clash 的出口由「同步 Clash Verge」整体
- * 镜像进池），这里只做「选哪一条」。「自定义代理…」是**动作项**（不是一种
- * 配置）—— 选中它打开账号设置弹窗，下拉随即恢复原值（它是受控的，重绘即回原值）。
- * 池列表来自 accounts-data 的模块级缓存（同步读，纯渲染不发请求）；没就绪时
- * 先只有「直连 + 当前值 + 自定义…」，页面的自愈 effect 补拉一次再重画。
- *
- * 存量记录（直接引用 Clash 出口的 `{source:'clash', listenerUid}`、或自定义
- * 形状）在这里显示为**补位项**（带来源前缀），照原样转发；用户在这个下拉里
- * 选一条池条目或切回直连就会改写它。
- *
- * 轮询档（`{source:'rotate'}`，目前只有 OpenCode Zen 账号会有）同样走补位项：
- * 它的「当前出口」逐请求在变，格子里显示的是后端给的摘要标签
- * （`轮询全部代理（N 个出口）`，见 `describe_account_proxy` 的 rotate 分支），
- * 在这个下拉里改成某一条池条目就等于退出轮询（一次明确的改写）。
- */
+
 export function ProxyCell({ account }: { account: AccountRecord }) {
   const proxy = account.proxy
   const source = proxy?.config?.source || proxy?.source
@@ -1548,9 +1530,11 @@ export function ProxyCell({ account }: { account: AccountRecord }) {
     ? t('代理不可用：{error}（转发时会回退直连）；选「自定义代理…」去修改', { error: broken })
     : source === 'rotate'
       ? t('当前：{label}（每条请求换一个出口）；「自定义代理…」打开完整设置', { label })
-      : source === 'clash' || source === 'custom'
-        ? t('当前：{label}（未经过代理池 —— 可在「网络代理」页把出口同步进池后来这里改选）', { label })
-        : t('当前：{label}；选项来自「网络代理」页；「自定义代理…」打开完整设置', {
+      : source === 'clash'
+        ? t('当前：{label}（Clash Verge 直接引用）；可在「网络代理」页同步端点后改选', { label })
+        : source === 'custom'
+          ? t('当前：{label}（未经过代理池 —— 可在「网络代理」页添加相同地址后来这里改选）', { label })
+          : t('当前：{label}；选项来自「网络代理」页；「自定义代理…」打开完整设置', {
           label: proxy ? label : t('直连'),
         })
   const selected = items.find(item => item.value === current)
@@ -1721,7 +1705,7 @@ export function TableHead({ namesHidden, allPicked, somePicked, disabled, onTogg
           {grip}
         </UiTableHead>
         <UiTableHead className='cell-proxy' data-col='proxy'>
-          <span className='th-label' title={t('该账号出网走的代理（Clash 出口 / 自定义 / 直连）；点击可修改')}>{t('代理')}</span>
+          <span className='th-label' title={t('该账号出网走的代理（已保存的代理 / 自定义 / 直连）；点击可修改')}>{t('代理')}</span>
           {grip}
         </UiTableHead>
         <UiTableHead className='cell-connections' data-col='connections'>

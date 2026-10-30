@@ -51,6 +51,8 @@ export type DatabaseExportResult = {
   bytes?: number
   file?: string
   tables?: DatabaseTableStat[]
+  encrypted?: boolean
+  includedKeys?: string[]
 }
 
 export type DatabaseImportResult = {
@@ -70,6 +72,10 @@ export type DatabaseImportResult = {
    * 用户错过后只会对着空账号列表发懵。
    */
   warning?: string
+  encrypted?: boolean
+  restoredKeys?: string[]
+  reencryptedSecrets?: number
+  localKeysPreserved?: boolean
 }
 
 /**
@@ -205,7 +211,6 @@ export type SystemInfo = {
     exePath?: string | null
     installerKind?: string | null
     selfUpdate?: boolean | null
-    backupAvailable?: boolean | null
   }
   security?: {
     adminRegistered?: boolean | null
@@ -383,8 +388,8 @@ export type SettingsBridge = {
    */
   getSystemInfo?(options?: { hideUsername?: boolean }): Promise<SystemInfo | null | undefined>
   // ── 以下成员从 HEAD 恢复（并行改动移走了定义但 settings-state.ts 仍引用）──
-    exportDatabase?(includeLogs: boolean): Promise<DatabaseExportResult | null | undefined>
-    importDatabase?(): Promise<DatabaseImportResult | null | undefined>
+    exportDatabase?(includeLogs: boolean, password: string): Promise<DatabaseExportResult | null | undefined>
+    importDatabase?(password?: string): Promise<DatabaseImportResult | null | undefined>
     /** 恢复进度（`GET /api/backup/progress`）：弹窗每 500ms 拉一次 */
     getBackupProgress?(): Promise<RestoreProgressSnapshot | null | undefined>
     getCaptchaPool(): Promise<unknown>
@@ -838,9 +843,9 @@ export const TIPS = {
   prompt: t('客户端（Claude Code / Codex 等 CLI）会在 system 提示词里注入几十句固定模板，上游按逐字匹配审核，命中就整单拦截（HTTP 400）。指纹脱敏能改写实测命中过的那几句，但换一个客户端版本就可能冒出新的。这里可以把 system 整段换成网关自己那份：①「透传」= 不动客户端 system（默认，行为与之前完全一致）；②「替换」= 删掉客户端所有 system / developer 消息，换成网关的提示词（客户端项目规范随之消失）；③「追加」= 在开头连续 system 块之后插入一条网关提示词，既有消息逐字不动（客户端规范与网关提示词并用）。那份提示词有两个来源：提示词文件（留空用内置默认），或直接在界面上编辑正文 —— 编辑过就以那份正文为准（优先于文件），清空则回到文件 / 内置默认。另外，透传 / 追加模式下撞了内容拦截（多半是指纹误报）时，网关会自动换一段最小中性提示词重试一次，并把「降级期」开到次日 00:00 —— 期间所有请求直接带中性提示词出门，不再先撞一次 400；这里能看见并提前解除它。上面几项是**默认值**：想给某个提供商单独配，用下面的「按提供商」加一行（带「网关自带」的家默认就列在那里）—— 不同的上游对这些内容的接受程度不一样。'),
   debug: t('开启后，网关会把每次转发**发给上游的请求**（请求头 + 请求体）与**上游返回的响应**（状态码 + 响应头 + 响应体）完整保存到本地，供请求日志页的「详情」查看。请求头里的 Authorization、Cookie、API Key 等凭据字段一律替换成 [redacted]，不会明文落盘；请求体与响应体按原样保存（可能包含你的对话内容）。报文只保留最近 500 条，超出后丢弃最旧的。这是排障用的临时开关，不需要时建议关闭。'),
   io: t('导出会把全部账号与自定义提供商定义写入一个 JSON 文件，可以拷到另一台机器上导入后继续使用。导入采用合并策略：同提供商下按业务身份（UID / userId / apiKey 等）去重 —— 已存在的账号只更新凭证，保留本机原有的优先级顺序；新账号追加到转发顺序末尾，不会抢占当前正在使用的账号；自定义提供商定义按 id 合并，本机缺失时自动补建。'),
-  backup: t('把整份数据库（账号、网关配置、事件日志、请求统计、调试报文与桌面设置）导出成一个 SQL 文件，恢复时整体替换本机全部数据 —— 与上面「账号导入 / 导出」的逐条合并是两种语义：恢复会连配置、日志与当前启用状态一起换成备份那台机器的状态。导出默认包含日志与调试报文（文件可能很大），不需要时可以取消勾选只备业务数据。恢复前会自动把当前数据备份到配置目录的 backups/ 下，恢复后需要重新登录管理面板。'),
+  backup: t('将数据库和恢复凭证所需的密钥一起保存为密码加密的 .a2ab 备份，可在 Windows、macOS 或 Linux 上恢复，无需手工复制密钥。恢复时整体替换账号、配置、日志与桌面设置，并使用目标机器的密钥重新加密凭证，不覆盖本机已有钥匙。可取消包含日志以减小文件；旧 .sql 备份仍可导入。恢复前自动保留安全备份，完成后需要重新登录管理面板。'),
   retention: t('日志与请求日志同时受保留天数和数量上限限制。日志默认 30 天、10000 条，各级别按比例保留；调试详情最多保留 3 天。请求日志默认 99999 天、1000000 条（100 万），超出后从最旧的记录开始清理，并同步删除对应原始正文。按天聚合默认 99999 天，只按天数保留，不受请求日志数量清理影响。天数可填 1–99999，数量可填 1–100000000。调小任一设置并确认后立即清理，且不可恢复。'),
-  storage: t('全部数据（账号、事件日志、请求记录、调试报文、设置）统一保存在配置目录下的 agent2api.db 这一个 SQLite 数据库里。备份时只需拷贝这个文件；更换保存位置请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
+  storage: t('全部数据（账号、事件日志、请求记录、调试报文、设置）统一保存在配置目录下的 agent2api.db 中，加密密钥单独保存在库外。跨机器备份请使用「整库备份 / 恢复」，不要只复制数据库。更换保存位置请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
   modelsDev: t('models.dev 是一个开源的模型资料库（社区维护），这里用它补齐「上游没告诉我们」的模型能力：上下文窗口、最大输出、工具调用、图片、视频、是否支持思考，以及这个模型认识哪些思考档位。优先级是：你在「模型能力」里手工改的值 > 上游清单自己声明的值 > models.dev 的值 —— 它只填上游没声明的空位，从不推翻上游已声明的。网关随包内嵌了一份快照，所以离线、首次启动、访问不通时也有数据；开启时会按「模型目录刷新」任务的间隔联网更新（同一轮里一并刷新，也可在这里立即刷新）。关闭只停联网刷新，已经拿到的数据继续用。'),
 } as const
 
@@ -857,7 +862,7 @@ export const NOTES = {
   clineHeaders: t('值与默认值相同的行不占覆盖（存的是「改过的键」，不是全量配置）；值留空保存表示这个头不发送，删除改过的行表示回落默认值。改完立即生效，不用重启。'),
   zcodeVersion: t('留空 = 用插件内置的默认版本号（每期活动由插件跟随官方更新）。只有遇到「官方客户端里能看到活动、这里探测为空」时才需要填：那种情况几乎都是上游抬高了版本门槛，而版本落后的表现是一份空列表而不是报错。按官方客户端当前版本填（形如 3.16.2），保存后回到套餐明细刷新一次即刻生效。环境变量 ZCODE_APP_VERSION 若已设置，优先级高于这里。'),
   cors: t('默认关闭。改动立即生效，不用重启；关闭期间的跨源请求会被预检拦下。'),
-  debug: t('开启后新发生的请求才会被记录（已经过去的请求补不回来）。报文统一存放在本地数据库里，只保留最近 500 条（超出后丢弃最旧的），条数见左侧「数据 → 数据存储」的「调试报文」。'),
+  debug: t('开启后，新发生的请求会保存上游调试报文与下游正文，历史请求无法补录。上游调试报文只保留最近 500 条；两侧条数可在「数据 → 数据存储」查看。关闭开关不会删除已保存的报文，可在请求日志中选择「仅清空报文原文」一起清理。'),
   promptMode: t('替换 = 客户端 system / developer 消息全部删掉，换成网关的提示词；追加 = 保留客户端内容，只在开头 system 块之后多插一条。两者都只改发给上游的副本，客户端看到的响应不变。'),
   promptFile: t('UTF-8 文本文件路径，留空用内置默认提示词（通用编码助手提示词，不含任何会被上游拦截的模板句）。只在「替换 / 追加」模式下生效，透传模式不读它。'),
   promptText: t('在这里直接编辑提示词正文：保存后以这份文本为准（优先于上面的提示词文件），清空则回到文件 / 内置默认。改一个字不必再去编辑器里开文件。'),
@@ -867,12 +872,12 @@ export const NOTES = {
   modelsDev: t('「模型管理」里每个能力的来源标记（上游 / models.dev / 已覆盖）读的就是这份数据；映射弹窗的思考档位下拉也按这里的数据只列该模型真实认识的档位。'),
   retention: t('保存后立即生效：保留天数和数量上限同时生效，调小任一项会立即清理超出的历史数据，且不可恢复。'),
   storageFile: t('配置目录下的 agent2api.db（账号、日志、请求记录、调试报文与设置都在里面）。'),
-  storageSize: t('库主文件的大小（不含运行期间的 WAL 临时文件，退出时已自动并回）。'),
+  storageSize: t('数据库主文件与 WAL 文件的总占用，与请求日志清理弹窗采用同一口径；清理后可压缩数据库回收空闲空间。'),
   storage: t('数据统一保存在配置目录下的 agent2api.db；如需更换位置，请设置环境变量 AGENT2API_PROXY_HOME 后重启程序。'),
   captcha: t('开启后，登录页在浏览器后台自动完成验证（对真人无感），而脚本每次尝试都要先算一道题 —— 暴力破解与抢注的成本显著上升。仅影响面板的登录 / 注册，与 API 客户端的 API Key 无关。桌面端与网页端各自独立：桌面端主要服务本机与局域网，网页端（Docker / 服务端）直接暴露在网络上的登录页风险更高，建议保持开启。'),
   panelLogin: t('当前浏览器以管理员身份登录着本面板。「退出登录」会撤销这台设备的登录会话（30 天内的自动续期一并失效），需要重新输入账号密码；其他已登录的设备不受影响。'),
   exportDanger: t('导出文件内含 accessToken / refreshToken / apiKey 等凭证与自定义提供商定义，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
-  backupDanger: t('备份文件内含全部账号凭证、网关 API Key 与面板管理员凭据，可直接用于登录。请妥善保管，不要外传或上传到公共位置。'),
+  backupDanger: t('备份包含账号凭证、网关 Key、GitHub 令牌与云同步凭据的恢复密钥，整个文件受备份密码保护。请分开保管文件与密码；忘记密码无法恢复。'),
 } as const
 
 /** 状态行（`.settings-state`）的派生文案：与旧实现的赋值逐字一致 */

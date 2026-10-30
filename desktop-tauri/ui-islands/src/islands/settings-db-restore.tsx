@@ -78,6 +78,11 @@ export function DbRestoreDialog(): React.ReactElement | null {
                   })}
                 </p>
               ) : null}
+              {progress.localKeysPreserved ? (
+                <p className='hint'>
+                  {t('已使用本机密钥重新加密 {n} 项凭证，原有密钥未被覆盖。', { n: progress.reencryptedSecrets })}
+                </p>
+              ) : null}
               {progress.warning ? (
                 <Alert variant='destructive' className='danger-zone'>
                   <strong>{t('⚠️ 密钥警告')}</strong>
@@ -96,7 +101,7 @@ export function DbRestoreDialog(): React.ReactElement | null {
                 {progress.error || t('原因未知')}
               </Alert>
               <p className='hint'>
-                {t('如果主库已被替换到一半，替换前的数据在 backups/ 目录里仍可整文件拷回。')}
+                {t('密码、文件或密钥校验失败时不会替换主库；替换阶段失败会自动尝试还原，实际结果以上方错误说明为准。')}
               </p>
             </div>
           ) : null}

@@ -6,7 +6,6 @@ import {
 } from './update-shared'
 import { GithubAccessSettingsPanel } from './update-github-access'
 import { t } from '../i18n'
-import { isPortlessSubscription } from './accounts-shared'
 
 function tokenStatus(token: UpdateTokenStatus | null): { badge: React.ReactNode; hint: string } {
   if (!token) return { badge: <Badge shape='tag' variant='outline'>{t('读取中')}</Badge>, hint: '' }
@@ -37,9 +36,8 @@ export function GithubUpdateSettings({ plugin = false, pane }: {
   const [draft, setDraft] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [proxyBusy, setProxyBusy] = React.useState(false)
-  const [proxyOpening, setProxyOpening] = React.useState(false)
   const proxyRevision = React.useRef(0)
-  const pick = buildProxyPick(selection, proxyOpening)
+  const pick = buildProxyPick(selection)
 
   React.useEffect(() => {
     let alive = true
@@ -53,44 +51,14 @@ export function GithubUpdateSettings({ plugin = false, pane }: {
     return () => { alive = false }
   }, [])
 
-  React.useEffect(() => {
-    if (!proxyOpening) return
-    let alive = true
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const deadline = Date.now() + 45_000
-    const revision = proxyRevision.current
-    async function refresh(): Promise<void> {
-      const next = await fetchProxySelection()
-      if (!alive || revision !== proxyRevision.current) return
-      if (!next.proxyLoaded || next.poolError) {
-        if (Date.now() >= deadline) setProxyOpening(false)
-        else timer = setTimeout(() => void refresh(), 1500)
-        return
-      }
-      setSelection(next)
-      const id = next.proxyChoice?.config?.proxyId
-      const item = next.pool?.find(entry => entry.id === id)
-      if (!next.proxyChoice?.error || !item || item.enabled === false || item.orphan
-        || !isPortlessSubscription(item) || Date.now() >= deadline) {
-        setProxyOpening(false)
-        return
-      }
-      timer = setTimeout(() => void refresh(), 1500)
-    }
-    timer = setTimeout(() => void refresh(), 1500)
-    return () => { alive = false; if (timer) clearTimeout(timer) }
-  }, [proxyOpening])
-
   async function handlePick(value: string): Promise<void> {
     if (proxyBusy) return
     proxyRevision.current += 1
-    setProxyOpening(false)
     setProxyBusy(true)
     try {
       const result = await saveProxy(value)
       if (result) {
         setSelection(previous => ({ ...previous, proxyChoice: result.choice }))
-        setProxyOpening(result.opening)
         const next = await fetchProxySelection()
         setSelection(previous => ({
           ...next,

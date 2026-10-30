@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 发版收尾脚本：v* tag 的构建跑完后，一条命令挂上 GitHub Release。
+# 手动应急补发入口：正常发布由构建仓库的 publish-installers.yml 完成。
+# 本脚本仅用于旧版本收尾或工作流不可用时的人工补发。
 #
 #   bash scripts/release.sh vX.Y.Z            # 自动找该 tag 的可用构建 run
 #   bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
@@ -255,11 +256,8 @@ done
 # 构建产物在构建仓库，但用户与贡献者习惯看源码仓库的 Releases 页 —— 那里
 # 空着会让人以为「这个版本没发」。所以再挂一份过去。
 #
-# ── 为什么放在脚本里而不是 CI ───────────────────────────────
-# magpie 在 CI 里做这件事，靠一个 75 分钟的 job 轮询构建仓库等资产齐。
-# 本项目的 Release 由**这个脚本**挂（构建仓库那份 `release.yml` 没有
-# publish job），所以轮到脚本时资产一定已经下到 `dist/` 了 —— 不需要
-# 轮询、不需要跨工作流等待，一行下载都不用重复。
+# 本脚本只负责应急补发；自动发布与主仓库镜像见构建仓库 publish-installers.yml。
+# 两个任务可独立重跑，通常无需本地下载或重新编译。
 #
 # 默认开；`MIRROR_TO_SOURCE=0` 可关掉（例如只想在构建仓库留一份）。
 MIRROR_TO_SOURCE="${MIRROR_TO_SOURCE:-1}"

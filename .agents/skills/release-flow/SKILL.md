@@ -22,8 +22,8 @@ description: Agent2API（workbuddy）仓库的协作与发版规范 —— 分�
 
 | 仓库 | 角色 | 里面有什么 |
 |---|---|---|
-| `aimod-cc/Agent2API` | **源码仓库**（就是当前仓库） | 代码、文档、`build.yml`（只做派发，不编译）、`docker.yml`（只做派发）。推 `v*` tag 只跑一个十几秒的 job |
-| `Agent2Builder/agent2api-releases` | **构建仓库**（专用账号下） | 真正干活的 `release.yml`（七个平台 job）与 `docker.yml`（双架构镜像）。**所有签名密钥只在这里** |
+| `aimod-cc/Agent2API` | **源码仓库**（就是当前仓库） | 代码、文档、`build.yml`（只做派发，不编译）。推 `v*` tag 只跑一个十几秒的 job |
+| `Agent2Builder/agent2api-releases` | **构建仓库**（专用账号下） | `release.yml` 构建安装包，`publish-installers.yml` 发布并同步源码仓库，`docker.yml` 发布双架构镜像。**所有签名密钥只在这里** |
 | `Agent2plugin/Agent2plugin` | **索引仓库** | `index.json`（插件包在哪）与 `app.json`（桌面端安装包在哪）。换构建仓库改这里，不必发版 |
 
 ### 为什么这么分
@@ -36,8 +36,10 @@ description: Agent2API（workbuddy）仓库的协作与发版规范 —— 分�
 git push origin vX.Y.Z
   └─ 源码仓库 build.yml（dispatch job，约 10 秒）
        └─ repository_dispatch → Agent2Builder/agent2api-releases
-            ├─ release.yml  七个平台 job → 产物挂 workflow artifact
-            └─ docker.yml   双架构镜像 → 推 GHCR + Docker Hub
+            ├─ release.yml  各平台构建 → publish-installers.yml
+            │    ├─ 发布安装包 → 构建仓库 Release
+            │    └─ 同步主仓库 → 相同附件与日志
+            └─ docker.yml   双架构镜像 → Docker Hub 与 GHCR
 ```
 
 `release.yml` 与 `docker.yml` 都监听 `repository_dispatch` 的 `release` 事件，所以一条派发同时起两边。
@@ -155,11 +157,11 @@ git push origin vX.Y.Z
 # 6. 到**构建仓库**看进度（不是本仓库）
 gh run list --repo Agent2Builder/agent2api-releases --limit 4
 
-# 7. 两个工作流跑完后挂 GitHub Release（脚本默认就指向构建仓库）
-bash scripts/release.sh vX.Y.Z
+# 7. 构建完成后由工作流发布安装包并同步源码仓库，检查两个收尾任务
+#    本地 scripts/release.sh 只在自动流程不可用或旧版本补发时使用
 ```
 
-**发布提交的提交信息 = 更新日志**，因为发版收尾脚本创建 / 更新 Release 时，正文取「tag 所指提交的提交信息」（`git log -1 --format=%B`）。
+**发布提交的提交信息 = 更新日志**。自动发布任务读取固定源码提交的日志；应急脚本仍读取 `git log -1 --format=%B "$TAG"`。不得从其它分支生成替代日志。
 
 - 格式沿用历史版本的编号清单，每行一条，带分类前缀：`新增：` / `优化：` / `修复：` / `更新：` / `移除：`，最后一条固定 `版本：X.Y.Z → X.Y.Z+1`；
 - 内容取「上个 tag 以来的全部提交」综合整理（`git log vX.Y.Z..HEAD --oneline`），纯 CI / 临时的调试提交归并成一条流程性描述即可；
@@ -170,8 +172,8 @@ bash scripts/release.sh vX.Y.Z
 
 | 工作流（跑在构建仓库） | 产出 | 说明 |
 |---|---|---|
-| `release.yml` | 桌面端三平台安装包 + 两个服务端包 + Android APK + iOS IPA | 七个 job：`macos-x64`（dmg）/ `macos-arm64` / `windows-x64`（NSIS exe）/ `linux`（deb + AppImage + 服务端 tar.gz，双架构 matrix）/ `windows-server`（无 GUI 的 zip）/ `android`（APK）/ `ios`（IPA，跑在 `macos-26`）。macOS / iOS 与 Linux 桌面端的产物**只能在各自平台上构建**，无法从 Windows 交叉编译。五个平台的插件包产物**自动发到构建仓库的 Release**（`publish` job） |
-| `docker.yml` | Docker Hub `aimodcc/agent2api:<版本>`，amd64 / arm64 双架构 | 正式版发布 `<版本>` + `:latest`；beta 预发布发布 `<版本>` + 滚动 `:beta`，**不移动 `:latest`**；手动 `workflow_dispatch` 且不填 ref 时只出 `:dev`，不移动 `:beta` 或 `:latest` |
+| `release.yml` + `publish-installers.yml` | 桌面端、服务端与手机端构建产物 | 构建任务为 `macos`、`windows`、`linux-desktop`、`linux-server`（amd64 / arm64）、`windows-server`、`android`、`ios`。全部成功后，独立的 `publish` 校验十份桌面 / 服务端附件并发布，`mirror` 同步源码仓库。手机安装包只保留 Actions artifact。插件仍由独立插件构建仓库发布 |
+| `docker.yml` | Docker Hub `aimodcc/agent2api:<版本>` 与 GHCR `ghcr.io/aimod-cc/agent2api:<版本>`，amd64 / arm64 双架构 | 正式版发布 `<版本>` + `:latest`；beta 预发布发布 `<版本>` + 滚动 `:beta`，**不移动 `:latest`**；手动 `workflow_dispatch` 且不填 ref 时只出 `:dev`，不移动 `:beta` 或 `:latest`。两个仓库推的是同一份清单 |
 
 **源码仓库的 `build.yml` 只做派发，`docker.yml` 已整体删除** —— 镜像构建现在只在构建仓库里跑（源码仓库保留那份只会让人误以为它还在工作）。
 
@@ -182,22 +184,34 @@ gh run list --repo Agent2Builder/agent2api-releases --limit 4
 gh run watch <run-id> --repo Agent2Builder/agent2api-releases --exit-status
 ```
 
-**发版收尾**：GitHub Release 由本地脚本挂到**构建仓库**，再镜像一份到源码仓库：
+**自动收尾**在构建仓库 `publish-installers.yml` 的两个任务完成：
+
+- `publish` 校验十份附件、服务端 SHA-256、版本 tag 与固定源码提交，先上传到草稿，附件齐全后再公开；beta 自动标记预发布，不移动正式 Latest。
+- `mirror` 使用同一份校验包和构建仓库正文同步源码仓库；缺少 `SOURCE_RELEASE_TOKEN` 或网络失败时明确失败，单独重跑它即可，不重新编译。
+- 手动 `workflow_dispatch` 关闭 `publish` 时只构建，不创建任何 Release；开启发布时必须指定版本 tag，不能发布分支快照。
+- 网络请求有超时和有限重试；远端已存在的同内容附件跳过，不同内容或意外附件则拒绝自动覆盖、删除。
+
+本地 `scripts/release.sh` 保留为**应急入口**，只用于旧版本或自动流程不可用时：
 
 ```bash
-bash scripts/release.sh vX.Y.Z            # 自动找该 tag 的可用 run
-bash scripts/release.sh vX.Y.Z <run-id>   # 或显式指定 run
+bash scripts/release.sh vX.Y.Z <run-id>
 ```
 
-脚本做四件事：从**构建仓库**下载安装包 artifact 到 `dist/` → 按 tag 提交信息（= 更新日志）在**构建仓库**创建 / 更新 GitHub Release 并挂附件 → **镜像**同样的附件到源码仓库的 Release → 打印验收提示。幂等可重跑（`--clobber` 覆盖附件）。
+脚本会清空当前目录的 `dist/`；使用前必须检查并保护已有产物，建议在独立工作区运行。
 
 - 目标仓库由脚本里的 `BUILD_REPO` 决定，默认 `Agent2Builder/agent2api-releases`；临时换目标用环境变量：`BUILD_REPO=Other/repo bash scripts/release.sh vX.Y.Z`。
 - 脚本找的是构建仓库里名为 **`release`** 的工作流（不是 `build`）。源码仓库那个 `build.yml` 只做派发，没有产物可下。
 - **更新日志仍从源码仓库取**（`git log -1 --format=%B "$TAG"`），所以脚本要在源码仓库目录里跑。
 
-### 两个仓库、两把凭据（最容易踩）
+### 工作流的跨仓库凭据
 
-构建仓库属于专用构建账号，源码仓库属于主账号 —— 各自的 Release 只有**有权限的那一方**能创建 / 修改。脚本因此有两个 token 变量：
+构建仓库的 `publish` 使用该任务的 `GITHUB_TOKEN` 和 `contents: write`。`mirror` 必须单独配置 `SOURCE_RELEASE_TOKEN`：仅授权 `aimod-cc/Agent2API` 的细粒度令牌，仓库权限为 **Contents: Read and write**；不需要工作流写权限，因为源码版本 tag 必须已经存在。
+
+该 Secret 只传给 `mirror`，不传给平台构建或 `publish`。缺少时同步任务明确失败，构建仓库已完成的发布保留。不要把本机登录令牌直接复制为长期 Secret。
+
+### 应急脚本的两把凭据
+
+构建仓库属于专用构建账号，源码仓库属于主账号 —— 各自的 Release 只有**有权限的那一方**能创建 / 修改。应急脚本保留两个 token 变量：
 
 ```bash
 BUILD_TOKEN=...   # 对构建仓库有 contents:write（默认取当前 gh 活动账号）
@@ -218,7 +232,7 @@ bash scripts/release.sh vX.Y.Z
 
 ### 镜像到源码仓库
 
-默认开（`MIRROR_TO_SOURCE=0` 可关）。产物在构建仓库，但用户与贡献者习惯看源码仓库的 Releases 页 —— 那里空着会让人以为「这个版本没发」。
+自动流程总是同步主仓库；应急脚本默认开镜像（`MIRROR_TO_SOURCE=0` 可关）。产物在构建仓库，但用户与贡献者习惯看源码仓库的 Releases 页，两个位置都应有发布。
 
 镜像的正文与构建仓库那份**逐字相同**（同一个更新日志），不追加任何说明行 —— 两个 Release 的内容应当一致。**不要**在镜像正文里加「同一份发布，也是应用更新检查读取的那一份：…」这类指向构建仓库的句子，用户明确不要这一段；更新检查读哪个仓库由 `DEFAULT_REPO` 与索引 `app.repo` 决定，不需要在正文里解释。
 
@@ -250,8 +264,8 @@ git push origin v3.1.0-beta.1
 # 5. 到**构建仓库**看两个工作流（release + docker）
 gh run list --repo Agent2Builder/agent2api-releases --limit 4
 
-# 6. 挂 Release（脚本按 tag 里的 `-` 自动标 pre-release，并挂到构建仓库）
-bash scripts/release.sh v3.1.0-beta.1
+# 6. 工作流自动发布预发布版，并同步相同附件和日志到源码仓库
+#    核对 publish / mirror 与 docker 成功，无需本地下载和上传
 ```
 
 验收就四条：Release 显示 **Prerelease**、exe / dmg / deb / AppImage / APK 附件齐全、Docker Hub 上 `:latest` 的 Pushed 时间**没有**跟着变、APK 能装能连（完整清单见第 7 节）。
@@ -259,7 +273,7 @@ bash scripts/release.sh v3.1.0-beta.1
 **三处不能错**，每处错了都有明确症状：
 
 1. **六处版本号漏了后缀**（写成 `3.1.0`）：比较是按 semver 做的，运行版本 `3.1.0` 对线上 tag `3.1.0-beta.1` 会判成「当前比线上新」，**beta 用户永远收不到更新**。六个文件都接受带后缀的版本号（Cargo / npm / tauri.conf.json 都认），照 tag 抄即可。APK 的 `versionCode` 由 semver 前三段折算、不带后缀（见 `android/variables.gradle`），beta 与同号正式版取同一个值，不构成冲突。
-2. **Release 漏标 pre-release**：标记就是开关的分界线 —— 正式通道走 GitHub 的 `/releases/latest`，它排除预发布，只有开了开关的人从 `/releases` 列表里看到 beta。**漏标 = beta 被所有正式版用户当成正式更新收到。** `scripts/release.sh` 已按「tag 里带 `-`」自动标记，重跑收尾时也会把标记纠正回来，走脚本就不用操心。
+2. **Release 漏标 pre-release**：标记就是开关的分界线，正式通道排除预发布。自动发布根据 semver 预发布后缀判定；应急脚本也会设置。若已有公开版本的标记不一致，自动流程明确失败，不擅自改写。
 3. **tag 打在 `main` 上**：beta 是集成分支，beta 版要的是它的快照。打在 `main` 上要么不含 beta 分支的新改动（白测一场），要么等于把还没发布的改动提前推进 `main`。
 
 构建仓库 `.github/workflows/docker.yml` 发布 beta 时同时产出完整版本标签（如 `3.3.0-beta.3`）与滚动 `:beta`，**不移动 `:latest`**。Docker 用户用 `aimodcc/agent2api:beta` 跟随 beta，或用完整版本号固定版本；手动 dev 构建不会移动 `:beta`。
@@ -277,12 +291,12 @@ bash scripts/release.sh v3.1.0-beta.1
 - [ ] **构建仓库的 run 全绿**：`gh run list --repo Agent2Builder/agent2api-releases --limit 4` —— 应看到 `Release` 与 `docker` 两个 run，前者七个 job 全绿（含 `publish`）；
 - [ ] GitHub Release（在构建仓库）：`gh release view vX.Y.Z --repo Agent2Builder/agent2api-releases` —— 正文日志齐全，桌面端附件都在：Windows `Agent2API_<版本>_x64-setup.exe`、macOS `Agent2API_<版本>_universal.dmg`、Linux `Agent2API_<版本>_amd64.deb` 与 `Agent2API_<版本>_amd64.AppImage`（另有两个 `agent2api-server-linux-*.tar.gz` + `.sha256`，那是容器内更新包，见第 5 节）；
 - [ ] **镜像到源码仓库**：`gh release view vX.Y.Z --repo aimod-cc/Agent2API` —— 附件数与构建仓库一致（默认 10 个：4 个桌面端 + 3 个服务端包 ×2 带校验 + 无手机端）；正文与构建仓库那份逐字相同，**不带**指向构建仓库的附加说明；
-- [ ] **手机端包不在 Release 里**（当前策略）：`INCLUDE_MOBILE` 默认 0，APK / IPA 只留在构建 run 的 artifact 里。要恢复发布时加 `INCLUDE_MOBILE=1`，并同步恢复安装文档里的手机端段落；
-- [ ] **插件包**（同一次发版里，构建仓库的 `release.yml` 若也编了插件包）：Release 里应有 `agent2api-providers-<版本>-<target>.zip` 五个平台各一份，且 `pack.json` 里带 `signature`；
+- [ ] **手机端包不在 Release 里**：自动发布固定只挂十份桌面 / 服务端附件。APK / IPA 保留为构建 artifact；恢复公开发布必须先获用户确认，并同步修改自动发布附件清单与安装文档。
+- [ ] **插件包**：在独立插件构建仓库的对应 Release 中检查五个平台包及官方签名，不计入主程序十份附件。
 - [ ] Linux 桌面端：装 deb（或 `chmod +x` 后跑 AppImage）能启动，且面板「设置 → 软件更新」能检查到版本、给出对应包型的安装入口（deb → 系统安装器，AppImage → 换文件）；
-- [ ] 手机端 APK：Release 里有 `Agent2API-<版本>.apk` 与 `.sha256`；装到 Android 上能启动、添加网关并登录，系统「应用信息」里的版本号与 tag 一致（APK 的 `versionName` 取自 `desktop-tauri/mobile/package.json`，见第 4 节第 6 处）；
-- [ ] 手机端 iOS：Release 里有 `Agent2API-<版本>.ipa` 与 `.sha256`（未签名包需用 AltStore / SideStore 重签；配了 iOS 签名 secret 的仓库出的是已签名包）。`ios` job 在 `macos-26` 上跑，日志里能读到 `xcodebuild -version` 与版本号解析结果；
-- [ ] Docker Hub：`aimodcc/agent2api` 的 Tags 页出现 `<版本>` 与 `latest`，Pushed 时间一致；GHCR：`ghcr.io/aimod-cc/Agent2API:<版本>` 可拉（**新包默认私有**，首次要去包设置改 Public）；
+- [ ] 手机端 APK：构建 run 的 `android-apk` artifact 中有 `Agent2API-<版本>.apk` 与 `.sha256`，不公开挂 Release。
+- [ ] 手机端 iOS：构建 run 的 `ios-ipa` artifact 中有 `Agent2API-<版本>.ipa` 与 `.sha256`，不公开挂 Release；未签名包需自行重签。
+- [ ] Docker Hub：`aimodcc/agent2api` 的 Tags 页出现 `<版本>` 与 `latest`，Pushed 时间一致；GHCR：`ghcr.io/aimod-cc/agent2api:<版本>` 可拉（**新包默认私有**，首次要去包设置改 Public）；
 - [ ] **更新检查真的能查到**（这条最容易漏）：`gh release view vX.Y.Z --repo Agent2Builder/agent2api-releases` 有内容，且索引仓库的 `app.json` 里 `app.repo` 指向同一个仓库。两者对不上时，用户面板会显示「已是最新」；
 - [ ] 安装包「关于」页版本号与 tag 一致；
 - [ ] 安装文档对得上实际产物：`docs/install.md` 与 5 份译文的产物名、端口、命令、环境变量跟这次 Release 一致（README 里那几张速查表同理）；
@@ -299,7 +313,9 @@ bash scripts/release.sh v3.1.0-beta.1
 | `AGENT2API_PLUGIN_KEY` | 构建仓库 | 插件包 ed25519 签名私钥 | 产物未签名，网关安装时标黄 |
 | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | 构建仓库 | APK 签名 | `android` job 直接红 |
 | `IOS_CERTIFICATE_BASE64` / `IOS_CERTIFICATE_PASSWORD` / `IOS_PROVISIONING_PROFILE` / `IOS_TEAM_ID` | 构建仓库 | iOS 签名 | 产出未签名 IPA（可 AltStore 重签），不报错 |
-| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | 构建仓库 | 推 Docker Hub | 只推 GHCR，工作流照绿 |
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | 构建仓库 | 推 Docker Hub | 镜像工作流明确失败 |
+| `GHCR_TOKEN` | 构建仓库 | 推 GHCR。**必须是 aimod-cc 账号**、仅 `write:packages` 的 classic PAT（内置 `GITHUB_TOKEN` 只认构建账号自己的命名空间，跨账号会被拒） | 镜像工作流明确失败 |
+| `SOURCE_RELEASE_TOKEN` | **构建仓库** | 同步主仓库 Release，限定源码仓库 Contents: write | `mirror` 明确失败，可单独重跑 |
 | `BUILDER_DISPATCH_TOKEN` | **源码仓库** | 向构建仓库派发 `repository_dispatch` | tag 推上去后什么都不会发生 |
 
 **GitHub 的 secret 值读不回来**（设计如此），所以「把 secret 从 A 仓库搬到 B 仓库」只能由人重新填一遍，不能脚本复制。迁移构建仓库时按上表逐项重配。
@@ -309,7 +325,8 @@ bash scripts/release.sh v3.1.0-beta.1
 ### 8.2 镜像与 GHCR
 
 - **GHCR 新包默认私有**：首次推送后需到包设置手动改 Public，否则别人 `docker pull` 会 401（API 改不了这个默认值）。
-- **镜像名不能用 `${GITHUB_REPOSITORY}`**：工作流跑在构建仓库里，那个变量会解析成构建仓库的名字，镜像就推到构建账号的命名空间下去了。`docker.yml` 用 `GHCR_OWNER` / `GHCR_REPO` 两个 env 显式指定，换主仓库时改它们。
+- **镜像名不能用 `${GITHUB_REPOSITORY}`**：工作流跑在构建仓库里，那个变量会解析成构建仓库的名字，镜像就推到构建账号的命名空间下去了。`docker.yml` 用 `GHCR_OWNER` / `GHCR_IMAGE` 两个 env 显式指定，换主仓库时连同 `SOURCE_URL`（`org.opencontainers.image.source` 的覆盖值）一起改这三处。
+- **包要关联主仓库**：`metadata-action` 默认把 `org.opencontainers.image.source` 填成「工作流所在仓库」（= 构建仓库），跨账号连不上。`docker.yml` 在 `labels:` 里显式重写为主仓库地址，这样 GHCR 的包页面才会指回 `aimod-cc/Agent2API`。
 
 ### 8.3 代理
 

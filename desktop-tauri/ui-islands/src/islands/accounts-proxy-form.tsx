@@ -9,9 +9,10 @@ import {
 import { t } from '../i18n'
 import {
   errorMessage, esc, poolItemLabel, shared, toast,
-  type AccountRecord, type ClashSnapshot, type PoolItem,
+  type AccountRecord, type PoolItem,
 } from './accounts-shared'
-import { clashOptions, getStore, proxyPoolOptions } from './accounts-data'
+import { proxyPoolOptions } from './accounts-data'
+import type { ClashProxySnapshot } from '../../../ui-shared/clash-proxy'
 
 /** 每条候选都会真实出网，一轮最多测 8 条。 */
 const ROTATE_TEST_LIMIT = 8
@@ -24,14 +25,14 @@ export type ProxyPayload =
   | { source: 'custom'; protocol: 'http' | 'socks5'; host: string; port: number; username: string; password: string }
 
 export type ProxyDraft = {
-  mode: 'none' | 'pool' | 'rotate' | 'clash' | 'custom'
+  mode: 'none' | 'pool' | 'rotate' | 'clash' | 'custom' | 'retired'
+  listenerUid: string
   /** 池条目 id（mode === 'pool'） */
   proxyId: string
   /** 轮询档：true = 池里全部启用的出口（"全部"，默认档；false = 只在 rotateIds 里轮） */
   rotateAll: boolean
   /** 轮询档：指定要轮询的池条目 id（rotateAll 为 true 时不用） */
   rotateIds: string[]
-  listenerUid: string
   protocol: 'http' | 'socks5'
   host: string
   port: string
@@ -47,12 +48,12 @@ export function draftOfProxy(proxy: AccountRecord['proxy']): ProxyDraft {
   return {
     mode: source === 'pool' ? 'pool'
       : rotate ? 'rotate'
-        : source === 'clash' ? 'clash' : source === 'custom' ? 'custom' : 'none',
+        : source === 'clash' ? 'clash' : source === 'custom' ? 'custom' : source === 'subscription' ? 'retired' : 'none',
+    listenerUid: source === 'clash' ? String(config?.listenerUid || '') : '',
     proxyId: source === 'pool' ? String(config?.proxyId || '') : '',
     // `all` 缺键按「全部」读（后端同一个口径：那是这一档的默认语义）
     rotateAll: rotate ? config?.all !== false : true,
     rotateIds: rotate && Array.isArray(config?.proxyIds) ? config.proxyIds.map(String) : [],
-    listenerUid: config?.source === 'clash' || source === 'clash' ? String(config?.listenerUid || '') : '',
     protocol: config?.protocol === 'socks5' ? 'socks5' : 'http',
     host: config?.host || '',
     port: config?.port === undefined || config?.port === null ? '' : String(config.port),
@@ -64,6 +65,11 @@ export function draftOfProxy(proxy: AccountRecord['proxy']): ProxyDraft {
 /** 草稿 → 接口 payload；非法输入抛出「面向用户」的错误（消息直接进 toast / 弹窗状态行） */
 export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
   if (draft.mode === 'none') return null
+  if (draft.mode === 'retired') throw new Error(t('原代理来源已下线，请选择已保存的代理、自定义地址或直连'))
+  if (draft.mode === 'clash') {
+    if (!draft.listenerUid) throw new Error(t('请先选择 Clash Verge 出口'))
+    return { source: 'clash', listenerUid: draft.listenerUid }
+  }
   if (draft.mode === 'pool') {
     if (!draft.proxyId) throw new Error(t('请先选择已保存的代理'))
     return { source: 'pool', proxyId: draft.proxyId }
@@ -73,10 +79,6 @@ export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
     if (draft.rotateAll) return { source: 'rotate', all: true }
     if (!draft.rotateIds.length) throw new Error(t('轮询至少要选择一条代理（或改选「全部」）'))
     return { source: 'rotate', all: false, proxyIds: [...draft.rotateIds] }
-  }
-  if (draft.mode === 'clash') {
-    if (!draft.listenerUid) throw new Error(t('请先选择 Clash Verge 出口'))
-    return { source: 'clash', listenerUid: draft.listenerUid }
   }
   const host = draft.host.trim()
   const port = Number(draft.port)
@@ -92,30 +94,10 @@ export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
   }
 }
 
-function clashOptionLabel(option: NonNullable<ClashSnapshot['options']>[number]): string {
-  const inactive = option.profileActive === false ? t('（其他订阅，可能未生效）') : ''
-  const disabled = option.enabled === false ? t('（已在 Clash 中禁用）') : ''
-  return `${option.name} :${option.port}${inactive}${disabled}`
+function clashOptionLabel(option: NonNullable<ClashProxySnapshot['options']>[number]): string {
+  return `${option.name || option.uid} :${option.port}${option.profileActive === false ? t('（其他订阅，可能未生效）') : ''}${option.enabled === false ? t('（已在 Clash 中禁用）') : ''}`
 }
 
-/**
- * 出网代理表单（账号设置与批量改代理共用）。刻意**不带** `data-island-input`：
- * 那是输入框岛（就地升级）的钩子，两个岛同时挂一个输入框会打架。
- *
- * 档位：
- *   · 无代理（直连）/ 自定义 —— 与改造前一致；
- *   · **已保存的代理** —— 引用「网络代理」页的池条目（推荐路径：出口在那里
- *     配一次、测一次，所有引用它的账号一起生效）。选项文案是
- *     「名字（协议 主机:端口）」，与账号页代理列同一格式（见 poolItemLabel）；
- *   · **轮询** —— 逐请求轮换池里的出口（换 IP）。**只在 `allowRotate` 为真时
- *     出现**（OpenCode Zen 免费档，判据见 accounts-domain 的 supportsProxyRotate
- *     —— 那个上游按 IP 限流）。默认「全部代理节点」（池里每个启用的出口轮流
- *     使用），取消勾选后从池里多选出要轮询的几条；
- *   · **Clash Verge** —— **只在账号当前就是直接引用 Clash 出口时出现**：
- *     那种存量记录要能改（切到别的档就消失，因为出口统一走池之后不再提供
- *     「新建一条 Clash 直引」的入口；想引用 Clash 出口请先到「网络代理」页
- *     点「同步 Clash Verge」，再从上面那一档选）。
- */
 export function ProxyForm({
   draft,
   onChange,
@@ -128,23 +110,27 @@ export function ProxyForm({
   /** 是否给出「轮询」档（只有 OpenCode Zen 账号为真，见函数说明） */
   allowRotate?: boolean
 }) {
-  const store = getStore()
-  const clash = store.clash
-  const options = Array.isArray(clash?.options) ? clash.options : []
-  /** Clash 直引档的可见性：见函数说明（存量记录专用） */
-  const showClashMode = draft.mode === 'clash'
   const [testing, setTesting] = React.useState(false)
   const [testResult, setTestResult] = React.useState<React.ReactNode>(null)
   /** 池列表：「已保存的代理」与「轮询」两档共用的选项（模块级缓存，见 accounts-data） */
   const [pool, setPool] = React.useState<PoolItem[] | null>(null)
   const [poolError, setPoolError] = React.useState('')
+  const [clash, setClash] = React.useState<ClashProxySnapshot | null>(null)
+  const [clashError, setClashError] = React.useState('')
+  const options = clash?.options || []
   const set = (patch: Partial<ProxyDraft>): void => onChange({ ...draft, ...patch })
 
-  // 出口列表只在 Clash 直引档出现时才需要（存量记录的下拉）—— 别的档不为它
-  // 打这次请求
-  React.useEffect(() => {
-    if (showClashMode) void clashOptions().catch(() => { /* 画成「不可用」那一支 */ })
-  }, [showClashMode])
+  const loadClash = React.useCallback((): void => {
+    setClashError('')
+    void Promise.resolve(shared().workbuddyDesktop?.getProxies?.()).then(data => {
+      if (!data?.clash || !Array.isArray(data.clash.options)) throw new Error(t('代理列表响应异常'))
+      setClash(data.clash)
+    }).catch(error => {
+      setClash({ available: false, options: [] })
+      setClashError(errorMessage(error))
+    })
+  }, [])
+  React.useEffect(() => { if (draft.mode === 'clash' && clash === null) loadClash() }, [draft.mode, clash, loadClash])
 
   /** 读一次代理池（表单里两个入口：首次挂载与「重新读取」） */
   const loadPool = React.useCallback((force = false): void => {
@@ -271,6 +257,7 @@ export function ProxyForm({
 
   return (
     <div className='flex flex-col'>
+      {draft.mode === 'retired' ? <p className='mb-3 text-xs text-destructive'>{t('原代理来源已下线，请选择已保存的代理、自定义地址或直连')}</p> : null}
       <RadioGroup value={draft.mode} onValueChange={value => set({ mode: value as ProxyDraft['mode'] })}
         className='flex-row flex-wrap items-center gap-5' aria-label={t('代理方式')}>
         <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
@@ -286,13 +273,9 @@ export function ProxyForm({
             <RadioGroupItem value='rotate' />{t('轮询（换 IP）')}
           </Label>
         ) : null}
-        {/* Clash 直引档只对**已经是这种配置**的账号出现（见函数说明）：
-            出口统一走代理池之后不再提供新建入口 */}
-        {showClashMode ? (
-          <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
-            <RadioGroupItem value='clash' />Clash Verge
-          </Label>
-        ) : null}
+        {draft.mode === 'clash' ? <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
+          <RadioGroupItem value='clash' />Clash Verge
+        </Label> : null}
         <Label className='inline-flex cursor-pointer items-center gap-2 font-normal'>
           <RadioGroupItem value='custom' />{t('自定义')}
         </Label>
@@ -310,7 +293,7 @@ export function ProxyForm({
                 <SelectValue>
                   {pool?.find(item => item.id === draft.proxyId)
                     ? poolItemLabel(pool.find(item => item.id === draft.proxyId)!)
-                    : (pool === null ? t('正在读取…') : pool.length ? t('请选择代理') : t('还没有保存的代理'))}
+                    : draft.proxyId ? t('当前代理不可用，请重新选择') : (pool === null ? t('正在读取…') : pool.length ? t('请选择代理') : t('还没有保存的代理'))}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
@@ -333,7 +316,7 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('地址与端口由「网络代理」页管理：那边改一次、测一次，所有引用它的账号一起生效')
-                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
+                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 Clash Verge 的端点')}
           </div>
         </div>
       ) : null}
@@ -382,56 +365,32 @@ export function ProxyForm({
                 ? t('正在读取代理列表…')
                 : pool.length
                   ? t('每条请求换一个出口（按顺序轮流），上游看到的 IP 因此是变化的；出口的地址与端口由「网络代理」页管理')
-                  : t('「网络代理」页还没有出口 —— 去那里新增，或在「订阅管理」里点「同步 Clash Verge」把 Clash 的出口导进来')}
+                  : t('「网络代理」页还没有出口 —— 去那里添加手动地址或同步 Clash Verge 的端点')}
           </div>
         </div>
       ) : null}
 
-      {draft.mode === 'clash' ? (
-        <div className='mt-3'>
-          <Field orientation='horizontal' className='field-row'>
-            <FieldLabel htmlFor={`${idPrefix}-clash-exit`}>{t('出口')}</FieldLabel>
-            {/* value 恒为字符串（空串 = 还没选）：受控值从 undefined 切到字符串会被 Base UI
-                当成「非受控 → 受控」的切换，所以不给 undefined */}
-            <Select value={draft.listenerUid} disabled={!options.length}
-              onValueChange={value => set({ listenerUid: String(value) })}>
-              <SelectTrigger id={`${idPrefix}-clash-exit`} className='min-w-[220px]'>
-                <SelectValue>
-                  {options.find(option => String(option.uid) === draft.listenerUid)
-                    ? clashOptionLabel(options.find(option => String(option.uid) === draft.listenerUid)!)
-                    : (clash?.available === false ? t('未检测到 Clash Verge') : options.length ? t('请选择出口') : t('没有可用出口'))}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {options.map(option => (
-                  <SelectItem key={String(option.uid)} value={String(option.uid)}>
-                    {clashOptionLabel(option)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button variant='outline' size='sm' onClick={() => {
-              void clashOptions({ force: true })
-                .then(() => toast(t('✅ 已重新读取 Clash Verge 配置')))
-                .catch(error => toast(t('读取失败：{error}', { error: errorMessage(error) }), 'err'))
-            }}>{t('重新读取')}</Button>
-          </Field>
-          <div className='detail mt-1.5'>
-            {clash === null
-              ? t('正在读取 Clash Verge 配置…')
-              : clash.available === false
-                ? (clash.error ? t('不可用：{error}', { error: clash.error }) : t('未检测到 Clash Verge 配置'))
-                : options.length
-                  ? t('读取自 {dir}；端口由 Clash Verge 管理，这里实时同步', { dir: clash.dir || 'Clash Verge' })
-                  : t('Clash Verge 里还没有配置混合监听器或节点端口')}
-          </div>
-          <p className='detail mt-1.5'>
-            {t('这是既有配置（直接引用 Clash 出口，不经过代理池）。推荐改用上面的')}
-            <b>{t('「已保存的代理」')}</b>
-            {t('：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。')}
-          </p>
-        </div>
-      ) : null}
+      {draft.mode === 'clash' ? <div className='mt-3'>
+        <Field orientation='horizontal' className='field-row'>
+          <FieldLabel htmlFor={`${idPrefix}-clash-exit`}>{t('出口')}</FieldLabel>
+          <Select value={draft.listenerUid} disabled={!options.length} onValueChange={value => set({ listenerUid: String(value) })}>
+            <SelectTrigger id={`${idPrefix}-clash-exit`} className='min-w-[220px]'>
+              <SelectValue>{options.find(option => option.uid === draft.listenerUid)
+                ? clashOptionLabel(options.find(option => option.uid === draft.listenerUid)!)
+                : draft.listenerUid ? t('当前代理不可用，请重新选择') : t('请选择出口')}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>{options.filter(option => option.uid).map(option => <SelectItem key={option.uid} value={String(option.uid)} disabled={option.enabled === false}>
+              {clashOptionLabel(option)}
+            </SelectItem>)}</SelectContent>
+          </Select>
+          <Button variant='outline' size='sm' onClick={loadClash}>{t('重新读取')}</Button>
+        </Field>
+        <p className='detail mt-1.5'>{clashError ? t('读取失败：{error}', { error: clashError })
+          : clash === null ? t('正在读取 Clash Verge 配置…')
+            : clash.available === false ? t('不可用：{error}', { error: clash.error || t('未检测到 Clash Verge 配置') })
+              : t('读取自 {dir}；端口由 Clash Verge 管理，这里实时同步', { dir: clash.dir || 'Clash Verge' })}</p>
+        <p className='detail mt-1.5'>{t('既有 Clash Verge 直接引用继续可用；也可在「网络代理」页同步端点，再改选「已保存的代理」。')}</p>
+      </div> : null}
 
       {draft.mode === 'custom' ? (
         <div className='mt-3'>

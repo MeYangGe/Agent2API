@@ -24,6 +24,7 @@ import {
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
 import { HiddenAccountsNotice } from './accounts-hidden-notice'
+import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
 import { Badge, Spinner } from '@ui'
 import { Alert } from '@ui'
 
@@ -53,7 +54,8 @@ function visibleColumns(): Array<(typeof ACCOUNT_COLUMNS)[number] & { align: 'le
 
 /** 该账号所属组的排序规则是否生效（生效时组内把手锁定：拖了也会被规则排回去） */
 function sortActiveIn(account: AccountRecord): boolean {
-  return groupSortRules(providerOf(account)).some(rule => rule.on)
+  const provider = providerOf(account)
+  return activeGroupSortRules(provider, groupSortRules(provider)).length > 0
 }
 
 /** 触发一次重绘（store 换快照 → 订阅者重画） */
@@ -271,6 +273,11 @@ function AccountsPage() {
       void reorderQueue(queue, t('{name} 移到第 {rank} 顺位', { name: moved.label, rank: to + 1 }))
       return
     }
+    const orderRules = activeGroupSortRules(drop.provider, groupSortRules(drop.provider))
+    if (orderRules.length > 0) {
+      toast(manualOrderBlockedMessage(orderRules), 'err')
+      return
+    }
     const group = current.find(item => item.provider === drop.provider)
     if (!group) return
     // 自动规则开启时不接受组内拖动；关闭后调整的是手动消耗顺序。
@@ -310,11 +317,9 @@ function AccountsPage() {
         t('当前视图不能调整组顺位：{reason} 之后再拖动', { reason: dragHandlers.current.lockReason }),
         'err',
       ),
-      isRowLocked: provider => groupSortRules(provider).some(rule => rule.on),
+      isRowLocked: provider => activeGroupSortRules(provider, groupSortRules(provider)).length > 0,
       onRowLockedAttempt: provider => toast(
-        t('「{name}」开着排序规则：先关掉规则，才能手动调整组内顺序', {
-          name: t(shared().wbProviders?.labelOf?.(provider) || provider),
-        }),
+        manualOrderBlockedMessage(activeGroupSortRules(provider, groupSortRules(provider))),
         'err',
       ),
       onDrop: drop => dragHandlers.current.onDrop(drop),

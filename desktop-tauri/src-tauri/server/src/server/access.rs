@@ -27,10 +27,8 @@
 //! （见 `desktop-tauri/src/commands.rs` 的 `panel_register`）—— 监听一出回环就
 //! 必须有准入边界。注册是**单向**的：后来关掉局域网访问也不会注销管理员，
 //! 面板认证就此一直开着。
-//! 桌面端没有会话（登录页只服务浏览器面板），它的凭证是**第一把启用的 Key**：
-//! 壳发管理请求时自动带，界面里不经桥的直连请求（AI 助手页）由桥把同一把交给
-//! 页面（`bridge::directCredentials`）。所以「桌面 = 免鉴权」只在没注册过管理员
-//! 时成立，改这一块的任何判定都要把这两条通道一起算上。
+//! 桌面壳的管理会话由进程内调用自动签发，与网页管理员注册状态无关。
+//! 局域网页面仍要求管理员登录；本机会话不能代替模型调用的网关 Key。
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -42,6 +40,8 @@ use axum::http::HeaderMap;
 
 use crate::server::db::Db;
 use crate::server::logging;
+
+pub mod local_session;
 
 /// 会话 cookie 名：**一枚装两段**（`agent2api-panel=<access>.<refresh>`）。
 ///
@@ -847,7 +847,13 @@ fn dedup(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// 请求是否携带有效 access token —— 候选里**任一把**在服务端会话表里就算有效。
+/// 只识别由本进程内调用签发的本机壳会话。
+pub fn local_session_valid(headers: &HeaderMap) -> bool {
+    let tokens = access_candidates(headers);
+    local_session::valid_any(tokens.iter().map(String::as_str))
+}
+
+/// 请求携带有效的本机壳会话或网页 access token 时准入管理面。
 ///
 /// 从前这里只取一把（cookie 有就只看 cookie），于是"罐里有一把陈年的同名 cookie"
 /// 与"没带任何凭证"判定结果相同（都是 401），而现场完全不同 —— 见
@@ -856,6 +862,9 @@ pub fn session_valid(headers: &HeaderMap) -> bool {
     let tokens = access_candidates(headers);
     if tokens.is_empty() {
         return false;
+    }
+    if local_session::valid_any(tokens.iter().map(String::as_str)) {
+        return true;
     }
     let now = now_ms();
     let mut table = match access_tokens().lock() {
@@ -1017,6 +1026,7 @@ pub fn revoke_session(headers: &HeaderMap) {
         .map(|token| sha256_hex(token))
         .collect();
     let presented_access = access_candidates(headers);
+    local_session::revoke_any(&presented_access);
     let target_session;
     {
         let mut table = match refresh_tokens().lock() {

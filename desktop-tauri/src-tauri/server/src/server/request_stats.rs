@@ -189,11 +189,8 @@ pub struct RequestStats {
     /// ── 它现在到底保证什么（诚实版）─────────────────────────────
     /// 数据一致性**不靠它**：真正把语句串起来的是 `Db` 内部那把 Mutex + SQLite
     /// 事务（每个写方法都在一个事务里跑完，读方法各是一次 `Db::with`）。
-    /// 它保证的是调用序列的原子性 —— 比如 `clear_where` 的「删除 + 重算」不被
-    /// 另一次 `clear_where` 交错成「A 删完、B 删完、A 重算、B 重算」（重算读的是
-    /// 库里的当前状态，交错虽然不会算错，但两次调用各自的 `stats()` 返回值会
-    /// 与自己的删除量对不上）。保留它还有一个现实理由：与 T2/T3 两个 store
-    /// 的并发形状一致，读代码的人不必为这一个模块另建一套心智模型。
+    /// 它串行化公开方法的调用序列；数据一致性仍由数据库连接锁与事务保证。
+    /// 保留它与账号、事件日志两个 store 的并发形状一致。
     /// **硬约束**：持这把锁期间绝不能再调 `logging::log` 一类的写日志函数 ——
     /// 日志要写同一个库，`std::sync::Mutex` 不可重入，会当场死锁。
     inner: Mutex<()>,
@@ -296,8 +293,7 @@ impl RequestStats {
     }
 
     /// 与 [`RequestStats::with_conn`] 同理，但给 `&mut Connection` ——
-    /// **需要事务的操作用它**：`record`（插明细 + 改聚合）、`clear_where`、
-    /// `clear`、`prune`。
+    /// **需要事务的操作用它**：记账、请求清理与保留期裁剪。
     fn with_conn_mut<T>(
         &self,
         _guard: &MutexGuard<'_, ()>,
@@ -751,14 +747,19 @@ impl RequestStats {
                 let days = daily::count_daily(conn)?;
                 let first = sql::min_ts(conn)?;
                 let last = sql::max_ts(conn)?;
-                Ok((total, days, first, last))
+                let downstream_raw = sql::count_raw(conn)?;
+                let upstream_raw = sql::count_upstream_raw(conn)?;
+                Ok((total, days, first, last, downstream_raw, upstream_raw))
             })
         };
-        let (total, daily_days, first_ts, last_ts) = loaded.unwrap_or((0, 0, None, None));
+        let (total, daily_days, first_ts, last_ts, downstream_raw, upstream_raw) =
+            loaded.unwrap_or((0, 0, None, None, 0, 0));
         let file = self.file().to_string_lossy().to_string();
         json!({
             "total": total,
             "dailyDays": daily_days,
+            "downstreamRaw": downstream_raw,
+            "upstreamRaw": upstream_raw,
             "file": file,
             // 与 file 同值：明细与聚合同居一个库。保留这个字段是为了不破坏
             // 既有读取方（`file` 的语义已经说明它指库文件），但**不要再把两者
@@ -785,7 +786,7 @@ impl RequestStats {
     /// 由 WAL 自动恢复。做它有两个实在的好处：
     ///   1. 会话结束后主库文件就是全部数据 —— 用户备份、拷贝、看「占用多大」时
     ///      只有一个文件是真相（不 checkpoint 的话数据散在 `-wal` 里，
-    ///      `api::storage_api` 的 `file_size` 只统计主库文件，会显得比实际小）；
+    ///      停机后不必再同时拷贝 WAL；运行中的存储概况统计主库与 WAL 的总占用）；
     ///   2. 清掉 `-wal` / `-shm` 残留文件，不留一个「进程退了但盘上还有半截
     ///      WAL」的观感。
     /// 代价是停机时一次全量检查点（把 WAL 里的页写回主库）—— 退出路径上的一次

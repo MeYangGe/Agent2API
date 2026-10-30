@@ -116,8 +116,7 @@ struct Inner {
     download_dir: PathBuf,
     /// 容器内更新已应用、但进程还没重启（只活在内存里，重启即自然清零）。
     ///
-    /// 挡「同一版重复安装」：第二次替换会把上一版的 `.backup` 覆盖掉，
-    /// 回滚这条路就断了 —— 而界面在新版本已就位、只差重启时最容易连点。
+    /// 挡「同一版重复安装」：新版本已就位、只差重启时不再重复替换文件。
     pending_restart: bool,
 }
 
@@ -322,7 +321,6 @@ impl UpdateManager {
             "selfUpdate": selfupdate::supported(),
             "serverAsset": server_asset.unwrap_or(Value::Null),
             "serverChecksumUrl": server_checksum.unwrap_or(Value::Null),
-            "backupAvailable": selfupdate::backup_available(),
             // 已应用、只差重启：界面据此把按钮换成「立即重启」，
             // 而不是再给一次注定 400 的「下载并更新」
             "pendingRestart": pending_restart,
@@ -345,7 +343,7 @@ impl UpdateManager {
     //
     // 与上面的「下载安装包」是两条路：那条给桌面端下安装器（下完由壳启动
     // 安装程序），这条给容器里的自己换文件（下完由本进程原地替换 + 重启）。
-    // 三条入口都是 POST /api/update/{install,rollback,restart} 的唯一实现，
+    // 两条入口都是 POST /api/update/{install,restart} 的唯一实现，
     // 细节与安全边界见 selfupdate 模块头。
 
     /// 应用已下载的更新包：校验 → 解包 → 原子替换二进制与 ui 目录。
@@ -363,7 +361,7 @@ impl UpdateManager {
         if self.lock().task.as_ref().map(|task| task.active).unwrap_or(false) {
             return Err(UpdateError::with_status(400, "更新包还在下载中，请等下载完成后再安装"));
         }
-        // 已经应用过一次、还没重启：再替换一次会把上一版的备份顶掉（见 Inner 的说明）
+        // 已经应用过一次、还没重启：只允许重启，不再重复替换文件。
         if self.lock().pending_restart {
             return Err(UpdateError::with_status(
                 400,
@@ -401,6 +399,15 @@ impl UpdateManager {
                 400,
                 "本次发布没有提供容器内更新包，请在宿主机执行 docker compose pull && docker compose up -d 升级",
             ));
+        }
+        match compare_versions(&version, CURRENT_VERSION) {
+            Some(order) if order < 0 => {
+                return Err(UpdateError::with_status(400, "容器内更新不支持降级到较旧版本"));
+            }
+            None => {
+                return Err(UpdateError::with_status(400, "更新包版本号无法比较，已放弃安装"));
+            }
+            _ => {}
         }
         if checksum_url.is_empty() && !source::is_resource(&bundle_url) {
             return Err(UpdateError::with_status(
@@ -443,32 +450,6 @@ impl UpdateManager {
             "needRestart": true,
             "uiUpdated": outcome.ui_updated,
             "archive": archive.to_string_lossy(),
-        }))
-    }
-
-    /// 回滚到上一版本（上一版备份由 install 时留下）。
-    pub fn rollback(&self, ui_dir: Option<&Path>) -> Result<Value, UpdateError> {
-        if !selfupdate::supported() {
-            return Err(UpdateError::with_status(
-                400,
-                "当前部署不支持容器内更新：需要在容器中运行并设置 AGENT2API_SELF_UPDATE=1",
-            ));
-        }
-        let exe = selfupdate::current_exe_path()?;
-        let outcome = selfupdate::rollback(&exe, ui_dir)?;
-        // 回滚同样是「已应用待重启」：重启之前不许再来一次（同上）
-        self.lock().pending_restart = true;
-        logging::log(
-            "[Update]",
-            &format!(
-                "⚠️ 已回滚到上一版本{}，重启后生效",
-                if outcome.ui_updated { "（含界面文件）" } else { "" }
-            ),
-        );
-        Ok(json!({
-            "restored": true,
-            "needRestart": true,
-            "uiRestored": outcome.ui_updated,
         }))
     }
 

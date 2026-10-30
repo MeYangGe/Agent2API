@@ -13,11 +13,10 @@
 //!   GET  /api/update/channels              关注通道 { stable, beta }
 //!   POST /api/update/channels              部分更新关注通道 { stable?, beta? }
 //!
-//! ── 容器内更新的三条（Linux headless / Docker 专有）──────────
+//! ── 容器内更新（Linux headless / Docker 专有）───────────────
 //!   POST /api/update/install               校验并应用已下载的更新包（替换二进制与 ui）
-//!   POST /api/update/rollback              回滚到上一版本（用 install 留下的备份）
 //!   POST /api/update/restart               重启进程（容器由 restart 策略拉起）
-//! 三条都要求 `AGENT2API_SELF_UPDATE=1`，否则 400；机制见 `core::update::selfupdate`。
+//! 两条都要求 `AGENT2API_SELF_UPDATE=1`，否则 400；机制见 `core::update::selfupdate`。
 //! `check` 的 `current` 缺省（网页端不传）时用服务端自己的版本号 —— 桌面壳一定
 //! 会传（后端不知道自己被哪个壳打包，那个口径不能变），所以只有网页端走缺省。
 //!
@@ -44,7 +43,6 @@ use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::proxies::{describe_account_proxy, normalize_account_proxy};
-use crate::server::core::{proxy_pool, sub_kernel};
 use crate::server::core::update::{set_token, status_json, UpdateError};
 use crate::server::errors::{management_error, GatewayError};
 use crate::server::http::{ok_json, parse_body};
@@ -196,19 +194,12 @@ async fn dispatch(
                     state.update().reset_source_preference();
                     crate::server::core::plugin_host::update::clear_cooldown();
                 }
-                let rebuilding = sub_kernel::installed() && super::proxies::reconcile_listeners(state);
                 let current = config::update_proxy();
-                let referenced = proxy_pool::usage::referenced_pool_ids(Some(state.store()));
-                let borrowed = referenced.iter().map(String::as_str).collect();
-                let opening = rebuilding && current.as_ref()
-                    .and_then(proxy_pool::usage::pool_reference_id)
-                    .is_some_and(|id| proxy_pool::needs_listener(id, &borrowed));
                 // 落库失败仍返回新值（内存快照已生效，本次运行照走新线路），
                 // saved 字段如实带上，调用方要提醒就用它
                 ok_json(json!({
                     "proxy": describe_account_proxy(current.as_ref()),
                     "saved": saved,
-                    "listener": if opening { "opening" } else { "none" },
                 }))
             }
             Err(error) => {
@@ -328,22 +319,14 @@ async fn dispatch(
     }
 
     // ── 容器内更新（Linux headless / Docker）────────────────────
-    // 三条都不接受请求体：装什么、回滚到哪儿、重启谁，全部由服务端自己决定
+    // 两条都不接受请求体：装什么、重启谁，全部由服务端自己决定
     // （更新包按固定名从下载目录取，路径不从请求里进 —— 见 core::update::mod）。
     // 界面目录取自 ServerState（headless 入口 set_ui_dir 装进去的），
-    // 桌面包没有它（None）—— 桌面形态本来也不会走到这三条。
+    // 桌面包没有它（None）—— 桌面形态本来也不会走到这两条。
 
     if method == Method::POST && full_path == "/api/update/install" {
         let ui_dir = state.ui_dir().map(|path| path.as_path());
         return match state.update().install_downloaded(ui_dir).await {
-            Ok(data) => ok_json(data),
-            Err(error) => update_error(error),
-        };
-    }
-
-    if method == Method::POST && full_path == "/api/update/rollback" {
-        let ui_dir = state.ui_dir().map(|path| path.as_path());
-        return match state.update().rollback(ui_dir) {
             Ok(data) => ok_json(data),
             Err(error) => update_error(error),
         };

@@ -1,36 +1,6 @@
-/**
- * 账号页的**动作层与对外契约**（非岛：`.ts` 不被 import.meta.glob 当岛加载）。
- *
- * 替换 ui/accounts-view.js 的有状态部分 + ui/accounts-filters.js 的交互 +
- * ui/usage-actions.js + ui/proxy-form.js 的 Clash 缓存。分四层：
- *   · accounts-domain.ts  纯逻辑（provider 能力表 / 判定 / 筛选口径 / 队列位置）
- *   · accounts-store.ts   状态 store（快照 / 筛选 / 勾选 / 展开态 / 账号名隐藏）
- *   · 本文件              动作（余额 / 签到 / 连接数 / Clash 缓存 / 行内动作 / 弹窗）
- *                         + `window.wbAccountsView` / `wbAccountsModel` / `wbAccountPanel`
- *   · accounts-page.tsx / accounts-panels.tsx / accounts-dialogs.tsx  视图
- * 状态对外只有一条读路径（`export * from './accounts-store'`），视图侧的 import 路径
- * 因此只有本文件一处。
- *
- * ── 对外契约（调用点逐个 grep 确认过）──────────────────────────
- *   · `wbAccountsView`  app.js:147 syncConnections / :575 render / :622 refreshCaches /
- *                       :811 与 tasks-panel.tsx 的 syncBalancesSnapshot / providers.js:138 render；
- *                       tasks-panel.tsx 的「立即签到一次」还调 refreshUsageAfterCheckin
- *                       —— 那条路径的签到不在账号页里，但积分同样会变，余额得跟着刷
- *   · `wbAccountsModel` app.js:236 isLimited（顶栏「已限流」计数，含余额不足档）/
- *                       :663 isDesktopAccount / report.js:307
- *                       editionSuffix / models-fetch-modal.tsx:245 providerFeatures、:255 byPriorityOrder
- *   · `wbAccountPanel`  app.js:623 invalidate / :645 open
- * 注册必须在**模块求值时**完成：app.js 的 refresh() 是异步的（首个 await 之后才轮到渲染），
- * 但 report.js / 别的同步脚本紧随其后执行 —— 拿不到就会退化成静默不生效。
- *
- * ── 全局一条队列 ─────────────────────────────────────────────
- * 优先级是全局唯一的一条队列（见 accounts-domain.ts 的模块头）。行序 = 优先级升序；
- * ↑/↓ 与全局相邻账号交换；「设为首选」只把账号移到全局第一位，不改变启用状态。
- */
-
 import {
   errorMessage, POOL_VALUE_PREFIX, shared, toast,
-  type AccountRecord, type ClashSnapshot,
+  type AccountRecord,
   type UsageEntry,
 } from './accounts-shared'
 import {
@@ -58,69 +28,12 @@ export { refreshList } from './accounts-refresh'
 export * from './accounts-store'
 export { saveGroupSortRules as setGroupSortRules } from './accounts-sort'
 
-/* ─── Clash 出口缓存（只剩代理表单的「Clash Verge」档在用）─────
- *
- * 代理列不再列 Clash 出口（出口统一走代理池，见 accounts-panels 的 ProxyCell），
- * 所以这里没有「列上没就绪就补拉」那条自愈链了 —— 唯一的消费者是账号设置
- * 弹窗里的 **Clash 直引档**（只在账号当前就是这种存量配置时出现），
- * 它挂载时自己拉一次、失败还有「重新读取」按钮。
- * 缓存仍放 store（`clash` 字段）：一次弹窗打开内多实例共享，避免重复请求。 */
-
-let clashInflight: Promise<ClashSnapshot> | null = null
-
-/**
- * 读一次 Clash 出口列表（模块级缓存；并发调用合并成一次）。
- * 返回值必须带 `clash` 对象，否则同样按失败处理：桥异常时可能 **resolve 出
- * `undefined`（而不是 reject）**——不校验的话，这种失败会伪装成「没有出口」。
- */
-export async function clashOptions(options: { force?: boolean } = {}): Promise<ClashSnapshot> {
-  const cached = getStore().clash
-  if (!options.force && cached) return cached
-  if (!clashInflight) {
-    clashInflight = (async () => {
-      try {
-        const data = await shared().workbuddyDesktop?.getProxies?.()
-        if (!data || typeof data !== 'object' || !data.clash) {
-          throw new Error(t('代理列表响应异常（{type}）', { type: typeof data }))
-        }
-        return data.clash
-      } finally {
-        clashInflight = null
-      }
-    })()
-  }
-  const clash = await clashInflight
-  patch({ clash })
-  return clash
-}
-
-/**
- * 失效重读用：清掉缓存（下一次调用会真正重新读取）。
- *
- * 对外契约 `wbAccountPanel.invalidate`（app.js 在账号列表刷新后调用）。
- * 现在唯一的读者是代理表单的 Clash 直引档：清掉之后，下一次打开账号设置
- * 弹窗会重新读 Clash 端口 —— 那类记录的端口由 Clash 实时决定，可能刚被改过。
- */
-export function invalidateClashCache(): void {
-  patch({ clash: null })
-}
-
 /* ─── 代理池（「网络代理」页的命名代理，账号页的代理下拉）─── */
 
-/**
- * 池列表的**唯一一份缓存**在 `proxy-pool-cache.ts`：账号页与「网络代理」页
- * 共用它（那一页每次写操作都拿到后端回报的整份列表，写进同一份缓存，这里
- * 立刻能看到）。
- *
- * 为什么不再是本文件的模块变量：曾经它只在这里，且读过一次就永不失效
- * （`invalidateProxyPoolCache` 全项目没有调用点）。后果是在网络代理页禁用
- * 节点 / 删除订阅之后，账号页的代理下拉还列着那些条目，选中才被后端拒绝。
- */
 export {
   acceptProxyPool, ensureProxyPoolOptions, invalidateProxyPoolCache, poolError,
   proxyPoolOptions, proxyPoolSnapshot, refreshProxyPool, subscribeProxyPool,
 } from './proxy-pool-cache'
-
 
 /* ─── 弹窗 ─────────────────────────────────── */
 
@@ -563,7 +476,7 @@ export function installAccountsApi(): void {
     closeBatch: closeDialog,
     /** 「添加账号」弹窗打开时可用：按 providers 摘要重建选项并复位到 WorkBuddy */
     syncAddProvider: () => shared().wbAccountAddForms?.syncAddProvider?.(),
-    /** 账号列表刷新后调用：Clash 端口可能已在 Clash 侧改过 */
-    invalidate: invalidateClashCache,
+    
+    invalidate: () => { void refreshProxyPool() },
   }
 }

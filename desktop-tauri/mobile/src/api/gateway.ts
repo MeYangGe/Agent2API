@@ -79,7 +79,7 @@ export type SessionPayload = {
   lastRequestModel?: string | null
   routedAccountId?: string | null
   defaultModel?: string | null
-  proxies?: { clashAvailable?: boolean; clashError?: string | null; optionCount?: number }
+  proxies?: { optionCount?: number; clashAvailable?: boolean; clashError?: string | null }
   models?: Array<{ id?: string; name?: string; provider?: string; providerLabel?: string }>
 }
 
@@ -333,41 +333,70 @@ export function deleteKey(id: string): Promise<KeysPayload> {
 /* ─── 网络代理 ─────────────────────────────────── */
 
 export type PoolItem = ProxyUsage & {
-  id?: string
-  name?: string
-  source?: string
-  enabled?: boolean
-  protocol?: string
-  host?: string
-  port?: number
-  address?: string
-  lastTest?: { at?: number; success?: boolean; ip?: string; error?: string } | null
-  /** 孤儿订阅节点：所属订阅已不存在（后端标注） */
-  orphan?: boolean
-  [key: string]: unknown
+  id: string
+  name: string
+  source: string
+  enabled: boolean
+  sourceEnabled?: boolean
+  localDisabled?: boolean
+  listenerUid?: string
+  protocol: string
+  host: string
+  port: number | null
+  username: string
+  password: string
+  resolved?: { protocol?: string; host?: string; port?: number | null; label?: string } | null
+  resolveError?: string | null
+  lastTest?: { at?: number; success?: boolean; ip?: string; error?: string; durationMs?: number } | null
 }
 
-export type PoolPayload = {
-  items?: PoolItem[]
-  clash?: { available?: boolean; error?: string | null; options?: unknown[] }
-  /** 内核装没装：订阅节点没有端口时的首要成因（没内核就没有监听器） */
-  kernelInstalled?: boolean
+export type PoolPayload = { items?: PoolItem[]; clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot; changes?: number; syncError?: string | null }
+export type ProxyDraft = Pick<PoolItem, 'name' | 'protocol' | 'host' | 'port' | 'username' | 'password' | 'enabled'>
+export type ProxyTestResult = PoolPayload & {
+  success?: boolean
+  error?: string
+  ip?: string
+  durationMs?: number
+  saveError?: string
 }
+export type ProxySettings = { testUrl?: string; defaults?: { testUrl?: string } }
 
 export function fetchProxyPool(signal?: AbortSignal): Promise<PoolPayload> {
   return apiCall<PoolPayload>('/api/proxies/pool', { signal })
 }
 
-export function syncClashProxies(): Promise<PoolPayload & { changes?: number; syncError?: string | null }> {
+export function syncClashProxies(): Promise<PoolPayload> {
   return apiCall('/api/proxies/pool/sync-clash', { method: 'POST' })
+}
+
+export function saveProxyItem(draft: ProxyDraft, id?: string): Promise<PoolPayload> {
+  return apiCall<PoolPayload>(id ? '/api/proxies/pool/update' : '/api/proxies/pool', {
+    method: 'POST', body: { ...draft, source: 'manual', ...(id ? { id } : {}) },
+  })
+}
+
+export function removeProxyItem(id: string): Promise<PoolPayload> {
+  return apiCall<PoolPayload>('/api/proxies/pool/remove', { method: 'POST', body: { id } })
 }
 
 export function setProxyEnabled(id: string, enabled: boolean): Promise<PoolPayload> {
   return apiCall<PoolPayload>('/api/proxies/pool/enable', { method: 'POST', body: { id, enabled } })
 }
 
-export function testProxy(id: string): Promise<PoolPayload & { ok?: boolean; error?: string; ip?: string }> {
+export function testProxy(id: string): Promise<ProxyTestResult> {
   return apiCall('/api/proxies/pool/test', { method: 'POST', body: { id } })
+}
+
+export function testProxyDraft(draft: ProxyDraft): Promise<ProxyTestResult> {
+  return apiCall('/api/proxies/test', { method: 'POST', body: { proxy: { ...draft, source: 'custom' } } })
+}
+
+export function fetchProxySettings(): Promise<ProxySettings> {
+  return apiCall('/api/proxies/settings')
+}
+
+export function saveProxySettings(testUrl: string): Promise<ProxySettings> {
+  return apiCall('/api/proxies/settings', { method: 'POST', body: { testUrl } })
 }
 
 /* ─── 定时任务 ─────────────────────────────────── */

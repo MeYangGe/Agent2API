@@ -1061,8 +1061,7 @@ pub fn shim_js() -> &'static str {
     check_update: function () {
       // 网页端没有「壳打包的版本号」这个概念：不带 current，服务端按自己的
       // 编译期版本比较（见 api/update 的 check 分支）。返回里带 selfUpdate /
-      // serverAsset / backupAvailable —— 面板据此决定显示「一键更新」、
-      // 「回滚」还是退回手动升级命令，不再由这里硬编码。
+      // serverAsset —— 面板据此决定显示「一键更新」还是手动升级命令。
       return call('GET', '/api/update/check');
     },
     get_update_status: function () { return call('GET', '/api/update/status'); },
@@ -1201,17 +1200,20 @@ pub fn shim_js() -> &'static str {
   }
 
   /**
-   * 整库备份（网页端）：`GET /api/backup/download` → 浏览器下载 .sql。
+   * 整库备份（网页端）：POST 密码参数，下载 .a2ab 加密包。
    *
    * 返回形状与桌面壳 `commands.rs::export_database` 对齐
    * （`{ bytes, tables, file }`），设置页的成功提示两端共用一套渲染。
-   * 表计数在后端放进 `X-Backup-Tables` 响应头 —— 响应体是几百 MB 的 SQL，
-   * 不能为了带元数据把它包成 JSON。
+   * 表计数在后端放进 `X-Backup-Tables` 响应头，响应体只承载加密包。
    */
-  async function exportDatabase(includeLogs) {
-    var path = '/api/backup/download?includeLogs=' + (includeLogs === false ? '0' : '1');
-    var response = await fetchAuthed(path, function () {
-      return { method: 'GET', headers: authHeaders({ 'Accept': '*/*' }) };
+  async function exportDatabase(includeLogs, password) {
+    var response = await fetchAuthed('/api/backup/download', function () {
+      return {
+        method: 'POST',
+        cache: 'no-store',
+        headers: authHeaders({ 'Accept': '*/*', 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ includeLogs: includeLogs !== false, password: password || '' }),
+      };
     });
     if (!response.ok) {
       // 失败时响应体是管理信封（错误文案在里面），交给统一的错误归一
@@ -1222,30 +1224,34 @@ pub fn shim_js() -> &'static str {
     }
     var tables = [];
     try { tables = JSON.parse(response.headers.get('x-backup-tables') || '[]'); } catch (e) { tables = []; }
+    var includedKeys = [];
+    try { includedKeys = JSON.parse(response.headers.get('x-backup-keys') || '[]'); } catch (e) { includedKeys = []; }
     var filename = fileNameFromDisposition(response.headers.get('content-disposition'))
-      || ('agent2api-backup-' + downloadStamp() + '.sql');
+      || ('agent2api-backup-' + downloadStamp() + '.a2ab');
     var blob = await response.blob();
     saveBlob(blob, filename);
-    return { bytes: blob.size, tables: tables, file: filename, saved: true };
+    return { bytes: blob.size, tables: tables, file: filename, saved: true, encrypted: true, includedKeys: includedKeys };
   }
 
   /**
-   * 整库恢复（网页端）：选一个 .sql 文件 → `POST /api/backup/upload`。
-   *
-   * 请求体直接放 File 对象，浏览器按文件流式发送 —— 不能 `file.text()`：
-   * 几百 MB 的备份在手机上会先把整份内容读成字符串，内存翻倍且容易 OOM。
+   * 整库恢复：选择 .a2ab 或旧 .sql，密码和 File 通过 multipart 流式上传。
+   * 不能 file.text()，否则大备份会在界面额外生成全量字符串。
    * 返回形状与桌面壳 `commands.rs::import_database` 一致
    * （`{ tables, safetyBackup, warning? }`）。
    */
-  async function importDatabase() {
-    var picked = await pickFile('.sql');
+  async function importDatabase(password) {
+    var picked = await pickFile('.a2ab,.sql');
     if (picked.canceled) return { canceled: true };
     var file = picked.file;
+    var form = new FormData();
+    form.append('password', password || '');
+    form.append('backup', file);
     var response = await fetchAuthed('/api/backup/upload', function () {
       return {
         method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/sql', 'Accept': 'application/json' }),
-        body: file,
+        cache: 'no-store',
+        headers: authHeaders({ 'Accept': 'application/json' }),
+        body: form,
       };
     });
     var text = await response.text();
@@ -1716,8 +1722,6 @@ pub fn shim_js() -> &'static str {
     getProxyPool: function () { return call('GET', '/api/proxies/pool'); },
     createProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool', payload || {}); },
     updateProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool/update', payload || {}); },
-    // 启用 / 禁用（三种来源都放行；订阅节点禁用时后端会走关闭监听端口流程，
-    // 响应带 `listener`：none / closing / opening —— 前端据此轮询列表看端口落地）
     setProxyPoolItemEnabled: function (payload) { return call('POST', '/api/proxies/pool/enable', payload || {}); },
     removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
@@ -1726,23 +1730,6 @@ pub fn shim_js() -> &'static str {
     // 成对存在，契约见 api::proxies 的模块头 settings 两条）
     getProxySettings: function () { return call('GET', '/api/proxies/settings'); },
     saveProxySettings: function (payload) { return call('POST', '/api/proxies/settings', payload || {}); },
-    // 订阅（「网络代理」页的订阅区块；与桌面壳 bridge.rs 的同名方法成对存在，
-    // 契约见 api::subscriptions 的模块头 —— 写操作后端投一条内核命令（异步），
-    // 节点数与运行状态由轮询 kernel 看结果）
-    getSubscriptions: function () { return call('GET', '/api/subscriptions'); },
-    addSubscription: function (payload) { return call('POST', '/api/subscriptions/add', payload || {}); },
-    saveSubscription: function (payload) { return call('POST', '/api/subscriptions/save', payload || {}); },
-    refreshSubscription: function (id) { return call('POST', '/api/subscriptions/refresh', { id: String(id || '') }); },
-    removeSubscription: function (id) { return call('POST', '/api/subscriptions/remove', { id: String(id || '') }); },
-    decodeQrImage: function (payload) { return call('POST', '/api/subscriptions/decode-qr', payload || {}); },
-    getKernelStatus: function () { return call('GET', '/api/subscriptions/kernel'); },
-    downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
-    importKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/import', payload || {}); },
-    cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
-    restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
-    // 手动关闭内核（与桌面壳 bridge.rs 的同名方法成对存在；只停进程，订阅与端口注册表保留）
-    stopKernel: function () { return call('POST', '/api/subscriptions/kernel/stop', {}); },
-    removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
     // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
     // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
     pickFolder: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
@@ -1933,9 +1920,7 @@ pub fn shim_js() -> &'static str {
     // 二进制与 ui 目录）→ restartService（进程优雅退出，容器由 restart 策略
     // 拉起，同一个容器、可写层保留）。未开 AGENT2API_SELF_UPDATE 的部署由
     // 后端 400 拒绝；面板按 check 返回的 selfUpdate 字段决定是否显示这些入口。
-    // 回滚用的是 install 留下的 .backup 备份（同一套替换逻辑的反向操作）。
     installUpdate: function () { return call('POST', '/api/update/install', {}); },
-    rollbackUpdate: function () { return call('POST', '/api/update/rollback', {}); },
     restartService: function () { return call('POST', '/api/update/restart', {}); },
 
     // ── 出站指纹脱敏 ──
@@ -2231,8 +2216,8 @@ pub fn shim_js() -> &'static str {
     // 网页端只能「下载附件」与「上传文件」，对应后端新加的一对 HTTP 端点
     // （见 api::backup_api 的模块头）。返回形状与桌面壳逐字段一致，设置页
     // 的提示文案与结果区两端共用。
-    exportDatabase: function (includeLogs) { return exportDatabase(includeLogs); },
-    importDatabase: function () { return importDatabase(); },
+    exportDatabase: function (includeLogs, password) { return exportDatabase(includeLogs, password); },
+    importDatabase: function (password) { return importDatabase(password); },
     // 恢复进度：网页端与桌面端同一条后端端点（见 api::backup_api）
     getBackupProgress: function () { return call('GET', '/api/backup/progress'); },
   };

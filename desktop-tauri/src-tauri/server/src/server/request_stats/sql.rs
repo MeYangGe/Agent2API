@@ -33,7 +33,7 @@
 //! ── 过滤条件为什么能全部下推给 SQL ──────────────────────────
 //! 这里没有「只能在 Rust 侧算」的条件：`model` 是精确匹配、`status` 是两列的
 //! 复合判定、`start`/`end` 是数值区间，都能表达成 WHERE。`query_requests` 与
-//! 清理（`clear_where` / `clear_raw_where` / 预览计数）共用同一份
+//! 清理与预览计数共用同一份
 //! [`FilterPlan`] ——「页面上筛出来的 N 条」与「清空删掉的那批」因此必然是
 //! 同一个集合（事件日志那边的 keyword 不能下推是因为 SQLite 的 LIKE 只折叠
 //! ASCII 大小写；本模块没有关键词过滤，也就没有那个约束）。
@@ -60,6 +60,12 @@ use serde_json::Value;
 
 use super::record::{AttemptDetail, RequestEntry, RequestQuery, RunningProgress, SensitiveHit};
 use super::report::{normalize_status_filter, SummaryRow};
+
+mod raw;
+pub(super) use raw::{
+    count_raw, count_raw_matching, count_upstream_raw, delete_raw_matching, select_raw, trim_raw_rows,
+    upsert_raw,
+};
 
 /// `requests` 的列顺序（所有 SELECT 都按这个顺序取，`decode_request` 依赖它；
 /// 不写 `SELECT *` 是为了「加列时读侧要显式跟上」这件事在 diff 里可见）
@@ -193,7 +199,7 @@ fn encode_optional_json(value: &serde_json::Value) -> SqlValue {
 
 /// 一次查询的**筛选计划**：WHERE 片段 + 绑定值。
 ///
-/// `query_requests`（分页查）与 `clear_where`（按条件删 + 重算）都先用它编译条件 ——
+/// 查询、清理和预览共用一份筛选计划。
 /// 旧实现是两处共用同一个 `matches_filter` 函数，现在共用的层次更靠下：连 SQL 的
 /// WHERE 片段都是同一份，两处不可能漂移。
 /// `offset` / `limit` 是分页参数、不是筛选条件，所以不在这里。
@@ -302,6 +308,10 @@ impl FilterPlan {
             format!(" WHERE {}", fragments.join(" AND "))
         };
         Self { where_sql, binds }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.where_sql.is_empty()
     }
 }
 
@@ -902,10 +912,9 @@ pub(super) fn insert_request(conn: &Connection, entry: &RequestEntry) -> rusqlit
 
 // ─── 明细：删除与裁剪 ───────────────────────────────────────
 
-/// 删除命中筛选的明细，返回删除条数（`clear_where` 的 `removed`）。
+/// 删除命中筛选的明细，返回删除条数。
 ///
-/// **调用方必须先删对应的 request_raw 行**（`delete_raw_matching`，同一份
-/// 筛选计划）—— 明细删完就再也找不到要陪葬的正文 id 了。
+/// 调用方必须先在同一事务中清理两侧报文（`delete_raw_matching`）。
 pub(super) fn delete_matching(
     conn: &Connection,
     plan: &FilterPlan,
@@ -914,27 +923,7 @@ pub(super) fn delete_matching(
     conn.execute(&sql, params_from_iter(plan.binds.iter()))
 }
 
-/// 按筛选条件删除 request_raw 中「命中的明细 id」对应的正文行。
-///
-/// 同一个函数服务两个调用方，语义不同：
-///   - `mode=raw` 清理：它就是**全部动作**（只删正文，明细与日报不动）；
-///   - `mode=all` 带筛选的清理：它在 `delete_matching` **之前**跑（先删正文
-///     再删明细，顺序不能反）。
-///
-/// `IN (SELECT id FROM requests …)` 直接下推给 SQLite：不把命中 id 拉回
-/// Rust 再逐个绑定（筛选命中的可能是几千行，两万参数的 SQL 既慢又难看）。
-pub(super) fn delete_raw_matching(
-    conn: &Connection,
-    plan: &FilterPlan,
-) -> rusqlite::Result<usize> {
-    let sql = format!(
-        "DELETE FROM request_raw WHERE id IN (SELECT id FROM requests{})",
-        plan.where_sql
-    );
-    conn.execute(&sql, params_from_iter(plan.binds.iter()))
-}
-
-/// 清空全部明细（`clear()` 用）。调用方必须同时清 request_raw（`delete_all_raw`）。
+/// 清空全部明细。调用方必须先在同一事务中清理两侧报文。
 pub(super) fn delete_all_requests(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM requests", [])
 }
@@ -952,103 +941,6 @@ pub(super) fn delete_expired_requests(conn: &Connection, cutoff: i64) -> rusqlit
         params![cutoff],
     )?;
     conn.execute("DELETE FROM requests WHERE ts < ?1", params![cutoff])
-}
-
-// ─── 原始报文：request_raw ──────────────────────────────────
-
-/// 写一条原始正文（存在即覆盖；`id` 为空由调用方拦下）。
-/// 明细可能在记账后被数量上限淘汰，只为仍在库中的请求保存正文。
-///
-/// `size` 是完整请求体与响应体的字节长度合计。UPSERT 而不是先查后写：
-/// `id` 是主键，`ON CONFLICT` 一条语句完成「新建 / 覆盖」，同 id 重写
-/// （理论上不该发生，防手改库与重复请求）不会撞约束。
-pub(super) fn upsert_raw(
-    conn: &Connection,
-    id: &str,
-    ts: i64,
-    request_body: &str,
-    response_body: &str,
-    size: i64,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO request_raw (id, ts, request_body, response_body, size, truncated) \
-         SELECT ?1, ?2, ?3, ?4, ?5, 0 WHERE EXISTS (SELECT 1 FROM requests WHERE id = ?1) \
-         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts, request_body = excluded.request_body, \
-         response_body = excluded.response_body, size = excluded.size, truncated = 0",
-        params![id, ts, request_body, response_body, size],
-    )?;
-    Ok(())
-}
-
-/// `request_raw` 的当前行数。
-///
-/// 单独一条而不是「删之前先 `SELECT COUNT(*)` 进 DELETE 的子查询」：调用方要
-/// 用它做「超限了没」的早退判据（见 `RequestStats::record` 的那一步）——
-/// 未超限时一个 `COUNT(*)` 就结束，不必让那条带 `ORDER BY` 的 DELETE 每次
-/// 都跑一遍。实测这条 COUNT 在主键索引上是**零点几毫秒**（几千行的表），
-/// 而 `SUM(size)` 同类口径要 180 ms 量级（要走 overflow 页），所以上限只能按
-/// 条数判、不能按字节判 —— 这是本函数存在的直接原因。
-pub(super) fn count_raw(conn: &Connection) -> rusqlite::Result<usize> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM request_raw", [], |row| row.get(0))?;
-    Ok(count.max(0) as usize)
-}
-
-/// 把 `request_raw` 裁到「最多保留 `keep` 行」（`overflow` = 要删掉的行数）。
-///
-/// 按 `ts` 从旧到新删：保留的是**最近**的若干条正文（预览对话服务的是
-/// 「刚发出去的那条请求长什么样」，越旧的越没有查看价值，而正文是这张表
-/// 唯一的大字段来源 —— 实测库上 1,455 行占 244 MB）。
-///
-/// `rowid` 参与排序而不是只按 `ts`：同毫秒写入的两条（同一批请求）需要一个
-/// 确定的次序，否则「删哪一条」在两次调用间可能不同（排序不稳定），清理结果
-/// 就成了随机的。与明细表「同 ts 用 row_id 定序」同一手法。
-///
-/// `overflow` 由调用方算好（它已经持着一个刚数出来的 `count_raw`）：在 SQL 里
-/// 再数一遍等于白扫一次表。`overflow` 为 0 时直接返回 —— 这条 DELETE 的
-/// `ORDER BY` 要排全表，不该在无事可做时空跑。
-pub(super) fn trim_raw_rows(conn: &Connection, overflow: usize) -> rusqlite::Result<usize> {
-    if overflow == 0 {
-        return Ok(0);
-    }
-    conn.execute(
-        "DELETE FROM request_raw WHERE id IN \
-         (SELECT id FROM request_raw ORDER BY ts ASC, rowid ASC LIMIT ?1)",
-        params![overflow as i64],
-    )
-}
-
-/// 按 id 取一条原始正文（详情弹窗用）。无行返回 None（调用方给 404）。
-pub(super) fn select_raw(
-    conn: &Connection,
-    id: &str,
-) -> rusqlite::Result<Option<(String, String, String, bool)>> {
-    let mut stmt = conn.prepare("SELECT id, request_body, response_body, truncated FROM request_raw WHERE id = ?1")?;
-    let mut rows = stmt.query(params![id])?;
-    match rows.next()? {
-        Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))),
-        None => Ok(None),
-    }
-}
-
-/// 命中筛选的明细里**仍带正文**的条数（清理预览的 `raw`）。
-///
-/// 「带正文」= request_raw 里有对应行 —— 表的约定是「有行 ⇔ 有正文」
-/// （写入侧两侧全空时不写行），所以不需要逐列判空。
-pub(super) fn count_raw_matching(
-    conn: &Connection,
-    plan: &FilterPlan,
-) -> rusqlite::Result<usize> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM request_raw WHERE id IN (SELECT id FROM requests{})",
-        plan.where_sql
-    );
-    let count: i64 = conn.query_row(&sql, params_from_iter(plan.binds.iter()), |row| row.get(0))?;
-    Ok(count.max(0) as usize)
-}
-
-/// 清空全部原始正文（`clear()` / `mode=all` 全清时与明细一起清）
-pub(super) fn delete_all_raw(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM request_raw", [])
 }
 
 // ─── 聚合：读-改-写 ─────────────────────────────────────────

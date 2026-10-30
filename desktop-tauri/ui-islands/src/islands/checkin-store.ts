@@ -22,6 +22,7 @@ import type {
   TravelState,
 } from './checkin-types'
 import { t } from '../i18n'
+import { DEFAULT_PAGE_SIZE, SERVER_PAGE_SIZES, readPageSize } from './table-shell'
 import type { CheckinResultRow } from '../../../ui-shared/checkin'
 import { growthTaskRunnable } from '../../../ui-shared/checkin'
 import { rowCompleted, rowPending, rowMessage as resultMessage } from '../../../ui-shared/checkin-result'
@@ -239,6 +240,8 @@ export type Store = {
   growth: Map<string, GrowthCache>
 }
 
+const recordsPageSize = readPageSize('checkin-records', SERVER_PAGE_SIZES)
+
 export const store: Store = {
   center: null,
   centerSection: 'daily',
@@ -256,7 +259,10 @@ export const store: Store = {
   recordsLoaded: false,
   recordsError: '',
   recordsLoading: false,
-  recordsQuery: { limit: 50, offset: 0, outcome: '', provider: '', keyword: '' },
+  recordsQuery: {
+    limit: typeof recordsPageSize === 'number' ? recordsPageSize : DEFAULT_PAGE_SIZE,
+    offset: 0, outcome: '', provider: '', keyword: '',
+  },
   onboarding: new Map(),
   growth: new Map(),
 }
@@ -300,11 +306,14 @@ export async function loadCenter(): Promise<void> {
   }
 }
 
-/** 拉签到记录（分页 + 筛选） */
+let recordsRequest = 0
+
+/** 拉签到记录（分页 + 筛选）。 */
 export async function loadRecords(): Promise<void> {
+  const request = ++recordsRequest
+  const query = store.recordsQuery
   patch({ recordsLoading: true })
   try {
-    const query = store.recordsQuery
     const data = await bridge().getCheckinRecords?.({
       limit: query.limit,
       offset: query.offset,
@@ -313,16 +322,24 @@ export async function loadRecords(): Promise<void> {
       keyword: query.keyword || undefined,
       start: query.start,
     })
+    if (request !== recordsRequest) return
+    const total = Math.max(0, Number(data?.total) || 0)
+    const lastOffset = Math.max(0, (Math.ceil(total / query.limit) - 1) * query.limit)
+    if (query.offset > lastOffset) {
+      patch({ recordsQuery: { ...query, offset: lastOffset } })
+      await loadRecords()
+      return
+    }
     patch({
       records: Array.isArray(data?.records) ? data.records : [],
-      recordsTotal: Number(data?.total) || 0,
+      recordsTotal: total,
       recordsLoaded: true,
       recordsError: '',
     })
   } catch (error) {
-    patch({ recordsLoaded: true, recordsError: errorMessage(error) })
+    if (request === recordsRequest) patch({ recordsLoaded: true, recordsError: errorMessage(error) })
   } finally {
-    patch({ recordsLoading: false })
+    if (request === recordsRequest) patch({ recordsLoading: false })
   }
 }
 
@@ -442,20 +459,21 @@ export async function toggleMaster(enabled: boolean): Promise<void> {
 export async function saveScheduleEntry(
   payload: Record<string, unknown>,
   options: { closeEditor?: boolean; silent?: boolean } = {},
-): Promise<void> {
-  await run(
+): Promise<boolean> {
+  const saved = await run(
     async () => {
       const data = await bridge().saveCheckinSchedule?.(payload)
-      if (data) {
-        patch({
-          center: withAuto(store.center, data),
-          ...(options.closeEditor === false ? {} : { editingId: null }),
-        })
-      }
+      if (!data) throw new Error(t('后端未返回定时签到数据'))
+      patch({
+        center: withAuto(store.center, data),
+        ...(options.closeEditor === false ? {} : { editingId: null }),
+      })
+      return true
     },
     { success: options.silent ? undefined : '✅ 已保存', reload: false, failure: '保存失败' },
   )
-  void loadCenter()
+  if (saved) void loadCenter()
+  return saved === true
 }
 
 /** 删除一条定时条目 */

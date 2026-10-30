@@ -122,8 +122,7 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
     .map_err(|error| StartupFailure::other(format!("网关初始化任务失败: {error}")))?
     .map_err(StartupFailure::other)?;
 
-    // 面板访问控制的库句柄注入（桌面不注册管理员 → 该体系不启用，行为不变；
-    // 与容器共用数据目录且注册过时，桌面管理 API 需要 Key —— 壳自动携带）
+    // 访问控制与桌面壳使用同一份进程内会话状态。
     server::access::attach_db(state.db().cloned());
 
     // 管理界面（Tauri 窗口）跑在本机：OAuth 回调可以占本机登记端口，
@@ -208,6 +207,7 @@ pub async fn ensure_ready(app: &AppHandle) -> Result<(), StartupFailure> {
         if is_ready(port).await {
             let scope = if lan.lan_access { "，局域网访问已开启" } else { "" };
             server::logging::log("[Server]", &format!("服务已就绪（127.0.0.1:{port}{scope}）"));
+            crate::panel_session::ensure_local_access().map_err(StartupFailure::other)?;
             // 起来了就清掉上一次的失败记录：那条记录描述的是「之前起不来」，
             // 留着会让界面在网关正常运行时仍显示「端口被占用」——
             // 用户刚结束完进程重启，看到这个只会以为没生效。
@@ -697,6 +697,7 @@ fn cleanup_legacy_resources() {
 /// 直接返回 —— 这一点与旧版 `child.take()` 的行为一致。
 pub fn shutdown(state: &AppState) {
     crate::startup::stop();
+    crate::panel_session::clear();
     // 定时签到调度：在停服务之前先停它（对照 Node 版 closeAll 里的
     // `autoCheckin.stop(); closeDispatchers();`）。
     //
@@ -706,10 +707,6 @@ pub fn shutdown(state: &AppState) {
     // 会整段跳过，留下一个仍在轮询的循环。stop 自身也是幂等的（task 取走后
     // 再调直接返回），所以不破坏本函数「重复调用无副作用」的既有语义。
     server::core::auto_checkin::stop_global();
-    // 代理内核（mihomo sidecar）：停服务之前先杀它 —— 它是独立子进程，
-    // 父进程退出不会自动带走（Windows 上尤其如此），留着会占着监听端口，
-    // 下次启动还得清理（启动时也有兜底清理，但正常退出就该在这里杀干净）。
-    server::core::sub_kernel::shutdown();
 
     let Ok(mut guard) = state.backend.lock() else {
         return;

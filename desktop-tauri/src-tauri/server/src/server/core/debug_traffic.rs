@@ -211,17 +211,6 @@ pub fn get(id: &str) -> Option<TrafficEntry> {
     db()?.with(|conn| sql::select_one(conn, id)).and_then(Result::ok).flatten()
 }
 
-/// 清空（设置页 / 请求日志「清空」时一并调用）
-pub fn clear() {
-    let Some(db) = db() else {
-        return;
-    };
-    // 失败只打控制台（理由同 `record`）
-    if let Some(Err(error)) = db.with(|conn| sql::delete_all(conn)) {
-        eprintln!("[Debug] 调试报文清空失败: {error}");
-    }
-}
-
 /// 一条原始报文记录。
 ///
 /// 字段用 `Option` 表达「这一侧没采到」：请求发不出去时没有响应侧，

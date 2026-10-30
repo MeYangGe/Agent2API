@@ -51,6 +51,8 @@
   "可用账号按请求轮换；开启会话粘性时同一会话优先留在原账号。": "Alterne as contas disponíveis a cada solicitação. Com aderência de sessão ativada, a mesma sessão prioriza sua conta anterior.",
   "同号重试 {n} 次": "{n} novas tentativas na mesma conta",
   "同账号内部重试": "Novas tentativas internas na mesma conta",
+  "启用提供商中的第 {rank} 顺位；当前可用候选第 {effective} 顺位。": "Prioridade {rank} entre os provedores ativos; prioridade {effective} entre os candidatos disponíveis no momento.",
+  "启用提供商中的第 {rank} 顺位；当前没有可用候选账号。": "Prioridade {rank} entre os provedores ativos; nenhuma conta candidata está disponível no momento.",
   "后备账号": "Conta de reserva",
   "后过期": "até expirar",
   "命中 {n} 次": "{n} acertos",

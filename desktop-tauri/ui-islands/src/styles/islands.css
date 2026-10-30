@@ -5,6 +5,7 @@
 @import '../../../ui-kit/styles/responsive.css';
 @import '../../../ui-kit/styles/request-status.css';
 @import '../../../ui-shared/provider-docs.css';
+@import '../../../ui/css/page-checkin-schedule.css';
 
 @source '../../../ui-kit/src';
 @source '../../../ui-shared';

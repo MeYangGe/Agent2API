@@ -202,11 +202,6 @@ pub(super) fn select_one(conn: &Connection, id: &str) -> rusqlite::Result<Option
     }
 }
 
-/// 清空全表
-pub(super) fn delete_all(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM debug_traffic", [])
-}
-
 /// 只按留存条数淘汰旧记录，不因单条报文过大删除它。
 pub(super) fn enforce_limits(conn: &Connection) -> rusqlite::Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM debug_traffic", [], |row| row.get(0))?;

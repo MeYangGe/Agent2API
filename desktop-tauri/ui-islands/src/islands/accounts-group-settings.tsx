@@ -67,6 +67,19 @@ function ruleMeta(key: GroupSortRule['key']): {
   }
 }
 
+export function activeGroupSortRules(provider: string, rules: GroupSortRule[]): GroupSortRule[] {
+  return rules.filter(rule => rule.on && (rule.key !== 'credit' || supportsCreditExpiry(provider)))
+}
+
+export function manualOrderBlockedMessage(rules: GroupSortRule[]): string {
+  const credit = rules.some(rule => rule.on && rule.key === 'credit')
+  const added = rules.some(rule => rule.on && rule.key === 'added')
+  if (credit && added) return t('无法拖动：当前已按积分到期时间和账号添加时间自动排序。请先在「消耗顺序」中关闭这两项规则，再手动调整。')
+  if (credit) return t('无法拖动：当前已按积分到期时间自动排序。请先在「消耗顺序」中关闭该规则，再手动调整。')
+  if (added) return t('无法拖动：当前已按账号添加时间自动排序。请先在「消耗顺序」中关闭该规则，再手动调整。')
+  return t('自动消耗排序已启用，请先关闭规则再手动调整')
+}
+
 /**
  * 规则摘要（分组带上那枚小标记、弹窗里的「当前规则」都用它）。
  * 只列**勾选的**那些 —— 关掉的规则不参与比较，写进摘要只会让「当前规则」说谎。
