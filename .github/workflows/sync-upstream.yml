@@ -1,0 +1,136 @@
+# 同步上游（全量）：把本仓库所有分支与标签强制对齐 aimod-cc/Agent2API
+#
+# 触发：
+#   · schedule           每 30 分钟一次（GitHub 定时任务可能延迟几分钟，属正常漂移）
+#   · workflow_dispatch  随时手动触发（Actions 页 → 本工作流 → Run workflow）
+#
+# 推送凭据：SSH 部署密钥（仓库 Settings → Deploy keys 的 sync-bot，读写），
+# 私钥封存在 Secret SYNC_SSH_KEY。**为什么不用 GITHUB_TOKEN**：它没有
+# `workflows` 权限（Actions 的 permissions 列表里就没有这一项），任何会改动
+# `.github/workflows/**` 的推送都会被 GitHub 拒绝 —— 而本工作流每轮都要把
+# 自己注回 main，上游改他们的 CI 时镜像推送也会碰工作流文件。部署密钥没有
+# 这层 App 令牌限制。
+#
+# 覆盖范围（「保持一致」的完整语义）：
+#   · 所有分支   refs/heads/*：force 对齐；上游删掉的分支在本仓同步删除（--prune）
+#   · 所有标签   refs/tags/*：force 对齐并 prune（fork 建仓不带标签，首轮补齐全部）
+#   · 默认分支 main 在镜像之上**仅多一处本地差异**：本工作流文件自身
+#     （纯镜像会把它抹掉，所以每轮先从本仓现 main 取出留档，镜像后再注回提交；
+#     上游没动 → 重建提交内容确定、SHA 不变，push 为空操作，无噪音提交）。
+#
+# ⚠️ force + prune 的含义（有意为之，先读再改）：
+#   · 本仓任何分支上手工做的提交，下一轮都会被上游覆盖；
+#   · 本仓自建的分支（上游没有的）会被删除。
+#   唯一安全的本地改动位是 main 的工作流注入提交。
+#
+# 为什么不用 GitHub 的「Sync fork」接口：那只在能快进时可用，本仓库 main
+# 带着工作流提交必然分叉；这里每轮重建「上游 + 工作流」的确定提交，永远收敛。
+
+name: 同步上游（全量）
+
+on:
+  # GitHub 的排程在高峰时段会延迟甚至整轮丢弃（实测 */30 在 4.5 小时里
+  # 只活了一次）—— 用 */10 提高存活密度：即使被丢一半，一小时仍有 3~6 次
+  # 机会。每次运行约 15~25 秒，分钟数开销可忽略。
+  schedule:
+    - cron: '*/10 * * * *'
+  # 手动触发（Actions 页），也可随时用一条 curl 拉起：
+  #   curl -X POST -H "Authorization: Bearer <token>"   #     https://api.github.com/repos/MeYangGe/Agent2API/dispatches   #     -d '{"event_type":"sync-upstream"}'
+  repository_dispatch:
+    types: [sync-upstream]
+  workflow_dispatch: {}
+
+permissions:
+  # 不给 contents：git 推送走 SSH 部署密钥，不用 GITHUB_TOKEN。
+  # actions:write 只给「禁用上游 CI」的扫尾步骤。
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: true
+
+env:
+  UPSTREAM: https://github.com/aimod-cc/Agent2API.git
+  TARGET: git@github.com:MeYangGe/Agent2API.git
+  WORKFLOW_PATH: .github/workflows/sync-upstream.yml
+  KEEP_COMMIT_MESSAGE: 'chore(sync): 保留同步工作流（上游对齐由 Actions 维护）'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 禁用镜像带来的上游 CI（推送前扫尾）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 镜像会把上游的 build / docker / warm-cache 等 CI 一起带进来，而
+          # SSH 推送（非 GITHUB_TOKEN）会触发它们：在镜像仓库里这些构建没有
+          # 意义（产物发布在上游），白烧 Actions 分钟数。推送前先把除本工作流
+          # 外的一切 active 工作流禁用；本轮推送若带进**新的**上游工作流，
+          # 那一次引入推送会触发它一回，随后被下一轮（和本轮的推送后扫尾）禁掉。
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows?per_page=100"             --jq ".workflows[] | select(.state == \"active\") | select(.path != \"${WORKFLOW_PATH}\") | .id"           | while read -r id; do
+              gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${id}/disable" >/dev/null                 && echo "已禁用上游工作流 #${id}"
+            done
+          echo '扫尾完成'
+
+      - name: 镜像所有分支与标签，并保留工作流文件
+        env:
+          SYNC_SSH_KEY: ${{ secrets.SYNC_SSH_KEY }}
+        run: |
+          set -euxo pipefail
+
+          # ── 0) 部署密钥就位 ────────────────────────────────────
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SYNC_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes"
+
+          # ── 1) 上游全量克隆（带重试）────────────────────────────
+          for attempt in 1 2 3; do
+            git clone --bare --quiet "$UPSTREAM" repo.git && break
+            echo "clone 失败（第 ${attempt}/3 次），10 秒后重试"
+            sleep 10
+          done
+          [ -d repo.git ] || { echo "上游克隆最终失败"; exit 1; }
+          cd repo.git
+          git config user.name  sync-bot
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          # refs/pull/* 是 GitHub 只读命名空间，镜像推送前先摘掉
+          git for-each-ref --format 'delete %(refname)' refs/pull | git update-ref --stdin || true
+
+          DEFAULT_BRANCH=$(git symbolic-ref --short HEAD)
+
+          # ── 2) 留档本仓 main 上的工作流文件（镜像会覆盖 main）────
+          git remote add target "$TARGET"
+          KEEP_OK=0
+          if git fetch --quiet target "+refs/heads/main:refs/sync/keep-main"; then
+            if git show "refs/sync/keep-main:$WORKFLOW_PATH" > /tmp/keep-workflow.yml 2>/dev/null; then
+              KEEP_OK=1
+            fi
+          fi
+
+          # ── 3) 全量镜像：所有分支 + 所有标签，force + prune ──────
+          #    prune 让「上游已删除的分支/标签」在本仓同步消失
+          git push --force --prune --quiet target \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+
+          # ── 4) 默认分支：上游之上重建「保留工作流」提交 ──────────
+          if [ "$KEEP_OK" = 1 ]; then
+            git worktree add --quiet ../wt "$DEFAULT_BRANCH"
+            cd ../wt
+            mkdir -p "$(dirname "$WORKFLOW_PATH")"
+            cp /tmp/keep-workflow.yml "$WORKFLOW_PATH"
+            git add "$WORKFLOW_PATH"
+            if ! git diff --cached --quiet; then
+              git commit -qm "$KEEP_COMMIT_MESSAGE"
+            fi
+            git push --force --quiet target "HEAD:refs/heads/$DEFAULT_BRANCH"
+            echo "默认分支 $DEFAULT_BRANCH = 上游 $(git rev-parse HEAD~1) + 工作流保留提交 $(git rev-parse HEAD)"
+          else
+            echo "::warning::本仓 main 上没有可保留的工作流文件（首轮或被外部改动），默认分支保持纯上游镜像 —— 定时触发将失效，需要重新提交本文件"
+          fi
+
+      - name: 汇报
+        run: echo '全量同步完成（所有分支 + 所有标签 + 工作流自保留，SSH 部署密钥推送）'
